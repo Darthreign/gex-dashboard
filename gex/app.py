@@ -81,8 +81,9 @@ def _bar_width(strikes: np.ndarray) -> float:
 
 
 def exposure_fig(df: pd.DataFrame, spot: float, zg: float | None, col: str, title: str,
-                 levels: pd.DataFrame | None = None, hvl: float | None = None) -> go.Figure:
-    lo, hi = spot * (1 - SETTINGS.strike_window), spot * (1 + SETTINGS.strike_window)
+                 levels: pd.DataFrame | None = None, hvl: float | None = None,
+                 window: float = 0.04) -> go.Figure:
+    lo, hi = spot * (1 - window), spot * (1 + window)
     d = df[df["strike"].between(lo, hi)]
     agg = metrics.exposure_by_strike(d, col)
     if agg.empty:
@@ -289,6 +290,15 @@ def create_app() -> Dash:
                                 inputStyle={"marginRight": "4px"},
                                 labelStyle={"marginRight": "16px", "color": C["ink2"]},
                             ),
+                            dcc.RadioItems(
+                                id="window",
+                                options=[{"label": "±2%", "value": 0.02},
+                                         {"label": "±4%", "value": 0.04},
+                                         {"label": "±10%", "value": 0.10}],
+                                value=0.04, inline=True,
+                                inputStyle={"marginRight": "4px"},
+                                labelStyle={"marginRight": "12px", "color": C["ink2"]},
+                            ),
                         ],
                         style={"display": "flex", "gap": "32px", "alignItems": "center"},
                     ),
@@ -357,9 +367,10 @@ def create_app() -> Dash:
          Output("dex-strike", "figure"), Output("flow", "figure"),
          Output("gex-history", "figure"), Output("spot-zg", "figure"),
          Output("smile", "figure")],
-        [Input("tick", "n_intervals"), Input("symbol", "value"), Input("bucket", "value")],
+        [Input("tick", "n_intervals"), Input("symbol", "value"),
+         Input("bucket", "value"), Input("window", "value")],
     )
-    def refresh(_, symbol, bucket):
+    def refresh(_, symbol, bucket, window):
         st = STATE.get(symbol)
         with STATE.lock:
             df = st.enriched
@@ -385,8 +396,9 @@ def create_app() -> Dash:
             build_cards(symbol),
             levels_strip(levels, hvl, zg),
             exposure_fig(sel, snap.spot, zg, "gex", f"Gamma Exposure par strike — {bucket}",
-                         levels=levels, hvl=hvl),
-            exposure_fig(sel, snap.spot, zg, "dex", f"Delta Exposure par strike — {bucket}"),
+                         levels=levels, hvl=hvl, window=window),
+            exposure_fig(sel, snap.spot, zg, "dex", f"Delta Exposure par strike — {bucket}",
+                         window=window),
             flow_fig(symbol),
             history_fig(symbol),
             spot_zg_fig(symbol),
