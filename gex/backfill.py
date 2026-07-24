@@ -26,6 +26,7 @@ import argparse
 import io
 import logging
 import os
+import re
 import sys
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -43,6 +44,16 @@ DATASET = "OPRA.PILLAR"
 PARENTS = ["SPX.OPT", "SPXW.OPT", "NDX.OPT", "NDXP.OPT"]
 ROOT_TO_SYMBOL = {"SPX": "SPX", "SPXW": "SPX", "NDX": "NDX", "NDXP": "NDX"}
 RAW_DIR_NAME = "databento"
+
+# Databento signale la borne réellement disponible dans ses erreurs 422.
+_AVAIL_RE = re.compile(r"available up to '([^']+)'")
+
+
+def _avail_end_from_error(e) -> str | None:
+    """Extrait la borne de disponibilité d'une erreur data_end_after_available_end,
+    reformatée en ISO 8601 avec 'T' (un espace se ferait mutiler dans l'URL)."""
+    m = _AVAIL_RE.search(str(e))
+    return pd.Timestamp(m.group(1)).isoformat() if m else None
 
 
 def _api_key() -> str:
@@ -70,22 +81,35 @@ def _raw_path(schema: str, start: date, end: date) -> Path:
     return p
 
 
-def download(client, schema: str, start: date, end: date) -> Path:
-    """Télécharge un schéma vers un fichier DBN local (skip si déjà présent)."""
+def download(client, schema: str, start: date, end: date, query_end=None) -> Path:
+    """Télécharge un schéma vers un fichier DBN local (skip si déjà présent).
+
+    `end` sert au nommage/cache du fichier ; `query_end` (si fourni) est la
+    borne réellement envoyée à l'API — utile pour caler sur la disponibilité
+    du dataset sans changer le nom du cache.
+    """
     path = _raw_path(schema, start, end)
     if path.exists():
         log.info("%s : déjà téléchargé (%s)", schema, path.name)
         return path
-    log.info("Téléchargement %s %s→%s …", schema, start, end)
-    from databento.common.error import BentoServerError
+    qend = query_end if query_end is not None else end
+    log.info("Téléchargement %s %s→%s …", schema, start, qend)
+    from databento.common.error import BentoClientError, BentoServerError
     import time as _time
     for attempt in range(4):
         try:
             data = client.timeseries.get_range(
                 dataset=DATASET, symbols=PARENTS, stype_in="parent",
-                schema=schema, start=str(start), end=str(end),
+                schema=schema, start=str(start), end=str(qend),
             )
             break
+        except BentoClientError as e:
+            # borne encore trop tardive pour ce schéma précis : recale une fois
+            avail = _avail_end_from_error(e)
+            if avail is None or attempt == 3:
+                raise
+            log.warning("%s : borne recalée sur %s", schema, avail)
+            qend = avail
         except BentoServerError as e:
             if attempt == 3:
                 raise
@@ -281,6 +305,26 @@ def run(daily_days: int, intraday_days: int, max_cost: float, dry_run: bool,
     daily_start = end - timedelta(days=daily_days)
     intra_start = end - timedelta(days=intraday_days)
 
+    # Cale la borne de fin sur la disponibilité RÉELLE : get_dataset_range est
+    # en retard sur la publication du jour le plus récent, donc on sonde via un
+    # devis (gratuit) — sur dépassement, Databento renvoie la borne réelle dans
+    # le message d'erreur, qu'on reformate en ISO (le 'T' évite que l'espace
+    # soit mutilé dans l'URL). Robuste pour les runs quotidiens et la tâche 10h.
+    from databento.common.error import BentoClientError
+
+    query_end = end
+    probe_schema = "ohlcv-1m" if intraday_days > 0 else "ohlcv-1d"
+    probe_start = intra_start if intraday_days > 0 else daily_start
+    try:
+        client.metadata.get_cost(dataset=DATASET, symbols=PARENTS, stype_in="parent",
+                                 schema=probe_schema, start=str(probe_start), end=str(end))
+    except BentoClientError as e:
+        avail = _avail_end_from_error(e)
+        if avail is None:
+            raise
+        query_end = avail
+        log.info("Borne de fin calée sur la disponibilité réelle : %s", query_end)
+
     plan = [("definition", daily_start), ("statistics", daily_start),
             ("ohlcv-1d", daily_start)]
     if intraday_days > 0:
@@ -292,8 +336,8 @@ def run(daily_days: int, intraday_days: int, max_cost: float, dry_run: bool,
             continue
         c = client.metadata.get_cost(dataset=DATASET, symbols=PARENTS,
                                      stype_in="parent", schema=schema,
-                                     start=str(start), end=str(end))
-        log.info("Devis %-12s %s→%s : %.2f $", schema, start, end, c)
+                                     start=str(start), end=str(query_end))
+        log.info("Devis %-12s %s→%s : %.2f $", schema, start, query_end, c)
         total += c
     log.info("Coût total des téléchargements restants : %.2f $ (plafond %.2f $)", total, max_cost)
     if total > max_cost:
@@ -302,7 +346,8 @@ def run(daily_days: int, intraday_days: int, max_cost: float, dry_run: bool,
         log.info("--dry-run : arrêt avant téléchargement.")
         return
 
-    paths = {schema: download(client, schema, start, end) for schema, start in plan}
+    paths = {schema: download(client, schema, start, end, query_end=query_end)
+             for schema, start in plan}
 
     defs = load_definitions(paths["definition"])
     oi = load_open_interest(paths["statistics"])
