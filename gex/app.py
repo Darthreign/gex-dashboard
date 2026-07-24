@@ -36,6 +36,19 @@ C = {
 
 FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif'
 
+# Fuseau local de la machine — tous les axes temps sont affichés en heure locale
+LOCAL_TZ = datetime.now().astimezone().tzinfo
+
+
+def to_local(ts: pd.Series) -> pd.Series:
+    """Timestamps stockés naïfs en heure de New York → heure locale (naïve)."""
+    return (
+        pd.to_datetime(ts)
+        .dt.tz_localize(ET, ambiguous="NaT", nonexistent="NaT")
+        .dt.tz_convert(LOCAL_TZ)
+        .dt.tz_localize(None)
+    )
+
 
 def base_layout(title: str, height: int = 420) -> dict:
     return dict(
@@ -53,9 +66,9 @@ def base_layout(title: str, height: int = 420) -> dict:
     )
 
 
-def empty_fig(msg: str = "En attente du premier pull CBOE…") -> go.Figure:
+def empty_fig(msg: str = "En attente du premier pull CBOE…", title: str = "") -> go.Figure:
     fig = go.Figure()
-    fig.update_layout(**base_layout(""))
+    fig.update_layout(**base_layout(title))
     fig.add_annotation(text=msg, showarrow=False, font=dict(color=C["muted"], size=13))
     return fig
 
@@ -70,7 +83,7 @@ def exposure_fig(df: pd.DataFrame, spot: float, zg: float | None, col: str, titl
     d = df[df["strike"].between(lo, hi)]
     agg = metrics.exposure_by_strike(d, col)
     if agg.empty:
-        return empty_fig("Pas de données dans la fenêtre de strikes")
+        return empty_fig("Pas de données dans la fenêtre de strikes", title)
     net = agg["net"].to_numpy() / 1e9
     strikes = agg["strike"].to_numpy()
     colors = np.where(net >= 0, C["pos"], C["neg"])
@@ -99,12 +112,15 @@ def exposure_fig(df: pd.DataFrame, spot: float, zg: float | None, col: str, titl
     return fig
 
 
+FLOW_TITLE = "Flux delta options (proxy Δvolume×δ, barres 1 min — délayé ~15 min)"
+
+
 def flow_fig(symbol: str) -> go.Figure:
     day = datetime.now(ET).strftime("%Y-%m-%d")
     flows = store.load_flows(symbol, day)
     if flows.empty:
-        return empty_fig("Aucun flux enregistré aujourd'hui (marché fermé ?)")
-    ts = pd.to_datetime(flows["timestamp"])
+        return empty_fig("Aucun flux enregistré aujourd'hui (marché fermé ?)", FLOW_TITLE)
+    ts = to_local(flows["timestamp"])
     vals = flows["flow_total"].to_numpy() / 1e6
     cum = np.cumsum(vals)
     fig = go.Figure()
@@ -114,7 +130,7 @@ def flow_fig(symbol: str) -> go.Figure:
     fig.add_scatter(x=ts, y=cum, mode="lines", name="Cumul", yaxis="y2",
                     line=dict(color=C["ink2"], width=2),
                     hovertemplate="%{x|%H:%M}<br>Cumul: %{y:.1f} $M<extra></extra>")
-    lay = base_layout("Flux delta options (proxy Δvolume×δ, barres 1 min — délayé ~15 min)", height=300)
+    lay = base_layout(FLOW_TITLE, height=300)
     # cumul en sous-échelle séparée sans second axe visible serait trompeur :
     # on empile deux panneaux partageant l'axe temps
     lay["yaxis"] = dict(domain=[0.55, 1.0], gridcolor=C["grid"], zerolinecolor=C["axis"],
@@ -126,25 +142,31 @@ def flow_fig(symbol: str) -> go.Figure:
     return fig
 
 
+HIST_TITLE = "GEX net — historique ($Bn par 1%)"
+
+
 def history_fig(symbol: str) -> go.Figure:
     hist = store.load_history(symbol)
     if hist.empty or len(hist) < 2:
-        return empty_fig("Historique insuffisant (revenez après quelques snapshots)")
-    ts = pd.to_datetime(hist["timestamp"])
+        return empty_fig("Historique insuffisant (revenez après quelques snapshots)", HIST_TITLE)
+    ts = to_local(hist["timestamp"])
     fig = go.Figure()
     fig.add_scatter(x=ts, y=hist["net_gex"] / 1e9, mode="lines", name="GEX net",
                     line=dict(color=C["cat"][0], width=2),
                     hovertemplate="%{x|%d/%m %H:%M}<br>GEX net: %{y:.1f} $Bn<extra></extra>")
-    lay = base_layout("GEX net — historique ($Bn par 1%)", height=300)
+    lay = base_layout(HIST_TITLE, height=300)
     fig.update_layout(**lay)
     return fig
+
+
+SPOTZG_TITLE = "Spot vs Zero Gamma"
 
 
 def spot_zg_fig(symbol: str) -> go.Figure:
     hist = store.load_history(symbol)
     if hist.empty or len(hist) < 2:
-        return empty_fig("Historique insuffisant")
-    ts = pd.to_datetime(hist["timestamp"])
+        return empty_fig("Historique insuffisant", SPOTZG_TITLE)
+    ts = to_local(hist["timestamp"])
     fig = go.Figure()
     fig.add_scatter(x=ts, y=hist["spot"], mode="lines", name="Spot",
                     line=dict(color=C["cat"][0], width=2),
@@ -152,7 +174,7 @@ def spot_zg_fig(symbol: str) -> go.Figure:
     fig.add_scatter(x=ts, y=hist["zero_gamma"], mode="lines", name="Zero gamma",
                     line=dict(color=C["zg"], width=2, dash="dash"),
                     hovertemplate="%{x|%d/%m %H:%M}<br>Zero γ: %{y:.0f}<extra></extra>")
-    lay = base_layout("Spot vs Zero Gamma", height=300)
+    lay = base_layout(SPOTZG_TITLE, height=300)
     lay["showlegend"] = True
     lay["legend"] = dict(orientation="h", y=1.12, font=dict(color=C["ink2"]))
     fig.update_layout(**lay)
@@ -166,7 +188,7 @@ def smile_fig(df: pd.DataFrame, spot: float) -> go.Figure:
     otm = d[((d["type"] == "P") & (d["strike"] <= spot)) | ((d["type"] == "C") & (d["strike"] > spot))]
     expiries = sorted(otm["expiry"].unique())[:4]
     if not expiries:
-        return empty_fig("Pas d'IV exploitable")
+        return empty_fig("Pas d'IV exploitable", "Skew IV (options OTM) par expiration")
     fig = go.Figure()
     for i, exp in enumerate(expiries):
         e = otm[otm["expiry"] == exp].sort_values("strike")
@@ -210,8 +232,10 @@ def build_cards(symbol: str) -> list:
         d = s.spot - s.zero_gamma
         zg_sub = f"spot {'+' if d >= 0 else ''}{d:.0f} pts ({'γ+ ' if d >= 0 else 'γ- '}régime)"
     gex_color = C["pos"] if s.net_gex >= 0 else C["neg"]
+    feed_local = s.timestamp.replace(tzinfo=ET).astimezone(LOCAL_TZ)
     return [
-        card("Spot (délayé 15 min)", f"{s.spot:,.0f}", f"feed {s.timestamp:%H:%M:%S} ET"),
+        card("Spot (délayé 15 min)", f"{s.spot:,.0f}",
+             f"feed {feed_local:%H:%M:%S} ({s.timestamp:%H:%M} ET)"),
         card("GEX net / 1%", f"{s.net_gex / 1e9:+.1f} $Bn",
              "stabilisant" if s.net_gex >= 0 else "déstabilisant", accent=gex_color),
         card("Zero Gamma", zg_txt, zg_sub, accent=C["zg"]),
@@ -293,8 +317,15 @@ def create_app() -> Dash:
             snap = st.snapshot
             summary = st.summary
         if df is None or snap is None:
-            e = empty_fig()
-            return build_cards(symbol), e, e, e, e, e, e
+            return (
+                build_cards(symbol),
+                empty_fig(title="Gamma Exposure par strike"),
+                empty_fig(title="Delta Exposure par strike"),
+                empty_fig(title=FLOW_TITLE),
+                empty_fig(title=HIST_TITLE),
+                empty_fig(title=SPOTZG_TITLE),
+                empty_fig(title="Skew IV (options OTM) par expiration"),
+            )
         today = datetime.now(ET).date()
         sel = df[metrics.bucket_mask(df, bucket, today)]
         zg = summary.zero_gamma if summary else None
