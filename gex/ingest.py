@@ -10,7 +10,10 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime, date
+from datetime import datetime, date, timezone
+from zoneinfo import ZoneInfo
+
+_ET = ZoneInfo("America/New_York")
 
 import pandas as pd
 import requests
@@ -87,7 +90,12 @@ def parse_chain(symbol: str, raw: dict, fetched_at: datetime) -> ChainSnapshot:
     return ChainSnapshot(
         symbol=symbol,
         spot=float(data["current_price"]),
-        feed_timestamp=datetime.strptime(raw["timestamp"], "%Y-%m-%d %H:%M:%S"),
+        # le champ timestamp du feed est en UTC (vérifié empiriquement) —
+        # converti en heure de New York, stocké naïf pour affichage/historique
+        feed_timestamp=datetime.strptime(raw["timestamp"], "%Y-%m-%d %H:%M:%S")
+        .replace(tzinfo=timezone.utc)
+        .astimezone(_ET)
+        .replace(tzinfo=None),
         fetched_at=fetched_at,
         options=df,
     )

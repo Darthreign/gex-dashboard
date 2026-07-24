@@ -25,15 +25,13 @@ YEAR_SECONDS = 365.0 * 24 * 3600
 EXPIRY_BUCKETS = ["0DTE", "Semaine", "Mois", "Tout"]
 
 
-def time_to_expiry_years(expiries: pd.Series, now_et: datetime) -> np.ndarray:
-    """Années jusqu'à l'expiration, échéance posée à 16:00 ET.
+def seconds_to_expiry(expiries: pd.Series, now_et: datetime) -> np.ndarray:
+    """Secondes jusqu'à l'expiration, échéance posée à 16:00 ET.
 
-    Pour les 0DTE en séance, la fraction de journée restante est conservée
-    (plancher 5 minutes pour éviter les gammas explosifs à la cloche).
+    Négatif = contrat expiré (0DTE après la cloche) — à exclure.
     """
     expiry_dt = pd.to_datetime(expiries).dt.tz_localize(ET) + pd.Timedelta(hours=16)
-    secs = (expiry_dt - now_et).dt.total_seconds().to_numpy()
-    return np.maximum(secs, 300.0) / YEAR_SECONDS
+    return (expiry_dt - now_et).dt.total_seconds().to_numpy()
 
 
 def enrich(snapshot: ChainSnapshot, now_et: datetime | None = None) -> pd.DataFrame:
@@ -44,9 +42,13 @@ def enrich(snapshot: ChainSnapshot, now_et: datetime | None = None) -> pd.DataFr
     """
     now_et = now_et or datetime.now(ET)
     df = snapshot.options.copy()
-    df = df[df["expiry"] >= now_et.date()].reset_index(drop=True)
+    # exclut les contrats expirés (dont les 0DTE du jour après 16:00 ET,
+    # dont les quotes résiduelles polluent GEX 0DTE et skew IV)
+    secs = seconds_to_expiry(df["expiry"], now_et)
+    df = df[secs > 0].reset_index(drop=True)
     s = snapshot.spot
-    t = time_to_expiry_years(df["expiry"], now_et)
+    # plancher 5 min pour éviter les gammas explosifs à la cloche
+    t = np.maximum(secs[secs > 0], 300.0) / YEAR_SECONDS
     iv = df["iv"].to_numpy()
     valid = iv > 1e-4
 
