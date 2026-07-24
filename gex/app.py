@@ -290,6 +290,13 @@ def create_app() -> Dash:
                                 inputStyle={"marginRight": "4px"},
                                 labelStyle={"marginRight": "16px", "color": C["ink2"]},
                             ),
+                            dcc.Checklist(
+                                id="majors",
+                                options=[{"label": "Murs majeurs seulement", "value": "on"}],
+                                value=[], inline=True,
+                                inputStyle={"marginRight": "4px"},
+                                labelStyle={"color": C["ink2"]},
+                            ),
                             dcc.RadioItems(
                                 id="window",
                                 options=[{"label": "±2%", "value": 0.02},
@@ -368,9 +375,10 @@ def create_app() -> Dash:
          Output("gex-history", "figure"), Output("spot-zg", "figure"),
          Output("smile", "figure")],
         [Input("tick", "n_intervals"), Input("symbol", "value"),
-         Input("bucket", "value"), Input("window", "value")],
+         Input("bucket", "value"), Input("window", "value"),
+         Input("majors", "value")],
     )
-    def refresh(_, symbol, bucket, window):
+    def refresh(_, symbol, bucket, window, majors):
         st = STATE.get(symbol)
         with STATE.lock:
             df = st.enriched
@@ -391,6 +399,9 @@ def create_app() -> Dash:
         sel = df[metrics.bucket_mask(df, bucket, today)]
         zg = summary.zero_gamma if summary else None
         levels = metrics.top_gex_levels(df)
+        if majors and not levels.empty:
+            # ne garde que les murs pesant au moins 25 % du plus fort
+            levels = levels[levels["gex"].abs() >= 0.25 * levels["gex"].abs().max()]
         hvl = metrics.zero_gamma(df, snap.spot, weight_col="volume")
         return (
             build_cards(symbol),
