@@ -70,7 +70,12 @@ def enrich(snapshot: ChainSnapshot, now_et: datetime | None = None) -> pd.DataFr
 
 def bucket_mask(df: pd.DataFrame, bucket: str, today: date) -> pd.Series:
     if bucket == "0DTE":
-        return df["expiry"] == today
+        # échéance la plus proche : le vrai 0DTE en séance (elle == today),
+        # la prochaine séance hors séance/week-end (cohérent avec top_gex_levels
+        # et le bandeau de niveaux, qui utilisent aussi l'échéance min).
+        if df.empty:
+            return pd.Series(False, index=df.index)
+        return df["expiry"] == df["expiry"].min()
     if bucket == "Semaine":
         return df["expiry"] <= today + timedelta(days=7)
     if bucket == "Mois":
