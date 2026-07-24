@@ -1,5 +1,10 @@
 # GEX Dashboard — analyse Gamma/Delta Exposure (SPX/ES, NDX/NQ)
 
+[Licence MIT](LICENSE) — outil d'**analyse uniquement** : pas de trading,
+pas d'exécution, pas de conseil en investissement. Chaque instance tire ses
+propres données depuis l'endpoint delayed public de CBOE ; ce projet ne
+rediffuse aucune donnée de marché.
+
 Dashboard **d'analyse uniquement** (pas de trading) qui reconstruit les métriques
 de structure de marché façon SpotGamma à partir des chaînes d'options CBOE :
 Gamma Exposure par strike, Delta Exposure, GEX net, niveau Zero Gamma,
@@ -23,6 +28,27 @@ python -m venv .venv
 ```
 
 Tests : `.venv\Scripts\python -m pytest tests/`
+
+## Fonctionnalités
+
+- GEX / DEX par strike (fenêtre réglable ±2/4/10 %), calls/puts au survol
+- Niveaux 0DTE tracés : **GEX1-5** (murs de gamma), **Flip** (zero gamma,
+  pondéré open interest), **HVL** (bascule pondérée par le volume du jour)
+- GEX net, P/C ratios, skew IV par expiration, vue par échéance (0DTE/semaine/mois)
+- Flux delta 1 min (proxy Δvolume×δ) avec sélecteur de journée
+- Historique GEX net & spot vs zero gamma (s'accumule automatiquement)
+- Backfill historique optionnel via Databento (`gex/backfill.py`, payant,
+  devis affiché avant tout téléchargement)
+- Serveur MCP (`gex/mcp_server.py`) pour interroger les données depuis Claude
+
+## Backfill Databento (optionnel)
+
+Copier `.env.example`, renseigner `DATABENTO_API_KEY`, puis par ex. :
+`python -m gex.backfill --daily-days 31 --intraday-days 7 --max-cost 40`.
+Les fichiers bruts sont conservés dans `data/databento/` : relancer ne
+refacture jamais ce qui est déjà téléchargé. La passerelle Databento peut
+renvoyer des 504 sur les grosses requêtes : préférer des tranches d'une
+semaine (`--end` + `--daily-days 7`).
 
 ## Architecture
 
