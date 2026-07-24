@@ -2,6 +2,7 @@
 
 Palette : polarité (GEX/flux +/-) en diverging bleu↔rouge, identité
 (calls/puts, expirations) sur les slots catégoriels — thème sombre.
+Interface FR/EN (gex/i18n.py) ; termes de trading standards dans les deux.
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ from dash.dependencies import Input, Output, State
 
 from . import metrics, store
 from .config import SETTINGS, UNDERLYINGS
+from .i18n import LANGS, t, wall_labels
 from .metrics import ET, EXPIRY_BUCKETS
 from .scheduler import STATE
 
@@ -30,8 +32,8 @@ C = {
     "pos": "#3987e5",   # GEX positif / flux acheteur (bleu)
     "neg": "#e66767",   # GEX négatif / flux vendeur (rouge)
     "spot": "#ffffff",
-    "zg": "#c98500",    # jaune sombre — niveau zero gamma
-    "lvl": "#9085e9",   # violet — niveaux GEX 0DTE (GEX1..5)
+    "zg": "#c98500",    # jaune sombre — Gamma Flip
+    "lvl": "#9085e9",   # violet — niveaux GEX 0DTE
     "hvl": "#199e70",   # aqua — HVL (bascule pondérée par le volume du jour)
     "cat": ["#3987e5", "#d95926", "#199e70", "#c98500"],  # slots 1-4
 }
@@ -40,6 +42,9 @@ FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif'
 
 # Fuseau local de la machine — tous les axes temps sont affichés en heure locale
 LOCAL_TZ = datetime.now().astimezone().tzinfo
+
+BUCKET_KEYS = {"0DTE": "bucket_0DTE", "Semaine": "bucket_week",
+               "Mois": "bucket_month", "Tout": "bucket_all"}
 
 
 def to_local(ts: pd.Series) -> pd.Series:
@@ -68,7 +73,7 @@ def base_layout(title: str, height: int = 420) -> dict:
     )
 
 
-def empty_fig(msg: str = "En attente du premier pull CBOE…", title: str = "") -> go.Figure:
+def empty_fig(msg: str, title: str = "") -> go.Figure:
     fig = go.Figure()
     fig.update_layout(**base_layout(title))
     fig.add_annotation(text=msg, showarrow=False, font=dict(color=C["muted"], size=13))
@@ -81,13 +86,13 @@ def _bar_width(strikes: np.ndarray) -> float:
 
 
 def exposure_fig(df: pd.DataFrame, spot: float, zg: float | None, col: str, title: str,
-                 levels: pd.DataFrame | None = None, hvl: float | None = None,
+                 lang: str, levels: pd.DataFrame | None = None, hvl: float | None = None,
                  window: float = 0.04) -> go.Figure:
     lo, hi = spot * (1 - window), spot * (1 + window)
     d = df[df["strike"].between(lo, hi)]
     agg = metrics.exposure_by_strike(d, col)
     if agg.empty:
-        return empty_fig("Pas de données dans la fenêtre de strikes", title)
+        return empty_fig(t(lang, "no_data_window"), title)
     net = agg["net"].to_numpy() / 1e9
     strikes = agg["strike"].to_numpy()
     colors = np.where(net >= 0, C["pos"], C["neg"])
@@ -98,40 +103,38 @@ def exposure_fig(df: pd.DataFrame, spot: float, zg: float | None, col: str, titl
             marker=dict(color=colors, line=dict(width=0)),
             customdata=np.stack([agg["C"] / 1e9, agg["P"] / 1e9], axis=-1),
             hovertemplate=(
-                "Strike %{y}<br>Net: %{x:.2f} $Bn"
+                f"{t(lang, 'hover_strike')} %{{y}}<br>{t(lang, 'hover_net')}: %{{x:.2f}} $Bn"
                 "<br>Calls: %{customdata[0]:.2f} $Bn"
                 "<br>Puts: %{customdata[1]:.2f} $Bn<extra></extra>"
             ),
         )
     )
     fig.update_layout(**base_layout(title, height=560))
-    fig.update_xaxes(title_text="$Bn par 1% de move", title_font=dict(color=C["muted"]))
+    fig.update_xaxes(title_text=t(lang, "axis_bn_per_move"), title_font=dict(color=C["muted"]))
     fig.add_hline(y=spot, line_color=C["spot"], line_dash="dot", line_width=1,
                   annotation_text=f"Spot {spot:.0f}", annotation_font_color=C["ink"],
                   annotation_position="top right")
     if zg is not None and lo <= zg <= hi:
         fig.add_hline(y=zg, line_color=C["zg"], line_dash="dash", line_width=1,
-                      annotation_text=f"Flip (zero γ) {zg:.0f}", annotation_font_color=C["zg"],
+                      annotation_text=f"Gamma Flip {zg:.0f}", annotation_font_color=C["zg"],
                       annotation_position="bottom left")
     if hvl is not None and lo <= hvl <= hi:
         fig.add_hline(y=hvl, line_color=C["hvl"], line_dash="dash", line_width=1,
                       annotation_text=f"HVL {hvl:.0f}", annotation_font_color=C["hvl"],
                       annotation_position="bottom right")
     if levels is not None and not levels.empty:
+        labels = wall_labels(levels)
         for lv in levels.itertuples():
             if not (lo <= lv.strike <= hi):
                 continue
             fig.add_hline(
                 y=lv.strike, line_color=C["lvl"], line_dash="dashdot",
                 line_width=1, opacity=0.8,
-                annotation_text=f"GEX{lv.rank} {lv.strike:.0f}",
+                annotation_text=f"{labels[lv.strike]} {lv.strike:.0f}",
                 annotation_font=dict(color=C["lvl"], size=10),
                 annotation_position="top left",
             )
     return fig
-
-
-FLOW_TITLE = "Flux delta options (proxy Δvolume×δ, barres 1 min — délayé ~15 min)"
 
 
 def available_flow_days(symbol: str) -> list[str]:
@@ -141,93 +144,91 @@ def available_flow_days(symbol: str) -> list[str]:
     return sorted(p.stem for p in root.glob("*.parquet"))
 
 
-def flow_fig(symbol: str, day: str | None = None) -> go.Figure:
+def flow_fig(symbol: str, lang: str, day: str | None = None) -> go.Figure:
     day = day or datetime.now(ET).strftime("%Y-%m-%d")
     flows = store.load_flows(symbol, day)
+    title = t(lang, "flow_title")
     if flows.empty:
-        return empty_fig(f"Aucun flux enregistré le {day}", FLOW_TITLE)
+        return empty_fig(t(lang, "no_flow_day", day=day), title)
     ts = to_local(flows["timestamp"])
     vals = flows["flow_total"].to_numpy() / 1e6
     cum = np.cumsum(vals)
     fig = go.Figure()
-    fig.add_bar(x=ts, y=vals, name="Flux/min",
+    fig.add_bar(x=ts, y=vals, name=t(lang, "legend_flow"),
                 marker=dict(color=np.where(vals >= 0, C["pos"], C["neg"]), line=dict(width=0)),
-                hovertemplate="%{x|%H:%M}<br>Flux: %{y:.1f} $M<extra></extra>")
-    fig.add_scatter(x=ts, y=cum, mode="lines", name="Cumul", yaxis="y2",
+                hovertemplate=f"%{{x|%H:%M}}<br>{t(lang, 'hover_flow')}: %{{y:.1f}} $M<extra></extra>")
+    fig.add_scatter(x=ts, y=cum, mode="lines", name=t(lang, "legend_cum"), yaxis="y2",
                     line=dict(color=C["ink2"], width=2),
-                    hovertemplate="%{x|%H:%M}<br>Cumul: %{y:.1f} $M<extra></extra>")
-    lay = base_layout(FLOW_TITLE, height=300)
-    # cumul en sous-échelle séparée sans second axe visible serait trompeur :
-    # on empile deux panneaux partageant l'axe temps
+                    hovertemplate=f"%{{x|%H:%M}}<br>{t(lang, 'hover_cum')}: %{{y:.1f}} $M<extra></extra>")
+    lay = base_layout(title, height=300)
+    # deux panneaux empilés partageant l'axe temps (pas de double axe trompeur)
     lay["yaxis"] = dict(domain=[0.55, 1.0], gridcolor=C["grid"], zerolinecolor=C["axis"],
-                        title=dict(text="$M/min", font=dict(color=C["muted"])), tickfont=dict(color=C["muted"]))
+                        title=dict(text=t(lang, "axis_m_per_min"), font=dict(color=C["muted"])),
+                        tickfont=dict(color=C["muted"]))
     lay["yaxis2"] = dict(domain=[0.0, 0.45], gridcolor=C["grid"], zerolinecolor=C["axis"],
-                         title=dict(text="Cumul $M", font=dict(color=C["muted"])), tickfont=dict(color=C["muted"]))
+                         title=dict(text=t(lang, "axis_cum_m"), font=dict(color=C["muted"])),
+                         tickfont=dict(color=C["muted"]))
     lay["height"] = 380
     fig.update_layout(**lay)
     return fig
 
 
-HIST_TITLE = "GEX net — historique ($Bn par 1%)"
-
-
-def history_fig(symbol: str) -> go.Figure:
+def history_fig(symbol: str, lang: str) -> go.Figure:
+    title = t(lang, "hist_title")
     hist = store.load_history(symbol)
     if hist.empty or len(hist) < 2:
-        return empty_fig("Historique insuffisant (revenez après quelques snapshots)", HIST_TITLE)
+        return empty_fig(t(lang, "not_enough_history"), title)
     ts = to_local(hist["timestamp"])
     fig = go.Figure()
-    fig.add_scatter(x=ts, y=hist["net_gex"] / 1e9, mode="lines", name="GEX net",
+    fig.add_scatter(x=ts, y=hist["net_gex"] / 1e9, mode="lines", name="GEX",
                     line=dict(color=C["cat"][0], width=2),
-                    hovertemplate="%{x|%d/%m %H:%M}<br>GEX net: %{y:.1f} $Bn<extra></extra>")
-    lay = base_layout(HIST_TITLE, height=300)
-    fig.update_layout(**lay)
+                    hovertemplate="%{x|%d/%m %H:%M}<br>GEX: %{y:.1f} $Bn<extra></extra>")
+    fig.update_layout(**base_layout(title, height=300))
     return fig
 
 
-SPOTZG_TITLE = "Spot vs Zero Gamma"
-
-
-def spot_zg_fig(symbol: str) -> go.Figure:
+def spot_zg_fig(symbol: str, lang: str) -> go.Figure:
+    title = t(lang, "spotzg_title")
     hist = store.load_history(symbol)
     if hist.empty or len(hist) < 2:
-        return empty_fig("Historique insuffisant", SPOTZG_TITLE)
+        return empty_fig(t(lang, "not_enough_history"), title)
     ts = to_local(hist["timestamp"])
     fig = go.Figure()
-    fig.add_scatter(x=ts, y=hist["spot"], mode="lines", name="Spot",
+    fig.add_scatter(x=ts, y=hist["spot"], mode="lines", name=t(lang, "legend_spot"),
                     line=dict(color=C["cat"][0], width=2),
                     hovertemplate="%{x|%d/%m %H:%M}<br>Spot: %{y:.0f}<extra></extra>")
-    fig.add_scatter(x=ts, y=hist["zero_gamma"], mode="lines", name="Zero gamma",
+    fig.add_scatter(x=ts, y=hist["zero_gamma"], mode="lines", name=t(lang, "legend_zg"),
                     line=dict(color=C["zg"], width=2, dash="dash"),
-                    hovertemplate="%{x|%d/%m %H:%M}<br>Zero γ: %{y:.0f}<extra></extra>")
-    lay = base_layout(SPOTZG_TITLE, height=300)
+                    hovertemplate="%{x|%d/%m %H:%M}<br>Gamma Flip: %{y:.0f}<extra></extra>")
+    lay = base_layout(title, height=300)
     lay["showlegend"] = True
     lay["legend"] = dict(orientation="h", y=1.12, font=dict(color=C["ink2"]))
     fig.update_layout(**lay)
     return fig
 
 
-def smile_fig(df: pd.DataFrame, spot: float) -> go.Figure:
+def smile_fig(df: pd.DataFrame, spot: float, lang: str) -> go.Figure:
+    title = t(lang, "smile_title")
     d = df[(df["iv"] > 0.01) & (df["open_interest"] > 0)
            & df["strike"].between(spot * 0.85, spot * 1.15)]
     # IV OTM : puts sous le spot, calls au-dessus (le smile standard)
     otm = d[((d["type"] == "P") & (d["strike"] <= spot)) | ((d["type"] == "C") & (d["strike"] > spot))]
     expiries = sorted(otm["expiry"].unique())[:4]
     if not expiries:
-        return empty_fig("Pas d'IV exploitable", "Skew IV (options OTM) par expiration")
+        return empty_fig(t(lang, "no_iv"), title)
     fig = go.Figure()
     for i, exp in enumerate(expiries):
         e = otm[otm["expiry"] == exp].sort_values("strike")
         smoothed = e.groupby("strike")["iv"].mean()
         fig.add_scatter(x=smoothed.index, y=smoothed * 100, mode="lines",
                         name=str(exp), line=dict(color=C["cat"][i % 4], width=2),
-                        hovertemplate=f"{exp}<br>Strike %{{x}}<br>IV: %{{y:.1f}}%<extra></extra>")
-    lay = base_layout("Skew IV (options OTM) par expiration", height=300)
+                        hovertemplate=f"{exp}<br>{t(lang, 'hover_strike')} %{{x}}<br>IV: %{{y:.1f}}%<extra></extra>")
+    lay = base_layout(title, height=300)
     lay["showlegend"] = True
     lay["legend"] = dict(orientation="h", y=1.15, font=dict(color=C["ink2"]))
     fig.update_layout(**lay)
     fig.add_vline(x=spot, line_color=C["spot"], line_dash="dot", line_width=1)
-    fig.update_yaxes(title_text="IV %", title_font=dict(color=C["muted"]))
+    fig.update_yaxes(title_text=t(lang, "axis_iv"), title_font=dict(color=C["muted"]))
     return fig
 
 
@@ -245,76 +246,73 @@ def card(label: str, value: str, sub: str = "", accent: str | None = None) -> ht
     )
 
 
-def build_cards(symbol: str) -> list:
+def build_cards(symbol: str, lang: str) -> list:
     st = STATE.get(symbol)
     with STATE.lock:
         s = st.summary
         err = STATE.last_error
     if s is None:
-        return [card("Statut", "…", err or "en attente du premier pull")]
+        return [card(t(lang, "card_status"), "…", err or t(lang, "waiting_short"))]
     zg_txt = f"{s.zero_gamma:.0f}" if s.zero_gamma else "n/a"
     zg_sub = ""
     if s.zero_gamma:
         d = s.spot - s.zero_gamma
-        zg_sub = f"spot {'+' if d >= 0 else ''}{d:.0f} pts ({'γ+ ' if d >= 0 else 'γ- '}régime)"
+        zg_sub = t(lang, "card_zg_sub", sign="+" if d >= 0 else "",
+                   pts=f"{d:.0f}", reg="+" if d >= 0 else "-")
     gex_color = C["pos"] if s.net_gex >= 0 else C["neg"]
     feed_local = s.timestamp.replace(tzinfo=ET).astimezone(LOCAL_TZ)
     return [
-        card("Spot (délayé 15 min)", f"{s.spot:,.0f}",
-             f"feed {feed_local:%H:%M:%S} ({s.timestamp:%H:%M} ET)"),
-        card("GEX net / 1%", f"{s.net_gex / 1e9:+.1f} $Bn",
-             "stabilisant" if s.net_gex >= 0 else "déstabilisant", accent=gex_color),
-        card("Zero Gamma", zg_txt, zg_sub, accent=C["zg"]),
-        card("GEX 0DTE", f"{s.net_gex_0dte / 1e9:+.1f} $Bn"),
-        card("P/C Open Interest", f"{s.pc_oi:.2f}"),
-        card("P/C Volume", f"{s.pc_volume:.2f}"),
+        card(t(lang, "card_spot"), f"{s.spot:,.0f}",
+             t(lang, "card_feed", local=f"{feed_local:%H:%M:%S}", et=f"{s.timestamp:%H:%M}")),
+        card(t(lang, "card_net_gex"), f"{s.net_gex / 1e9:+.1f} $Bn",
+             t(lang, "stabilizing") if s.net_gex >= 0 else t(lang, "destabilizing"),
+             accent=gex_color),
+        card(t(lang, "card_zero_gamma"), zg_txt, zg_sub, accent=C["zg"]),
+        card(t(lang, "card_gex_0dte"), f"{s.net_gex_0dte / 1e9:+.1f} $Bn"),
+        card(t(lang, "card_pc_oi"), f"{s.pc_oi:.2f}"),
+        card(t(lang, "card_pc_vol"), f"{s.pc_volume:.2f}"),
     ]
 
 
 def create_app() -> Dash:
     app = Dash(__name__, title="GEX Dashboard")
     enabled = [u for u in UNDERLYINGS.values() if u.enabled]
+    radio_style = dict(inputStyle={"marginRight": "4px"},
+                       labelStyle={"marginRight": "14px", "color": C["ink2"]})
     app.layout = html.Div(
         style={"background": C["page"], "minHeight": "100vh", "padding": "16px 24px",
                "fontFamily": FONT, "color": C["ink"]},
         children=[
             html.Div(
                 [
-                    html.H1("Gamma / Delta Exposure", style={"fontSize": "20px", "margin": "0", "fontWeight": "600"}),
+                    html.H1(t("fr", "app_title"), id="app-title",
+                            style={"fontSize": "20px", "margin": "0", "fontWeight": "600"}),
                     html.Div(
                         [
                             dcc.RadioItems(
                                 id="symbol",
                                 options=[{"label": u.label, "value": u.key} for u in enabled],
-                                value=enabled[0].key, inline=True,
-                                inputStyle={"marginRight": "4px"},
-                                labelStyle={"marginRight": "16px", "color": C["ink2"]},
+                                value=enabled[0].key, inline=True, **radio_style,
                             ),
-                            dcc.RadioItems(
-                                id="bucket",
-                                options=[{"label": b, "value": b} for b in EXPIRY_BUCKETS],
-                                value="Tout", inline=True,
-                                inputStyle={"marginRight": "4px"},
-                                labelStyle={"marginRight": "16px", "color": C["ink2"]},
-                            ),
-                            dcc.Checklist(
-                                id="majors",
-                                options=[{"label": "Murs majeurs seulement", "value": "on"}],
-                                value=[], inline=True,
-                                inputStyle={"marginRight": "4px"},
-                                labelStyle={"color": C["ink2"]},
-                            ),
+                            dcc.RadioItems(id="bucket", value="Tout", inline=True, **radio_style),
+                            dcc.Checklist(id="majors", value=[], inline=True,
+                                          inputStyle={"marginRight": "4px"},
+                                          labelStyle={"color": C["ink2"]}),
                             dcc.RadioItems(
                                 id="window",
                                 options=[{"label": "±2%", "value": 0.02},
                                          {"label": "±4%", "value": 0.04},
                                          {"label": "±10%", "value": 0.10}],
-                                value=0.04, inline=True,
-                                inputStyle={"marginRight": "4px"},
-                                labelStyle={"marginRight": "12px", "color": C["ink2"]},
+                                value=0.04, inline=True, **radio_style,
+                            ),
+                            dcc.RadioItems(
+                                id="lang",
+                                options=[{"label": l.upper(), "value": l} for l in LANGS],
+                                value="fr", inline=True, **radio_style,
                             ),
                         ],
-                        style={"display": "flex", "gap": "32px", "alignItems": "center"},
+                        style={"display": "flex", "gap": "20px", "alignItems": "center",
+                               "flexWrap": "wrap"},
                     ),
                 ],
                 style={"display": "flex", "justifyContent": "space-between",
@@ -332,11 +330,11 @@ def create_app() -> Dash:
             ),
             html.Div(
                 [
-                    html.Span("Jour de flux :", style={"color": C["muted"], "fontSize": "12px"}),
+                    html.Span(id="flow-day-label", style={"color": C["muted"], "fontSize": "12px"}),
                     dcc.Dropdown(id="flow-day", clearable=False,
                                  style={"width": "160px", "color": "#111"}),
                     html.Button(
-                        "Dernière séance", id="flow-today", n_clicks=0,
+                        id="flow-today", n_clicks=0,
                         style={"background": C["surface"], "color": C["ink2"],
                                "border": "1px solid rgba(255,255,255,0.15)",
                                "borderRadius": "6px", "padding": "5px 12px",
@@ -356,10 +354,9 @@ def create_app() -> Dash:
                 style={"display": "flex", "gap": "12px", "flexWrap": "wrap"},
             ),
             dcc.Interval(id="tick", interval=SETTINGS.flow_interval_s * 1000),
-            html.Div(
-                "Données CBOE delayed (~15 min) — outil d'analyse, pas d'exécution.",
-                style={"color": C["muted"], "fontSize": "11px", "marginTop": "12px"},
-            ),
+            dcc.Store(id="lang-boot", data=0),
+            html.Div(id="footer",
+                     style={"color": C["muted"], "fontSize": "11px", "marginTop": "12px"}),
         ],
     )
 
@@ -370,27 +367,62 @@ def create_app() -> Dash:
                    "borderRadius": "6px", "padding": "4px 10px", "fontSize": "13px"},
         )
 
-    def levels_strip(levels: pd.DataFrame, hvl: float | None = None,
-                     zg: float | None = None) -> list:
+    def levels_strip(levels: pd.DataFrame | None, lang: str,
+                     hvl: float | None = None, zg: float | None = None) -> list:
         if levels is None or levels.empty:
-            return [html.Span("Niveaux GEX 0DTE : indisponibles", style={"color": C["muted"], "fontSize": "12px"})]
+            return [html.Span(t(lang, "levels_unavailable"),
+                              style={"color": C["muted"], "fontSize": "12px"})]
         exp = levels["expiry"].iloc[0]
-        items = [html.Span(f"Niveaux 0DTE ({exp:%d/%m}) :",
+        labels = wall_labels(levels)
+        items = [html.Span(t(lang, "levels_prefix", exp=f"{exp:%d/%m}"),
                            style={"color": C["muted"], "fontSize": "12px", "marginRight": "4px"})]
         if zg is not None:
-            items.append(_chip([html.B("Flip ", style={"color": C["zg"]}), f"{zg:.0f}"], C["zg"]))
+            items.append(_chip([html.B("Gamma Flip ", style={"color": C["zg"]}), f"{zg:.0f}"], C["zg"]))
         if hvl is not None:
             items.append(_chip([html.B("HVL ", style={"color": C["hvl"]}), f"{hvl:.0f}"], C["hvl"]))
         for lv in levels.itertuples():
-            side = "call" if lv.gex > 0 else "put"
+            side = t(lang, "side_call") if lv.gex > 0 else t(lang, "side_put")
             items.append(_chip(
-                [html.B(f"GEX{lv.rank} ", style={"color": C["lvl"]}),
+                [html.B(f"{labels[lv.strike]} ", style={"color": C["lvl"]}),
                  f"{lv.strike:.0f} ",
                  html.Span(f"({lv.gex / 1e9:+.1f} $Bn {side})",
                            style={"color": C["ink2"], "fontSize": "11px"})],
                 "rgba(255,255,255,0.10)",
             ))
         return items
+
+    # Détection de la langue du navigateur au chargement ; un choix manuel
+    # (bouton FR/EN) est mémorisé dans localStorage et prime sur la détection.
+    app.clientside_callback(
+        """
+        function(_) {
+            const saved = window.localStorage.getItem('gex-lang');
+            if (saved === 'fr' || saved === 'en') return saved;
+            const nav = (navigator.language || 'en').slice(0, 2).toLowerCase();
+            return nav === 'fr' ? 'fr' : 'en';
+        }
+        """,
+        Output("lang", "value"),
+        Input("lang-boot", "data"),
+    )
+    app.clientside_callback(
+        "function(l) { window.localStorage.setItem('gex-lang', l); return window.dash_clientside.no_update; }",
+        Output("lang-boot", "data"),
+        Input("lang", "value"),
+        prevent_initial_call=True,
+    )
+
+    @app.callback(
+        [Output("bucket", "options"), Output("majors", "options"),
+         Output("flow-day-label", "children"), Output("flow-today", "children"),
+         Output("footer", "children")],
+        [Input("lang", "value")],
+    )
+    def apply_lang(lang):
+        bucket_opts = [{"label": t(lang, BUCKET_KEYS[b]), "value": b} for b in EXPIRY_BUCKETS]
+        majors_opts = [{"label": t(lang, "majors_only"), "value": "on"}]
+        return (bucket_opts, majors_opts, t(lang, "flow_day_label"),
+                t(lang, "last_session"), t(lang, "footer"))
 
     @app.callback(
         [Output("cards", "children"), Output("levels", "children"), Output("gex-strike", "figure"),
@@ -399,31 +431,34 @@ def create_app() -> Dash:
          Output("smile", "figure")],
         [Input("tick", "n_intervals"), Input("symbol", "value"),
          Input("bucket", "value"), Input("window", "value"),
-         Input("majors", "value"), Input("flow-day", "value")],
+         Input("majors", "value"), Input("flow-day", "value"),
+         Input("lang", "value")],
     )
-    def refresh(_, symbol, bucket, window, majors, flow_day):
+    def refresh(_, symbol, bucket, window, majors, flow_day, lang):
         st = STATE.get(symbol)
         with STATE.lock:
             df = st.enriched
             snap = st.snapshot
             summary = st.summary
+        bucket_label = t(lang, BUCKET_KEYS[bucket])
         if df is None or snap is None:
+            wait = t(lang, "waiting_first_pull")
             return (
-                build_cards(symbol),
-                levels_strip(None),
-                empty_fig(title="Gamma Exposure par strike"),
-                empty_fig(title="Delta Exposure par strike"),
-                empty_fig(title=FLOW_TITLE),
-                empty_fig(title=HIST_TITLE),
-                empty_fig(title=SPOTZG_TITLE),
-                empty_fig(title="Skew IV (options OTM) par expiration"),
+                build_cards(symbol, lang),
+                levels_strip(None, lang),
+                empty_fig(wait, t(lang, "gex_title", bucket=bucket_label)),
+                empty_fig(wait, t(lang, "dex_title", bucket=bucket_label)),
+                empty_fig(wait, t(lang, "flow_title")),
+                empty_fig(wait, t(lang, "hist_title")),
+                empty_fig(wait, t(lang, "spotzg_title")),
+                empty_fig(wait, t(lang, "smile_title")),
             )
         today = datetime.now(ET).date()
         sel = df[metrics.bucket_mask(df, bucket, today)]
         zg = summary.zero_gamma if summary else None
+
         # uirevision : tant que la révision ne change pas, Plotly conserve le
         # zoom/pan de l'utilisateur à travers les refresh de dcc.Interval.
-        # Changer de sous-jacent/fenêtre/bucket réinitialise la vue (voulu).
         def _pin(fig, rev):
             fig.update_layout(uirevision=rev)
             return fig
@@ -435,16 +470,18 @@ def create_app() -> Dash:
             levels = levels[levels["gex"].abs() >= 0.25 * levels["gex"].abs().max()]
         hvl = metrics.zero_gamma(df, snap.spot, weight_col="volume")
         return (
-            build_cards(symbol),
-            levels_strip(levels, hvl, zg),
-            _pin(exposure_fig(sel, snap.spot, zg, "gex", f"Gamma Exposure par strike — {bucket}",
+            build_cards(symbol, lang),
+            levels_strip(levels, lang, hvl, zg),
+            _pin(exposure_fig(sel, snap.spot, zg, "gex",
+                              t(lang, "gex_title", bucket=bucket_label), lang,
                               levels=levels, hvl=hvl, window=window), rev),
-            _pin(exposure_fig(sel, snap.spot, zg, "dex", f"Delta Exposure par strike — {bucket}",
+            _pin(exposure_fig(sel, snap.spot, zg, "dex",
+                              t(lang, "dex_title", bucket=bucket_label), lang,
                               window=window), rev),
-            _pin(flow_fig(symbol, flow_day), f"{symbol}-{flow_day}"),
-            _pin(history_fig(symbol), symbol),
-            _pin(spot_zg_fig(symbol), symbol),
-            _pin(smile_fig(sel, snap.spot), rev),
+            _pin(flow_fig(symbol, lang, flow_day), f"{symbol}-{flow_day}"),
+            _pin(history_fig(symbol, lang), symbol),
+            _pin(spot_zg_fig(symbol, lang), symbol),
+            _pin(smile_fig(sel, snap.spot, lang), rev),
         )
 
     @app.callback(

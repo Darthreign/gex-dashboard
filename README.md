@@ -1,5 +1,7 @@
 # GEX Dashboard — analyse Gamma/Delta Exposure (SPX/ES, NDX/NQ)
 
+*[English version](README.en.md)*
+
 [Licence MIT](LICENSE) — outil d'**analyse uniquement** : pas de trading,
 pas d'exécution, pas de conseil en investissement. Chaque instance tire ses
 propres données depuis l'endpoint delayed public de CBOE ; ce projet ne
