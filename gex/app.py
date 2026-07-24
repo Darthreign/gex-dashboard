@@ -10,8 +10,8 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from dash import Dash, dcc, html
-from dash.dependencies import Input, Output
+from dash import Dash, ctx, dcc, html
+from dash.dependencies import Input, Output, State
 
 from . import metrics, store
 from .config import SETTINGS, UNDERLYINGS
@@ -335,6 +335,13 @@ def create_app() -> Dash:
                     html.Span("Jour de flux :", style={"color": C["muted"], "fontSize": "12px"}),
                     dcc.Dropdown(id="flow-day", clearable=False,
                                  style={"width": "160px", "color": "#111"}),
+                    html.Button(
+                        "Dernière séance", id="flow-today", n_clicks=0,
+                        style={"background": C["surface"], "color": C["ink2"],
+                               "border": "1px solid rgba(255,255,255,0.15)",
+                               "borderRadius": "6px", "padding": "5px 12px",
+                               "fontSize": "12px", "cursor": "pointer"},
+                    ),
                 ],
                 style={"display": "flex", "gap": "8px", "alignItems": "center",
                        "marginBottom": "4px"},
@@ -442,10 +449,28 @@ def create_app() -> Dash:
 
     @app.callback(
         [Output("flow-day", "options"), Output("flow-day", "value")],
-        [Input("symbol", "value")],
+        [Input("symbol", "value"), Input("tick", "n_intervals")],
+        State("flow-day", "value"),
     )
-    def update_flow_days(symbol):
+    def update_flow_days(symbol, _, current):
         days = available_flow_days(symbol)
-        return [{"label": d, "value": d} for d in days], (days[-1] if days else None)
+        opts = [{"label": d, "value": d} for d in days]
+        # sur un tick, ne pas écraser la sélection de l'utilisateur ;
+        # sur changement de sous-jacent (ou sélection invalide), dernier jour
+        if ctx.triggered_id == "tick" and current in days:
+            return opts, current
+        return opts, (days[-1] if days else None)
+
+    @app.callback(
+        Output("flow-day", "value", allow_duplicate=True),
+        Input("flow-today", "n_clicks"),
+        State("symbol", "value"),
+        prevent_initial_call=True,
+    )
+    def back_to_today(_, symbol):
+        today = datetime.now(ET).strftime("%Y-%m-%d")
+        days = available_flow_days(symbol)
+        # le jour courant s'il a des flux, sinon le plus récent disponible
+        return today if today in days else (days[-1] if days else None)
 
     return app
