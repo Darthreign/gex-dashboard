@@ -58,3 +58,22 @@ def test_vectorized_broadcasting():
 
 def test_deep_itm_call_delta_near_one():
     assert greeks.call_delta(100.0, 10.0, 0.1, R, SIG) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_implied_vol_round_trip():
+    """prix BS -> inversion -> doit retrouver la vol d'origine."""
+    # strikes avec valeur temps significative (un deep ITM à vol faible a une
+    # valeur temps ~0 : l'IV y est irrécupérable et implied_vol rend NaN, voulu)
+    sigmas = np.array([0.10, 0.20, 0.45, 0.90])
+    strikes = np.array([95.0, 100.0, 120.0, 150.0])
+    prices = greeks.call_price(S, strikes, 0.08, R, sigmas)
+    iv = greeks.implied_vol(prices, S, strikes, 0.08, R, np.full(4, True))
+    np.testing.assert_allclose(iv, sigmas, atol=1e-4)
+    p_prices = greeks.put_price(S, strikes, 0.08, R, sigmas)
+    p_iv = greeks.implied_vol(p_prices, S, strikes, 0.08, R, np.full(4, False))
+    np.testing.assert_allclose(p_iv, sigmas, atol=1e-4)
+
+
+def test_implied_vol_below_intrinsic_is_nan():
+    iv = greeks.implied_vol(np.array([1.0]), 100.0, 80.0, 0.1, R, np.array([True]))
+    assert np.isnan(iv[0])

@@ -69,6 +69,34 @@ def call_theta(s, k, t, r, sigma):
     )
 
 
+def implied_vol(price, s, k, t, r, is_call, tol=1e-6, max_iter=60):
+    """IV par Newton-Raphson vectorisé (fallback bisection implicite via clip).
+
+    Retourne NaN quand le prix est sous la valeur intrinsèque actualisée ou
+    quand la convergence échoue — l'appelant exclut ces contrats comme les
+    iv<=0 du feed live.
+    """
+    price = np.asarray(price, dtype=float)
+    s = np.broadcast_to(np.asarray(s, dtype=float), price.shape).copy()
+    k = np.broadcast_to(np.asarray(k, dtype=float), price.shape).copy()
+    t = np.broadcast_to(np.asarray(t, dtype=float), price.shape).copy()
+    is_call = np.broadcast_to(np.asarray(is_call, dtype=bool), price.shape)
+
+    intrinsic = np.where(is_call, np.maximum(s - k * np.exp(-r * t), 0.0),
+                         np.maximum(k * np.exp(-r * t) - s, 0.0))
+    valid = (price > intrinsic + 1e-10) & (t > 0)
+
+    sigma = np.full(price.shape, 0.5)
+    for _ in range(max_iter):
+        model = np.where(is_call, call_price(s, k, t, r, sigma), put_price(s, k, t, r, sigma))
+        v = vega(s, k, t, r, sigma)
+        step = np.where(v > 1e-12, (model - price) / np.maximum(v, 1e-12), 0.0)
+        sigma = np.clip(sigma - np.clip(step, -0.5, 0.5), 1e-4, 10.0)
+    model = np.where(is_call, call_price(s, k, t, r, sigma), put_price(s, k, t, r, sigma))
+    converged = np.abs(model - price) < np.maximum(tol, 1e-4 * price)
+    return np.where(valid & converged, sigma, np.nan)
+
+
 def put_theta(s, k, t, r, sigma):
     d1, d2 = _d1_d2(s, k, t, r, sigma)
     t = np.maximum(np.asarray(t, dtype=float), _EPS)
