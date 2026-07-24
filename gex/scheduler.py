@@ -121,6 +121,34 @@ def pull_all(force: bool = False) -> None:
                 STATE.last_error = f"{key}: {e}"
 
 
+def push_data_repo() -> None:
+    """Commit + push quotidien du repo data/ (historique + flux) après la
+    clôture — backup hors-machine des données non reconstituables."""
+    import subprocess
+
+    repo = SETTINGS.data_dir
+    if not SETTINGS.auto_push_data or not (repo / ".git").exists():
+        return
+    day = datetime.now(ET).strftime("%Y-%m-%d")
+    try:
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+        diff = subprocess.run(["git", "-C", str(repo), "diff", "--cached", "--quiet"])
+        if diff.returncode == 0:
+            return  # rien de nouveau
+        subprocess.run(["git", "-C", str(repo), "commit", "-m", f"data {day}"],
+                       check=True, capture_output=True)
+        has_remote = subprocess.run(["git", "-C", str(repo), "remote"],
+                                    capture_output=True, text=True).stdout.strip()
+        if has_remote:
+            subprocess.run(["git", "-C", str(repo), "push"], check=True,
+                           capture_output=True, timeout=120)
+            log.info("Repo data poussé (%s)", day)
+        else:
+            log.info("Repo data commité localement (%s, pas de remote)", day)
+    except Exception:
+        log.exception("Échec du push du repo data — données locales intactes")
+
+
 def start_scheduler() -> BackgroundScheduler:
     sched = BackgroundScheduler(timezone="America/New_York")
     sched.add_job(
@@ -130,6 +158,7 @@ def start_scheduler() -> BackgroundScheduler:
         max_instances=1,
         coalesce=True,
     )
+    sched.add_job(push_data_repo, "cron", day_of_week="mon-fri", hour=16, minute=20)
     sched.start()
     # Premier pull immédiat (même hors marché : affiche le dernier état connu).
     threading.Thread(target=pull_all, kwargs={"force": True}, daemon=True).start()

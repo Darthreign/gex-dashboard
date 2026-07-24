@@ -47,6 +47,9 @@ class Settings:
     zg_steps: int = 161
     # Ne puller que pendant les heures de marché US (ET).
     market_hours_only: bool = True
+    # Commit+push automatique du repo git data/ (historique+flux) après la
+    # clôture (16:20 ET). Sans effet si data/ n'est pas un repo git avec remote.
+    auto_push_data: bool = True
     data_dir: Path = field(default_factory=lambda: DATA_DIR)
 
 
