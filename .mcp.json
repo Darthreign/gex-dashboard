@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "gex-data": {
+      "command": ".venv\\Scripts\\python.exe",
+      "args": ["-m", "gex.mcp_server"]
+    }
+  }
+}
