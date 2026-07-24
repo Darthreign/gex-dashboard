@@ -263,9 +263,10 @@ def build_flows(minute_df: pd.DataFrame, deltas: pd.DataFrame, spot: float,
 
 # ----------------------------------------------------------------------- main
 
-def run(daily_days: int, intraday_days: int, max_cost: float, dry_run: bool) -> None:
+def run(daily_days: int, intraday_days: int, max_cost: float, dry_run: bool,
+        end: date | None = None) -> None:
     client = _client()
-    end = date.today() - timedelta(days=1)
+    end = end or (date.today() - timedelta(days=1))
     daily_start = end - timedelta(days=daily_days)
     intra_start = end - timedelta(days=intraday_days)
 
@@ -360,8 +361,10 @@ def main() -> None:
     ap.add_argument("--intraday-days", type=int, default=7)
     ap.add_argument("--max-cost", type=float, default=40.0)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--end", type=lambda s: date.fromisoformat(s), default=None,
+                    help="borne de fin EXCLUSIVE (défaut : hier)")
     a = ap.parse_args()
-    run(a.daily_days, a.intraday_days, a.max_cost, a.dry_run)
+    run(a.daily_days, a.intraday_days, a.max_cost, a.dry_run, end=a.end)
 
 
 if __name__ == "__main__":
