@@ -77,10 +77,21 @@ def download(client, schema: str, start: date, end: date) -> Path:
         log.info("%s : déjà téléchargé (%s)", schema, path.name)
         return path
     log.info("Téléchargement %s %s→%s …", schema, start, end)
-    data = client.timeseries.get_range(
-        dataset=DATASET, symbols=PARENTS, stype_in="parent",
-        schema=schema, start=str(start), end=str(end),
-    )
+    from databento.common.error import BentoServerError
+    import time as _time
+    for attempt in range(4):
+        try:
+            data = client.timeseries.get_range(
+                dataset=DATASET, symbols=PARENTS, stype_in="parent",
+                schema=schema, start=str(start), end=str(end),
+            )
+            break
+        except BentoServerError as e:
+            if attempt == 3:
+                raise
+            wait = 30 * (attempt + 1)
+            log.warning("Passerelle Databento en erreur (%s), retry dans %d s…", e, wait)
+            _time.sleep(wait)
     data.to_file(path)
     log.info("%s : %.1f Mo", schema, path.stat().st_size / 1e6)
     return path
@@ -271,7 +282,9 @@ def run(daily_days: int, intraday_days: int, max_cost: float, dry_run: bool,
     intra_start = end - timedelta(days=intraday_days)
 
     plan = [("definition", daily_start), ("statistics", daily_start),
-            ("ohlcv-1d", daily_start), ("ohlcv-1m", intra_start)]
+            ("ohlcv-1d", daily_start)]
+    if intraday_days > 0:
+        plan.append(("ohlcv-1m", intra_start))
 
     total = 0.0
     for schema, start in plan:
@@ -330,6 +343,9 @@ def run(daily_days: int, intraday_days: int, max_cost: float, dry_run: bool,
     log.info("Historique quotidien : %d jours ajoutés", len(new_rows))
 
     # flux intraday
+    if "ohlcv-1m" not in paths:
+        log.info("Flux intraday : ignoré (--intraday-days 0)")
+        return
     m1 = _to_df(paths["ohlcv-1m"]).reset_index()
     ts = pd.to_datetime(m1["ts_event"], utc=True).dt.tz_convert(ET)
     m1 = pd.DataFrame({

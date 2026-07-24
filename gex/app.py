@@ -31,6 +31,8 @@ C = {
     "neg": "#e66767",   # GEX négatif / flux vendeur (rouge)
     "spot": "#ffffff",
     "zg": "#c98500",    # jaune sombre — niveau zero gamma
+    "lvl": "#9085e9",   # violet — niveaux GEX 0DTE (GEX1..5)
+    "hvl": "#199e70",   # aqua — HVL (bascule pondérée par le volume du jour)
     "cat": ["#3987e5", "#d95926", "#199e70", "#c98500"],  # slots 1-4
 }
 
@@ -78,7 +80,8 @@ def _bar_width(strikes: np.ndarray) -> float:
     return float(np.median(diffs)) * 0.75 if len(diffs) else 1.0
 
 
-def exposure_fig(df: pd.DataFrame, spot: float, zg: float | None, col: str, title: str) -> go.Figure:
+def exposure_fig(df: pd.DataFrame, spot: float, zg: float | None, col: str, title: str,
+                 levels: pd.DataFrame | None = None, hvl: float | None = None) -> go.Figure:
     lo, hi = spot * (1 - SETTINGS.strike_window), spot * (1 + SETTINGS.strike_window)
     d = df[df["strike"].between(lo, hi)]
     agg = metrics.exposure_by_strike(d, col)
@@ -107,8 +110,23 @@ def exposure_fig(df: pd.DataFrame, spot: float, zg: float | None, col: str, titl
                   annotation_position="top right")
     if zg is not None and lo <= zg <= hi:
         fig.add_hline(y=zg, line_color=C["zg"], line_dash="dash", line_width=1,
-                      annotation_text=f"Zero γ {zg:.0f}", annotation_font_color=C["zg"],
+                      annotation_text=f"Flip (zero γ) {zg:.0f}", annotation_font_color=C["zg"],
                       annotation_position="bottom left")
+    if hvl is not None and lo <= hvl <= hi:
+        fig.add_hline(y=hvl, line_color=C["hvl"], line_dash="dash", line_width=1,
+                      annotation_text=f"HVL {hvl:.0f}", annotation_font_color=C["hvl"],
+                      annotation_position="bottom right")
+    if levels is not None and not levels.empty:
+        for lv in levels.itertuples():
+            if not (lo <= lv.strike <= hi):
+                continue
+            fig.add_hline(
+                y=lv.strike, line_color=C["lvl"], line_dash="dashdot",
+                line_width=1, opacity=0.8,
+                annotation_text=f"GEX{lv.rank} {lv.strike:.0f}",
+                annotation_font=dict(color=C["lvl"], size=10),
+                annotation_position="top left",
+            )
     return fig
 
 
@@ -278,7 +296,9 @@ def create_app() -> Dash:
                 style={"display": "flex", "justifyContent": "space-between",
                        "alignItems": "center", "marginBottom": "16px", "flexWrap": "wrap", "gap": "8px"},
             ),
-            html.Div(id="cards", style={"display": "flex", "gap": "12px", "marginBottom": "16px", "flexWrap": "wrap"}),
+            html.Div(id="cards", style={"display": "flex", "gap": "12px", "marginBottom": "12px", "flexWrap": "wrap"}),
+            html.Div(id="levels", style={"display": "flex", "gap": "10px", "marginBottom": "16px",
+                                         "flexWrap": "wrap", "alignItems": "center"}),
             html.Div(
                 [
                     dcc.Graph(id="gex-strike", style={"flex": "1", "minWidth": "440px"}),
@@ -303,8 +323,37 @@ def create_app() -> Dash:
         ],
     )
 
+    def _chip(children, accent):
+        return html.Span(
+            children,
+            style={"background": C["surface"], "border": f"1px solid {accent}",
+                   "borderRadius": "6px", "padding": "4px 10px", "fontSize": "13px"},
+        )
+
+    def levels_strip(levels: pd.DataFrame, hvl: float | None = None,
+                     zg: float | None = None) -> list:
+        if levels is None or levels.empty:
+            return [html.Span("Niveaux GEX 0DTE : indisponibles", style={"color": C["muted"], "fontSize": "12px"})]
+        exp = levels["expiry"].iloc[0]
+        items = [html.Span(f"Niveaux 0DTE ({exp:%d/%m}) :",
+                           style={"color": C["muted"], "fontSize": "12px", "marginRight": "4px"})]
+        if zg is not None:
+            items.append(_chip([html.B("Flip ", style={"color": C["zg"]}), f"{zg:.0f}"], C["zg"]))
+        if hvl is not None:
+            items.append(_chip([html.B("HVL ", style={"color": C["hvl"]}), f"{hvl:.0f}"], C["hvl"]))
+        for lv in levels.itertuples():
+            side = "call" if lv.gex > 0 else "put"
+            items.append(_chip(
+                [html.B(f"GEX{lv.rank} ", style={"color": C["lvl"]}),
+                 f"{lv.strike:.0f} ",
+                 html.Span(f"({lv.gex / 1e9:+.1f} $Bn {side})",
+                           style={"color": C["ink2"], "fontSize": "11px"})],
+                "rgba(255,255,255,0.10)",
+            ))
+        return items
+
     @app.callback(
-        [Output("cards", "children"), Output("gex-strike", "figure"),
+        [Output("cards", "children"), Output("levels", "children"), Output("gex-strike", "figure"),
          Output("dex-strike", "figure"), Output("flow", "figure"),
          Output("gex-history", "figure"), Output("spot-zg", "figure"),
          Output("smile", "figure")],
@@ -319,6 +368,7 @@ def create_app() -> Dash:
         if df is None or snap is None:
             return (
                 build_cards(symbol),
+                levels_strip(None),
                 empty_fig(title="Gamma Exposure par strike"),
                 empty_fig(title="Delta Exposure par strike"),
                 empty_fig(title=FLOW_TITLE),
@@ -329,9 +379,13 @@ def create_app() -> Dash:
         today = datetime.now(ET).date()
         sel = df[metrics.bucket_mask(df, bucket, today)]
         zg = summary.zero_gamma if summary else None
+        levels = metrics.top_gex_levels(df)
+        hvl = metrics.zero_gamma(df, snap.spot, weight_col="volume")
         return (
             build_cards(symbol),
-            exposure_fig(sel, snap.spot, zg, "gex", f"Gamma Exposure par strike — {bucket}"),
+            levels_strip(levels, hvl, zg),
+            exposure_fig(sel, snap.spot, zg, "gex", f"Gamma Exposure par strike — {bucket}",
+                         levels=levels, hvl=hvl),
             exposure_fig(sel, snap.spot, zg, "dex", f"Delta Exposure par strike — {bucket}"),
             flow_fig(symbol),
             history_fig(symbol),

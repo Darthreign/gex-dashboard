@@ -88,20 +88,24 @@ def exposure_by_strike(df: pd.DataFrame, col: str) -> pd.DataFrame:
     return pivot.reset_index()
 
 
-def zero_gamma(df: pd.DataFrame, spot: float) -> float | None:
+def zero_gamma(df: pd.DataFrame, spot: float, weight_col: str = "open_interest") -> float | None:
     """Niveau de spot où le GEX net (recalculé à ce spot) change de signe.
 
     Recalcule le gamma BS sur une grille de spots ±zg_range en gardant IV et
     t figés, puis interpole le passage par zéro le plus proche du spot.
+
+    weight_col="open_interest" : le flip structurel (zero gamma classique).
+    weight_col="volume"        : le HVL façon volatility trigger — bascule du
+    profil pondéré par ce qui se traite (et donc se hedge) aujourd'hui.
     """
-    d = df[(df["iv"] > 1e-4) & (df["open_interest"] > 0)]
+    d = df[(df["iv"] > 1e-4) & (df[weight_col] > 0)]
     if d.empty:
         return None
     grid = np.linspace(spot * (1 - SETTINGS.zg_range), spot * (1 + SETTINGS.zg_range), SETTINGS.zg_steps)
     k = d["strike"].to_numpy()[:, None]
     t = d["t_years"].to_numpy()[:, None]
     iv = d["iv"].to_numpy()[:, None]
-    oi = d["open_interest"].to_numpy()[:, None]
+    oi = d[weight_col].to_numpy()[:, None]
     sign = np.where((d["type"] == "C").to_numpy()[:, None], 1.0, -1.0)
     g = greeks.gamma(grid[None, :], k, t, RISK_FREE_RATE, iv)
     profile = (sign * g * oi * CONTRACT_MULTIPLIER * grid[None, :] ** 2 * 0.01).sum(axis=0)
@@ -113,6 +117,24 @@ def zero_gamma(df: pd.DataFrame, spot: float) -> float | None:
     x0, x1 = grid[idx], grid[idx + 1]
     y0, y1 = profile[idx], profile[idx + 1]
     return float(x0 - y0 * (x1 - x0) / (y1 - y0))
+
+
+def top_gex_levels(df: pd.DataFrame, n: int = 5) -> pd.DataFrame:
+    """Les n strikes au |GEX| le plus fort sur l'échéance la plus proche
+    (le 0DTE en séance ; la prochaine séance après la cloche).
+
+    Retourne strike, gex net, rang (1 = mur le plus fort) et l'expiration utilisée.
+    """
+    if df.empty:
+        return pd.DataFrame()
+    nearest = df["expiry"].min()
+    sub = df[df["expiry"] == nearest]
+    agg = sub.groupby("strike")["gex"].sum().reset_index()
+    agg = agg.loc[agg["gex"].abs().nlargest(n).index]
+    agg = agg.sort_values("gex", key=abs, ascending=False).reset_index(drop=True)
+    agg["rank"] = agg.index + 1
+    agg["expiry"] = nearest
+    return agg
 
 
 def put_call_ratios(df: pd.DataFrame) -> dict[str, float]:
