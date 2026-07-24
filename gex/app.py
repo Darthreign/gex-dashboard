@@ -134,11 +134,18 @@ def exposure_fig(df: pd.DataFrame, spot: float, zg: float | None, col: str, titl
 FLOW_TITLE = "Flux delta options (proxy Δvolume×δ, barres 1 min — délayé ~15 min)"
 
 
-def flow_fig(symbol: str) -> go.Figure:
-    day = datetime.now(ET).strftime("%Y-%m-%d")
+def available_flow_days(symbol: str) -> list[str]:
+    root = SETTINGS.data_dir / "flows" / symbol
+    if not root.exists():
+        return []
+    return sorted(p.stem for p in root.glob("*.parquet"))
+
+
+def flow_fig(symbol: str, day: str | None = None) -> go.Figure:
+    day = day or datetime.now(ET).strftime("%Y-%m-%d")
     flows = store.load_flows(symbol, day)
     if flows.empty:
-        return empty_fig("Aucun flux enregistré aujourd'hui (marché fermé ?)", FLOW_TITLE)
+        return empty_fig(f"Aucun flux enregistré le {day}", FLOW_TITLE)
     ts = to_local(flows["timestamp"])
     vals = flows["flow_total"].to_numpy() / 1e6
     cum = np.cumsum(vals)
@@ -323,6 +330,15 @@ def create_app() -> Dash:
                 ],
                 style={"display": "flex", "gap": "12px", "flexWrap": "wrap", "marginBottom": "12px"},
             ),
+            html.Div(
+                [
+                    html.Span("Jour de flux :", style={"color": C["muted"], "fontSize": "12px"}),
+                    dcc.Dropdown(id="flow-day", clearable=False,
+                                 style={"width": "160px", "color": "#111"}),
+                ],
+                style={"display": "flex", "gap": "8px", "alignItems": "center",
+                       "marginBottom": "4px"},
+            ),
             dcc.Graph(id="flow", style={"marginBottom": "12px"}),
             html.Div(
                 [
@@ -376,9 +392,9 @@ def create_app() -> Dash:
          Output("smile", "figure")],
         [Input("tick", "n_intervals"), Input("symbol", "value"),
          Input("bucket", "value"), Input("window", "value"),
-         Input("majors", "value")],
+         Input("majors", "value"), Input("flow-day", "value")],
     )
-    def refresh(_, symbol, bucket, window, majors):
+    def refresh(_, symbol, bucket, window, majors, flow_day):
         st = STATE.get(symbol)
         with STATE.lock:
             df = st.enriched
@@ -398,6 +414,14 @@ def create_app() -> Dash:
         today = datetime.now(ET).date()
         sel = df[metrics.bucket_mask(df, bucket, today)]
         zg = summary.zero_gamma if summary else None
+        # uirevision : tant que la révision ne change pas, Plotly conserve le
+        # zoom/pan de l'utilisateur à travers les refresh de dcc.Interval.
+        # Changer de sous-jacent/fenêtre/bucket réinitialise la vue (voulu).
+        def _pin(fig, rev):
+            fig.update_layout(uirevision=rev)
+            return fig
+
+        rev = f"{symbol}-{bucket}-{window}"
         levels = metrics.top_gex_levels(df)
         if majors and not levels.empty:
             # ne garde que les murs pesant au moins 25 % du plus fort
@@ -406,14 +430,22 @@ def create_app() -> Dash:
         return (
             build_cards(symbol),
             levels_strip(levels, hvl, zg),
-            exposure_fig(sel, snap.spot, zg, "gex", f"Gamma Exposure par strike — {bucket}",
-                         levels=levels, hvl=hvl, window=window),
-            exposure_fig(sel, snap.spot, zg, "dex", f"Delta Exposure par strike — {bucket}",
-                         window=window),
-            flow_fig(symbol),
-            history_fig(symbol),
-            spot_zg_fig(symbol),
-            smile_fig(sel, snap.spot),
+            _pin(exposure_fig(sel, snap.spot, zg, "gex", f"Gamma Exposure par strike — {bucket}",
+                              levels=levels, hvl=hvl, window=window), rev),
+            _pin(exposure_fig(sel, snap.spot, zg, "dex", f"Delta Exposure par strike — {bucket}",
+                              window=window), rev),
+            _pin(flow_fig(symbol, flow_day), f"{symbol}-{flow_day}"),
+            _pin(history_fig(symbol), symbol),
+            _pin(spot_zg_fig(symbol), symbol),
+            _pin(smile_fig(sel, snap.spot), rev),
         )
+
+    @app.callback(
+        [Output("flow-day", "options"), Output("flow-day", "value")],
+        [Input("symbol", "value")],
+    )
+    def update_flow_days(symbol):
+        days = available_flow_days(symbol)
+        return [{"label": d, "value": d} for d in days], (days[-1] if days else None)
 
     return app
