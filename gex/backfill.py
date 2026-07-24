@@ -23,6 +23,7 @@ Usage : python -m gex.backfill [--daily-days 31] [--intraday-days 7]
 from __future__ import annotations
 
 import argparse
+import io
 import logging
 import os
 import sys
@@ -113,7 +114,8 @@ def load_open_interest(path: Path) -> pd.DataFrame:
     from databento_dbn import StatType
     df = _to_df(path).reset_index()
     df = df[df["stat_type"] == int(StatType.OPEN_INTEREST)]
-    day = pd.to_datetime(df["ts_event"], utc=True).dt.tz_convert(ET).dt.date
+    # publication ~10:30 UTC le matin du jour de bourse : la date UTC est la bonne
+    day = pd.to_datetime(df["ts_event"], utc=True).dt.date
     out = pd.DataFrame(
         {"day": day, "instrument_id": df["instrument_id"],
          "open_interest": df["quantity"].astype(float)}
@@ -124,7 +126,9 @@ def load_open_interest(path: Path) -> pd.DataFrame:
 
 def load_eod(path: Path) -> pd.DataFrame:
     df = _to_df(path).reset_index()
-    day = pd.to_datetime(df["ts_event"], utc=True).dt.tz_convert(ET).dt.date
+    # ts_event = 00:00 UTC du jour de bourse (ouverture de la barre) :
+    # la date UTC est le jour de bourse, ne PAS convertir en ET (décale d'un jour)
+    day = pd.to_datetime(df["ts_event"], utc=True).dt.date
     return pd.DataFrame(
         {"day": day, "instrument_id": df["instrument_id"],
          "close": df["close"].astype(float), "volume": df["volume"].astype(float)}
@@ -132,6 +136,29 @@ def load_eod(path: Path) -> pd.DataFrame:
 
 
 # ------------------------------------------------------------------ quotidien
+
+# Clôtures quotidiennes officielles des indices — le spot par parité call-put
+# sur closes EOD est trop bruité (trades non synchrones, SPX AM vs SPXW PM).
+SPOT_SOURCES = {
+    "SPX": ("https://cdn.cboe.com/api/global/us_indices/daily_prices/SPX_History.csv",
+            "%m/%d/%Y", "DATE", "SPX"),
+    "NDX": ("https://fred.stlouisfed.org/graph/fredgraph.csv?id=NASDAQ100",
+            "%Y-%m-%d", "observation_date", "NASDAQ100"),
+}
+
+
+def load_spots() -> dict[str, dict[date, float]]:
+    import requests
+    out: dict[str, dict[date, float]] = {}
+    for sym, (url, fmt, datecol, valcol) in SPOT_SOURCES.items():
+        r = requests.get(url, timeout=60)
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text))
+        days = pd.to_datetime(df[datecol], format=fmt).dt.date
+        vals = pd.to_numeric(df[valcol], errors="coerce")
+        out[sym] = {d: float(v) for d, v in zip(days, vals) if np.isfinite(v)}
+        log.info("Spots %s : %d jours (dernier %s)", sym, len(out[sym]), max(out[sym]))
+    return out
 
 def _t_years(expiries: pd.Series, day: date) -> np.ndarray:
     close_dt = datetime.combine(day, time(16, 0), tzinfo=ET)
@@ -148,6 +175,9 @@ def spot_from_parity(chain: pd.DataFrame, day: date) -> float | None:
     if not expiries:
         return None
     e = chain[chain["expiry"] == expiries[0]]
+    # doublons de strike possibles (racines SPX et SPXW sur la même échéance) :
+    # on garde par strike le contrat le plus traité
+    e = e.sort_values("volume").drop_duplicates(["type", "strike"], keep="last")
     calls = e[e["type"] == "C"].set_index("strike")["close"]
     puts = e[e["type"] == "P"].set_index("strike")["close"]
     vol = e.groupby("strike")["volume"].sum()
@@ -158,14 +188,22 @@ def spot_from_parity(chain: pd.DataFrame, day: date) -> float | None:
     t = _t_years(pd.Series([expiries[0]] * len(common)), day)
     s = calls.loc[common].to_numpy() - puts.loc[common].to_numpy() \
         + common.to_numpy() * np.exp(-RISK_FREE_RATE * t)
-    return float(np.median(s))
+    med = float(np.median(s))
+    # garde-fou : si les paires divergent (> 2 % de dispersion médiane),
+    # les closes sont incohérents, mieux vaut ignorer le jour
+    if np.median(np.abs(s - med)) / med > 0.02:
+        return None
+    return med
 
 
-def build_day(chain: pd.DataFrame, symbol: str, day: date) -> dict | None:
+def build_day(chain: pd.DataFrame, symbol: str, day: date,
+              spot: float | None = None) -> dict | None:
     """Chaîne d'un jour (OI + close jointées) -> ligne d'historique."""
-    spot = spot_from_parity(chain, day)
+    if spot is None:
+        spot = spot_from_parity(chain, day)
     if spot is None or not np.isfinite(spot):
-        log.warning("%s %s : spot par parité indisponible, jour ignoré", symbol, day)
+        log.warning("%s %s : spot indisponible (source externe et parité), jour ignoré",
+                    symbol, day)
         return None
     t = _t_years(chain["expiry"], day)
     iv = greeks.implied_vol(
@@ -273,8 +311,11 @@ def run(daily_days: int, intraday_days: int, max_cost: float, dry_run: bool) -> 
 
     day_results: dict[tuple[str, date], dict] = {}
     new_rows = []
+    spots = load_spots()
     for (symbol, day), chain in chains.groupby(["symbol", "day"]):
-        res = build_day(chain, symbol, day)
+        if day.weekday() >= 5:  # artefacts de publication le week-end
+            continue
+        res = build_day(chain, symbol, day, spots.get(symbol, {}).get(day))
         if res is None:
             continue
         day_results[(symbol, day)] = res
