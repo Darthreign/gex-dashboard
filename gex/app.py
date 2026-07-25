@@ -203,47 +203,27 @@ def tv_levels_string(levels: pd.DataFrame | None, hvl: float | None,
     return ";".join(out)
 
 
-def _draw_levels(fig, items: list[dict], lo: float, hi: float, height: int) -> None:
-    """Trace des lignes horizontales de niveau en évitant que les étiquettes
-    se chevauchent.
+def _draw_levels(fig, items: list[dict], lo: float, hi: float) -> None:
+    """Trace des lignes horizontales de niveau.
 
-    Toutes les étiquettes sont posées AU-DESSUS de leur ligne (mélanger
-    au-dessus/en dessous crée des superpositions dès que deux niveaux sont
-    proches). Les collisions restantes sont réglées par un décalage vertical
-    calculé en pixels, côté par côté.
+    Chaque étiquette reste posée SUR sa propre ligne, sans décalage : la
+    déplacer pour éviter un voisin la ferait désigner un prix qui n'est pas le
+    sien, ce qui trompe davantage qu'un chevauchement visible. Les niveaux
+    sont répartis entre les deux graphiques et entre les deux côtés, ce qui
+    suffit à les espacer dans la grande majorité des cas.
 
     items : dicts {y, label, color, dash, side} ; side ∈ {"left", "right"}.
     """
-    visible = [i for i in items if i["y"] is not None and lo <= i["y"] <= hi]
-    if not visible:
-        return
-    span = (hi - lo) or 1.0
-    min_px = 15          # hauteur d'une étiquette
-    # Plafond du décalage : au-delà, l'étiquette s'éloignerait trop de sa
-    # ligne et induirait en erreur sur le niveau réel — mieux vaut alors
-    # tolérer un chevauchement partiel.
-    max_px = 28
-    last: dict[str, tuple[float, float]] = {}   # côté -> (px du dernier, décalage)
-
-    for it in sorted(visible, key=lambda i: i["y"]):
-        side = it.get("side", "right")
-        px = (it["y"] - lo) / span * height     # position verticale en pixels
-        shift = 0.0
-        prev = last.get(side)
-        if prev is not None:
-            prev_px, prev_shift = prev
-            overlap = min_px - ((px + shift) - (prev_px + prev_shift))
-            if overlap > 0:
-                shift = min(prev_shift + overlap, max_px)
-        last[side] = (px, shift)
+    for it in items:
+        if it["y"] is None or not (lo <= it["y"] <= hi):
+            continue
         fig.add_hline(
             y=it["y"], line_color=it["color"], line_dash=it.get("dash", "dash"),
             line_width=it.get("width", 1),
             annotation_text=(it["label"] if it.get("short")
                              else f"{it['label']} {it['y']:.0f}"),
             annotation_font=dict(color=it["color"], size=10),
-            annotation_position=f"top {side}",
-            annotation_yshift=shift,
+            annotation_position=f"top {it.get('side', 'right')}",
         )
 
 
@@ -312,7 +292,7 @@ def exposure_fig(df: pd.DataFrame, spot: float, zg: float | None, col: str, titl
             if v is not None:
                 items.append(dict(y=xf(v), label=label, color=C["d1"],
                                   dash="dot", width=1.5, side="right"))
-    _draw_levels(fig, items, lo, hi, height=560)
+    _draw_levels(fig, items, lo, hi)
     return fig
 
 
