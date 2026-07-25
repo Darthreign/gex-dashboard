@@ -36,6 +36,41 @@ open interest, volume, Greeks — plus spot. **~15 min delayed**, regenerated
 ~every 60 s (feed timestamps are UTC). Default underlyings: SPX and NDX;
 SPY/QQQ available as fallbacks (`gex/config.py`).
 
+## Assisted install (Claude Code)
+
+If you use [Claude Code](https://claude.com/claude-code), open it in an empty
+folder and paste this prompt — it handles everything, including registering the
+MCP server:
+
+```
+Install the GEX dashboard (SPX/NDX options analytics) on my machine.
+
+Repository: https://github.com/Darthreign/gex-dashboard
+
+Steps:
+1. Check that Python 3.11+ and git are available. If either is missing,
+   tell me how to install it and stop there.
+2. Clone the repository into the current folder and cd into it.
+3. Create a .venv virtual environment and install requirements.txt.
+4. Run the test suite (pytest tests/ -q) to validate the install:
+   62 tests must pass.
+5. Adapt .mcp.json to my system: replace the "command" value with the
+   ABSOLUTE path to the venv python (Windows: .venv\Scripts\python.exe,
+   macOS/Linux: .venv/bin/python). The shipped file contains a relative
+   Windows path that does not work elsewhere.
+6. Start the dashboard (python run.py) and give me the URL to open.
+7. Tell me to restart Claude Code from this folder to activate the
+   "gex-data" MCP server, and list the tools it exposes.
+
+Important: no account, API key or subscription is required — data comes from
+CBOE's free public endpoint. Do not ask me for any credentials. The
+backfill.py (Databento) and tt_auth.py (tastytrade) modules are optional and
+paid: ignore them entirely.
+```
+
+The MCP server then lets you query your own data in natural language
+("analyse the current gamma structure", "where are the NDX walls?").
+
 ## Quick start
 
 ```
