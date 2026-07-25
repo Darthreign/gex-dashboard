@@ -337,6 +337,10 @@ class SummaryMetrics:
     pc_volume: float
     net_gex_0dte: float = 0.0
     basis: float | None = None   # future front month - spot, suivi dans le temps
+    # Provenance de la ligne. Détermine ce qui peut être partagé : "cboe" =
+    # source publique gratuite, redistribuable ; "databento" = source payante
+    # sous licence d'usage personnel, NON redistribuable.
+    source: str = "cboe"
 
     def as_row(self) -> dict:
         return {
@@ -349,6 +353,7 @@ class SummaryMetrics:
             "pc_volume": self.pc_volume,
             "net_gex_0dte": self.net_gex_0dte,
             "basis": self.basis,
+            "source": self.source,
         }
 
 
@@ -415,4 +420,5 @@ def flow_delta(prev: pd.DataFrame, cur: pd.DataFrame, spot: float) -> dict[str, 
         "flow_puts": float(signed[~is_call].sum()),
         "flow_0dte": float(signed[m["expiry"] == today].sum()),
         "contracts_traded": float(dvol.sum()),
+        "source": "cboe",   # collecté en direct sur la source publique
     }

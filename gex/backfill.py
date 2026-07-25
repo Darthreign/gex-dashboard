@@ -270,6 +270,9 @@ def build_day(chain: pd.DataFrame, symbol: str, day: date,
         "pc_oi": float(oi_p / oi_c) if oi_c else float("nan"),
         "pc_volume": float(v_p / v_c) if v_c else float("nan"),
         "net_gex_0dte": float(d.loc[d["expiry"] == day, "gex"].sum()),
+        # provenance : données payantes sous licence d'usage personnel,
+        # exclues de tout export partageable (voir gex/export.py)
+        "source": "databento",
         "_deltas": d[["instrument_id", "delta_bs", "expiry"]],
         "_spot": spot,
     }
@@ -293,6 +296,7 @@ def build_flows(minute_df: pd.DataFrame, deltas: pd.DataFrame, spot: float,
     grouped["flow_puts"] = m[m["delta_bs"] <= 0].groupby("minute")["signed"].sum() \
         .reindex(grouped.index, fill_value=0.0)
     grouped = grouped.reset_index().rename(columns={"minute": "timestamp"})
+    grouped["source"] = "databento"   # non redistribuable
     return grouped
 
 
