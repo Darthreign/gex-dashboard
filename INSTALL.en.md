@@ -40,7 +40,11 @@ Python is the language the program is written in. You install it once.
 
 ## Step 2 — Download the program
 
-No need to know Git. You just grab a ZIP file.
+Two methods. **Method B (Git) is recommended** if you plan to keep the tool:
+updating later takes a **single command**, with nothing to re-download.
+Method A (ZIP) is the simplest just to try it out.
+
+### Method A — ZIP file (simplest)
 
 1. Go to **https://github.com/Darthreign/gex-dashboard**
 2. Click the green **"Code"** button (top right of the file list).
@@ -49,7 +53,33 @@ No need to know Git. You just grab a ZIP file.
    - **Windows**: right-click the file → *Extract All* → *Extract*.
    - **Mac**: double-click the file, it unzips itself.
 5. You get a folder named **`gex-dashboard-main`**. Move it wherever you like
-   (your *Desktop*, for example) so you can find it again.
+   (your *Desktop*, for example).
+
+### Method B — Git (recommended, easy updates)
+
+Git is a small tool that downloads the program **and** lets you update it later
+with a single command. You install it once.
+
+1. **Install Git**:
+   - **Windows**: go to **https://git-scm.com/download/win**, the download
+     starts by itself. Open the file and click **Next** on every screen (the
+     defaults are perfectly fine) up to *Install*, then *Finish*.
+   - **Mac**: open the **Terminal** app and type `git --version`. If it isn't
+     installed, a window offers to install it: accept. Otherwise Git is already
+     there.
+2. **Download the program**: open a terminal (Terminal on Mac; on Windows, open
+   the folder where you want it — your *Desktop* for example — click the address
+   bar, type `powershell`, Enter), then type:
+
+   ```
+   git clone https://github.com/Darthreign/gex-dashboard.git
+   ```
+
+3. You get a folder named **`gex-dashboard`**.
+
+> The rest of the guide refers to the "program folder": that's
+> `gex-dashboard-main` if you used the ZIP, or `gex-dashboard` if you used Git.
+> Same contents either way.
 
 ---
 
@@ -60,8 +90,9 @@ it **in the right place**: inside the program's folder.
 
 ### On Windows
 
-1. Open the **`gex-dashboard-main`** folder (double-click). Inside you should
-   see files like `run.py`, `requirements.txt`, a `gex` folder…
+1. Open the **program folder** (`gex-dashboard-main` if you used the ZIP,
+   `gex-dashboard` if you used Git). Inside you should see files like `run.py`,
+   `requirements.txt`, a `gex` folder…
 2. Click once in the **address bar** at the top of the window (where the folder
    path is shown). The text highlights in blue.
 3. Type **`powershell`** over it and press **Enter**.
@@ -73,8 +104,8 @@ it **in the right place**: inside the program's folder.
 1. Open the **Terminal** app (search "Terminal" in Spotlight with
    *Cmd + Space*).
 2. Type **`cd `** (with a space after `cd`), **without pressing Enter**.
-3. **Drag the folder** `gex-dashboard-main` from Finder straight into the
-   Terminal window: its path writes itself.
+3. **Drag the program folder** from Finder straight into the Terminal window:
+   its path writes itself.
 4. Press **Enter**.
 
 ---
@@ -178,9 +209,14 @@ shared the program with you.
 - **English / French version**: *FR / EN* button at the top of the dashboard.
 - **Understanding the indicators**: *FAQ* button at the top of the dashboard,
   or the [FAQ.en.md](FAQ.en.md) file.
-- **Updating the program** later: re-download the ZIP (step 2) and redo the
-  install in the new folder. Your data stays in the old `data/` folder if you
-  want to keep it.
+- **Updating the program** later:
+  - **If you used Git** (method B): open the terminal in the folder (step 3)
+    and just type `git pull`. That's it — the program updates, your data in
+    `data/` is kept. If the update touches the components, re-run the
+    `pip install …` command from step 4 afterwards.
+  - **If you used the ZIP** (method A): re-download the ZIP (step 2) and redo
+    the install in the new folder. Keep your old `data/` folder if you want to
+    preserve your history.
 - **Claude Code assistant**: if you use Claude Code, the [README](README.en.md)
   offers a prompt that does the whole install for you.
 

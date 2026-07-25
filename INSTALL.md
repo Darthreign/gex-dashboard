@@ -43,7 +43,11 @@ une fois.
 
 ## Étape 2 — Télécharger le programme
 
-Pas besoin de connaître Git. On récupère simplement un fichier ZIP.
+Deux méthodes. **La méthode B (Git) est recommandée** si tu comptes garder
+l'outil : la mise à jour se fera plus tard en **une seule commande**, sans rien
+retélécharger. La méthode A (ZIP) est la plus simple pour juste essayer.
+
+### Méthode A — Fichier ZIP (la plus simple)
 
 1. Va sur **https://github.com/Darthreign/gex-dashboard**
 2. Clique sur le bouton vert **« Code »** (en haut à droite de la liste des
@@ -53,7 +57,35 @@ Pas besoin de connaître Git. On récupère simplement un fichier ZIP.
    - **Windows** : clic droit sur le fichier → *Extraire tout* → *Extraire*.
    - **Mac** : double-clique sur le fichier, il se décompresse tout seul.
 5. Tu obtiens un dossier nommé **`gex-dashboard-main`**. Déplace-le où tu veux
-   (par exemple sur ton *Bureau*), tu sauras le retrouver.
+   (par exemple sur ton *Bureau*).
+
+### Méthode B — Git (recommandée, mises à jour faciles)
+
+Git est un petit outil qui télécharge le programme **et** permet de le mettre à
+jour ensuite d'une seule commande. Il s'installe une fois.
+
+1. **Installe Git** :
+   - **Windows** : va sur **https://git-scm.com/download/win**, le
+     téléchargement démarre seul. Ouvre le fichier et clique **Next** à chaque
+     écran (les réglages par défaut conviennent parfaitement) jusqu'à
+     *Install*, puis *Finish*.
+   - **Mac** : ouvre l'app **Terminal** et tape `git --version`. S'il n'est pas
+     installé, une fenêtre te propose de l'installer : accepte. Sinon Git est
+     déjà là.
+2. **Télécharge le programme** : ouvre un terminal (Terminal sur Mac ;
+   sur Windows, ouvre le dossier où tu veux le mettre — ton *Bureau* par
+   exemple — clique dans la barre d'adresse, tape `powershell`, Entrée), puis
+   tape :
+
+   ```
+   git clone https://github.com/Darthreign/gex-dashboard.git
+   ```
+
+3. Tu obtiens un dossier nommé **`gex-dashboard`**.
+
+> La suite du guide parle du « dossier du programme » : ce sera
+> `gex-dashboard-main` si tu as pris le ZIP, ou `gex-dashboard` si tu as pris
+> Git. C'est le même contenu.
 
 ---
 
@@ -64,9 +96,9 @@ de l'ouvrir **au bon endroit** : à l'intérieur du dossier du programme.
 
 ### Sur Windows
 
-1. Ouvre le dossier **`gex-dashboard-main`** (double-clic). Tu dois voir à
-   l'intérieur des fichiers comme `run.py`, `requirements.txt`, un dossier
-   `gex`…
+1. Ouvre le **dossier du programme** (`gex-dashboard-main` si tu as pris le
+   ZIP, `gex-dashboard` si tu as pris Git). Tu dois voir à l'intérieur des
+   fichiers comme `run.py`, `requirements.txt`, un dossier `gex`…
 2. Clique une fois dans la **barre d'adresse** en haut de la fenêtre (là où
    est écrit le chemin du dossier). Le texte se surligne en bleu.
 3. Tape **`powershell`** par-dessus et appuie sur **Entrée**.
@@ -78,8 +110,8 @@ de l'ouvrir **au bon endroit** : à l'intérieur du dossier du programme.
 1. Ouvre l'application **Terminal** (cherche « Terminal » dans Spotlight avec
    *Cmd + Espace*).
 2. Tape **`cd `** (avec un espace après `cd`), **sans appuyer sur Entrée**.
-3. **Glisse le dossier** `gex-dashboard-main` depuis le Finder directement dans
-   la fenêtre du Terminal : son chemin s'écrit tout seul.
+3. **Glisse le dossier du programme** depuis le Finder directement dans la
+   fenêtre du Terminal : son chemin s'écrit tout seul.
 4. Appuie sur **Entrée**.
 
 ---
@@ -185,9 +217,14 @@ la personne qui t'a partagé le programme.
 - **Version en anglais / français** : bouton *FR / EN* en haut du dashboard.
 - **Comprendre les indicateurs** : bouton *FAQ* en haut du dashboard, ou le
   fichier [FAQ.md](FAQ.md).
-- **Mettre à jour le programme** plus tard : retélécharge le ZIP (étape 2) et
-  refais l'installation dans le nouveau dossier. Tes données restent dans
-  l'ancien dossier `data/` si tu veux les récupérer.
+- **Mettre à jour le programme** plus tard :
+  - **Si tu as utilisé Git** (méthode B) : ouvre le terminal dans le dossier
+    (étape 3) et tape simplement `git pull`. C'est tout — le programme se met à
+    jour, tes données dans `data/` sont conservées. Si la mise à jour touche
+    les composants, relance ensuite la commande `pip install …` de l'étape 4.
+  - **Si tu as utilisé le ZIP** (méthode A) : retélécharge le ZIP (étape 2) et
+    refais l'installation dans le nouveau dossier. Récupère ton ancien dossier
+    `data/` si tu veux garder ton historique.
 - **Assistant Claude Code** : si tu utilises Claude Code, le
   [README](README.md) propose un prompt qui fait toute l'installation à ta
   place.
