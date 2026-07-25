@@ -376,12 +376,20 @@ def profile_fig(df: pd.DataFrame, spot: float, zg: float | None, lang: str,
     fig.update_xaxes(title_text=t(lang, "profile_axis"), title_font=dict(color=C["muted"]))
     fig.update_yaxes(title_text="$Bn / 1%", title_font=dict(color=C["muted"]))
     fig.add_hline(y=0, line_color=C["axis"], line_width=1)
+    # Lignes verticales : étiquettes tournées pour courir LE LONG de la ligne.
+    # À l'horizontale, elles débordent latéralement et se chevauchent dès que
+    # le spot et le flip sont proches — ce qui est le cas le plus fréquent.
     fig.add_vline(x=xf(spot), line_color=C["spot"], line_dash="dot", line_width=1,
-                  annotation_text=f"Spot {xf(spot):.0f}", annotation_font_color=C["ink"])
+                  annotation_text=f"Spot {xf(spot):.0f}",
+                  annotation_font=dict(color=C["ink"], size=10),
+                  annotation_position="top left", annotation_textangle=-90,
+                  annotation_xshift=-2)
     if zg is not None:
         fig.add_vline(x=xf(zg), line_color=C["zg"], line_dash="dash", line_width=1,
                       annotation_text=f"Gamma Flip {xf(zg):.0f}",
-                      annotation_font_color=C["zg"], annotation_position="bottom right")
+                      annotation_font=dict(color=C["zg"], size=10),
+                      annotation_position="top right", annotation_textangle=-90,
+                      annotation_xshift=2)
     return fig
 
 
