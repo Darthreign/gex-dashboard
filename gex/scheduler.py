@@ -84,9 +84,10 @@ def pull_symbol(symbol: str, persist_snapshot: bool) -> None:
         st.last_feed_ts = snap.feed_timestamp
         STATE.last_error = None
     log.info(
-        "%s pull ok — spot=%.2f netGEX=%.2f Bn zeroG=%s",
+        "%s pull ok — spot=%.2f netGEX=%.2f Bn zeroG=%s basis=%s",
         symbol, snap.spot, summary.net_gex / 1e9,
         f"{summary.zero_gamma:.0f}" if summary.zero_gamma else "n/a",
+        f"{summary.basis:+.1f}" if summary.basis is not None else "n/a",
     )
 
 

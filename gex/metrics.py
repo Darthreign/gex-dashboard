@@ -124,6 +124,69 @@ def zero_gamma(df: pd.DataFrame, spot: float, weight_col: str = "open_interest")
     return float(x0 - y0 * (x1 - x0) / (y1 - y0))
 
 
+def third_friday(year: int, month: int) -> date:
+    """3e vendredi du mois — échéance des futures index CME."""
+    first = date(year, month, 1)
+    return first + timedelta(days=(4 - first.weekday()) % 7 + 14)
+
+
+def front_futures_expiry(today: date) -> date:
+    """Échéance du future front month (trimestriel : mars/juin/sept/déc)."""
+    for y in (today.year, today.year + 1):
+        for m in (3, 6, 9, 12):
+            e = third_friday(y, m)
+            if e >= today:
+                return e
+    raise ValueError("échéance introuvable")
+
+
+def futures_basis(df: pd.DataFrame, spot: float, today: date | None = None) -> float | None:
+    """Basis future - spot, déduit de la parité call-put : F = (C-P)·e^(rT) + K.
+
+    Utilise l'échéance d'options la plus proche de celle du future front month,
+    et la médiane sur les strikes proches de la monnaie (robuste aux quotes
+    aberrantes). Retourne None si aucune paire exploitable.
+
+    Le basis décroît vers 0 à l'approche de l'échéance : il est recalculé à
+    chaque pull, jamais figé.
+    """
+    if df.empty:
+        return None
+    today = today or datetime.now(ET).date()
+    target_exp = front_futures_expiry(today)
+    exps = df["expiry"].unique()
+    if len(exps) == 0:
+        return None
+    target = min(exps, key=lambda e: abs((e - target_exp).days))
+
+    e = df[df["expiry"] == target]
+    # racines multiples (SPX/SPXW) sur une même échéance : garder le plus traité
+    e = e.sort_values("volume").drop_duplicates(["type", "strike"], keep="last")
+    calls = e[e["type"] == "C"].set_index("strike")
+    puts = e[e["type"] == "P"].set_index("strike")
+    common = [k for k in calls.index.intersection(puts.index)
+              if abs(k - spot) / spot < 0.05]
+    fwds = []
+    for k in common:
+        cmid = (calls.loc[k, "bid"] + calls.loc[k, "ask"]) / 2
+        pmid = (puts.loc[k, "bid"] + puts.loc[k, "ask"]) / 2
+        if cmid <= 0 or pmid <= 0:
+            continue
+        t = calls.loc[k, "t_years"]
+        fwds.append((cmid - pmid) * np.exp(RISK_FREE_RATE * t) + k)
+    if len(fwds) < 5:
+        return None
+    basis = float(np.median(fwds)) - spot
+    # garde-fou : le basis d'un future index reste sous ~2 % du spot (portage
+    # taux - dividendes sur < 1 an). Au-delà, les quotes sont aberrantes et une
+    # conversion silencieuse fausserait tous les niveaux.
+    if abs(basis) > 0.02 * spot:
+        log.warning("Basis aberrant ignoré : %+.1f pts sur spot %.0f (%d paires)",
+                    basis, spot, len(fwds))
+        return None
+    return basis
+
+
 def top_gex_levels(df: pd.DataFrame, n: int = 5) -> pd.DataFrame:
     """Les n strikes au |GEX| le plus fort sur l'échéance la plus proche
     (le 0DTE en séance ; la prochaine séance après la cloche).
@@ -163,6 +226,7 @@ class SummaryMetrics:
     pc_oi: float
     pc_volume: float
     net_gex_0dte: float = 0.0
+    basis: float | None = None   # future front month - spot, suivi dans le temps
 
     def as_row(self) -> dict:
         return {
@@ -174,6 +238,7 @@ class SummaryMetrics:
             "pc_oi": self.pc_oi,
             "pc_volume": self.pc_volume,
             "net_gex_0dte": self.net_gex_0dte,
+            "basis": self.basis,
         }
 
 
@@ -189,6 +254,7 @@ def summarize(snapshot: ChainSnapshot, df: pd.DataFrame) -> SummaryMetrics:
         pc_oi=ratios["pc_oi"],
         pc_volume=ratios["pc_volume"],
         net_gex_0dte=float(df.loc[bucket_mask(df, "0DTE", today), "gex"].sum()),
+        basis=futures_basis(df, snapshot.spot, today),
     )
 
 

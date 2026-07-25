@@ -135,6 +135,55 @@ def test_flow_delta_ignores_volume_reset():
     assert flow["flow_total"] == 0.0
 
 
+def test_third_friday():
+    # échéances CME connues
+    assert metrics.third_friday(2026, 9) == date(2026, 9, 18)
+    assert metrics.third_friday(2026, 12) == date(2026, 12, 18)
+    assert metrics.third_friday(2026, 3) == date(2026, 3, 20)
+
+
+def test_front_futures_expiry_rolls():
+    # avant l'échéance de septembre -> septembre
+    assert metrics.front_futures_expiry(date(2026, 7, 25)) == date(2026, 9, 18)
+    # le jour même -> encore septembre
+    assert metrics.front_futures_expiry(date(2026, 9, 18)) == date(2026, 9, 18)
+    # le lendemain -> roule sur décembre
+    assert metrics.front_futures_expiry(date(2026, 9, 19)) == date(2026, 12, 18)
+    # fin d'année -> mars suivant
+    assert metrics.front_futures_expiry(date(2026, 12, 19)) == date(2027, 3, 19)
+
+
+def test_futures_basis_recovers_known_forward():
+    """Chaîne synthétique construite avec un forward connu : la parité
+    call-put doit le retrouver (C - P = (F - K)·e^(-rT))."""
+    import numpy as np
+    from gex.config import RISK_FREE_RATE
+    exp = metrics.front_futures_expiry(datetime.now(ET).date())
+    spot, fwd = 100.0, 100.8   # basis attendu +0.8
+    t = (pd.Timestamp(exp).tz_localize(ET) + pd.Timedelta(hours=16)
+         - datetime.now(ET)).total_seconds() / (365 * 24 * 3600)
+    rows = []
+    for k in np.arange(97.0, 103.5, 0.5):
+        # prix cohérents avec la parité, spread nul autour du mid
+        diff = (fwd - k) * np.exp(-RISK_FREE_RATE * t)
+        pmid = 2.0
+        cmid = pmid + diff
+        for typ, mid in (("C", cmid), ("P", pmid)):
+            rows.append({"expiry": exp, "type": typ, "strike": float(k),
+                         "bid": mid - 0.05, "ask": mid + 0.05, "volume": 10.0})
+    snap = make_chain(spot, rows)
+    df = metrics.enrich(snap)
+    basis = metrics.futures_basis(df, spot)
+    assert basis == pytest.approx(0.8, abs=0.02)
+
+
+def test_futures_basis_none_when_no_pairs():
+    exp = far_expiry()
+    snap = make_chain(100.0, [{"expiry": exp, "type": "C", "strike": 100.0}])
+    df = metrics.enrich(snap)
+    assert metrics.futures_basis(df, 100.0) is None
+
+
 def test_expired_contracts_dropped():
     past = (datetime.now(ET) - timedelta(days=3)).date()
     snap = make_chain(100.0, [

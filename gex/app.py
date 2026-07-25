@@ -87,14 +87,19 @@ def _bar_width(strikes: np.ndarray) -> float:
 
 def exposure_fig(df: pd.DataFrame, spot: float, zg: float | None, col: str, title: str,
                  lang: str, levels: pd.DataFrame | None = None, hvl: float | None = None,
-                 window: float = 0.04) -> go.Figure:
+                 window: float = 0.04, basis: float = 0.0) -> go.Figure:
+    # `basis` décale l'échelle de prix vers le future (0 = points d'indice).
     lo, hi = spot * (1 - window), spot * (1 + window)
     d = df[df["strike"].between(lo, hi)]
     agg = metrics.exposure_by_strike(d, col)
     if agg.empty:
         return empty_fig(t(lang, "no_data_window"), title)
     net = agg["net"].to_numpy() / 1e9
-    strikes = agg["strike"].to_numpy()
+    strikes = agg["strike"].to_numpy() + basis
+    spot = spot + basis
+    zg = zg + basis if zg is not None else None
+    hvl = hvl + basis if hvl is not None else None
+    lo, hi = lo + basis, hi + basis
     colors = np.where(net >= 0, C["pos"], C["neg"])
     fig = go.Figure(
         go.Bar(
@@ -125,12 +130,13 @@ def exposure_fig(df: pd.DataFrame, spot: float, zg: float | None, col: str, titl
     if levels is not None and not levels.empty:
         labels = wall_labels(levels)
         for lv in levels.itertuples():
-            if not (lo <= lv.strike <= hi):
+            y = lv.strike + basis
+            if not (lo <= y <= hi):
                 continue
             fig.add_hline(
-                y=lv.strike, line_color=C["lvl"], line_dash="dashdot",
+                y=y, line_color=C["lvl"], line_dash="dashdot",
                 line_width=1, opacity=0.8,
-                annotation_text=f"{labels[lv.strike]} {lv.strike:.0f}",
+                annotation_text=f"{labels[lv.strike]} {y:.0f}",
                 annotation_font=dict(color=C["lvl"], size=10),
                 annotation_position="top left",
             )
@@ -246,23 +252,23 @@ def card(label: str, value: str, sub: str = "", accent: str | None = None) -> ht
     )
 
 
-def build_cards(symbol: str, lang: str) -> list:
+def build_cards(symbol: str, lang: str, basis: float = 0.0) -> list:
     st = STATE.get(symbol)
     with STATE.lock:
         s = st.summary
         err = STATE.last_error
     if s is None:
         return [card(t(lang, "card_status"), "…", err or t(lang, "waiting_short"))]
-    zg_txt = f"{s.zero_gamma:.0f}" if s.zero_gamma else "n/a"
+    zg_txt = f"{s.zero_gamma + basis:.0f}" if s.zero_gamma else "n/a"
     zg_sub = ""
     if s.zero_gamma:
-        d = s.spot - s.zero_gamma
+        d = s.spot - s.zero_gamma  # écart inchangé par le basis
         zg_sub = t(lang, "card_zg_sub", sign="+" if d >= 0 else "",
                    pts=f"{d:.0f}", reg="+" if d >= 0 else "-")
     gex_color = C["pos"] if s.net_gex >= 0 else C["neg"]
     feed_local = s.timestamp.replace(tzinfo=ET).astimezone(LOCAL_TZ)
     return [
-        card(t(lang, "card_spot"), f"{s.spot:,.0f}",
+        card(t(lang, "card_spot"), f"{s.spot + basis:,.0f}",
              t(lang, "card_feed", local=f"{feed_local:%H:%M:%S}", et=f"{s.timestamp:%H:%M}")),
         card(t(lang, "card_net_gex"), f"{s.net_gex / 1e9:+.1f} $Bn",
              t(lang, "stabilizing") if s.net_gex >= 0 else t(lang, "destabilizing"),
@@ -305,6 +311,7 @@ def create_app() -> Dash:
                                          {"label": "±10%", "value": 0.10}],
                                 value=0.04, inline=True, **radio_style,
                             ),
+                            dcc.RadioItems(id="unit", value="index", inline=True, **radio_style),
                             dcc.RadioItems(
                                 id="lang",
                                 options=[{"label": l.upper(), "value": l} for l in LANGS],
@@ -368,7 +375,8 @@ def create_app() -> Dash:
         )
 
     def levels_strip(levels: pd.DataFrame | None, lang: str,
-                     hvl: float | None = None, zg: float | None = None) -> list:
+                     hvl: float | None = None, zg: float | None = None,
+                     basis: float = 0.0, future: str | None = None) -> list:
         if levels is None or levels.empty:
             return [html.Span(t(lang, "levels_unavailable"),
                               style={"color": C["muted"], "fontSize": "12px"})]
@@ -376,15 +384,21 @@ def create_app() -> Dash:
         labels = wall_labels(levels)
         items = [html.Span(t(lang, "levels_prefix", exp=f"{exp:%d/%m}"),
                            style={"color": C["muted"], "fontSize": "12px", "marginRight": "4px"})]
+        if basis and future:
+            items.append(html.Span(
+                t(lang, "basis_note", fut=future, basis=basis),
+                style={"color": C["hvl"], "fontSize": "11px", "marginRight": "4px"}))
         if zg is not None:
-            items.append(_chip([html.B("Gamma Flip ", style={"color": C["zg"]}), f"{zg:.0f}"], C["zg"]))
+            items.append(_chip([html.B("Gamma Flip ", style={"color": C["zg"]}),
+                                f"{zg + basis:.0f}"], C["zg"]))
         if hvl is not None:
-            items.append(_chip([html.B("HVL ", style={"color": C["hvl"]}), f"{hvl:.0f}"], C["hvl"]))
+            items.append(_chip([html.B("HVL ", style={"color": C["hvl"]}),
+                                f"{hvl + basis:.0f}"], C["hvl"]))
         for lv in levels.itertuples():
             side = t(lang, "side_call") if lv.gex > 0 else t(lang, "side_put")
             items.append(_chip(
                 [html.B(f"{labels[lv.strike]} ", style={"color": C["lvl"]}),
-                 f"{lv.strike:.0f} ",
+                 f"{lv.strike + basis:.0f} ",
                  html.Span(f"({lv.gex / 1e9:+.1f} $Bn {side})",
                            style={"color": C["ink2"], "fontSize": "11px"})],
                 "rgba(255,255,255,0.10)",
@@ -415,14 +429,18 @@ def create_app() -> Dash:
     @app.callback(
         [Output("bucket", "options"), Output("majors", "options"),
          Output("flow-day-label", "children"), Output("flow-today", "children"),
-         Output("footer", "children")],
-        [Input("lang", "value")],
+         Output("footer", "children"), Output("unit", "options")],
+        [Input("lang", "value"), Input("symbol", "value")],
     )
-    def apply_lang(lang):
+    def apply_lang(lang, symbol):
         bucket_opts = [{"label": t(lang, BUCKET_KEYS[b]), "value": b} for b in EXPIRY_BUCKETS]
         majors_opts = [{"label": t(lang, "majors_only"), "value": "on"}]
+        fut = UNDERLYINGS[symbol].future
+        unit_opts = [{"label": t(lang, "unit_index"), "value": "index"},
+                     {"label": fut or t(lang, "unit_futures"), "value": "futures",
+                      "disabled": fut is None}]
         return (bucket_opts, majors_opts, t(lang, "flow_day_label"),
-                t(lang, "last_session"), t(lang, "footer"))
+                t(lang, "last_session"), t(lang, "footer"), unit_opts)
 
     @app.callback(
         [Output("cards", "children"), Output("levels", "children"), Output("gex-strike", "figure"),
@@ -432,9 +450,9 @@ def create_app() -> Dash:
         [Input("tick", "n_intervals"), Input("symbol", "value"),
          Input("bucket", "value"), Input("window", "value"),
          Input("majors", "value"), Input("flow-day", "value"),
-         Input("lang", "value")],
+         Input("lang", "value"), Input("unit", "value")],
     )
-    def refresh(_, symbol, bucket, window, majors, flow_day, lang):
+    def refresh(_, symbol, bucket, window, majors, flow_day, lang, unit):
         st = STATE.get(symbol)
         with STATE.lock:
             df = st.enriched
@@ -446,6 +464,7 @@ def create_app() -> Dash:
             return (
                 build_cards(symbol, lang),
                 levels_strip(None, lang),
+
                 empty_fig(wait, t(lang, "gex_title", bucket=bucket_label)),
                 empty_fig(wait, t(lang, "dex_title", bucket=bucket_label)),
                 empty_fig(wait, t(lang, "flow_title")),
@@ -463,21 +482,27 @@ def create_app() -> Dash:
             fig.update_layout(uirevision=rev)
             return fig
 
-        rev = f"{symbol}-{bucket}-{window}"
+        # basis futures : déjà calculé au pull (et historisé) — pas recalculé
+        # à chaque interaction UI. Il décroît vers 0 à l'approche de l'échéance.
+        fut = UNDERLYINGS[symbol].future
+        basis = 0.0
+        if unit == "futures" and fut and summary is not None:
+            basis = summary.basis or 0.0
+        rev = f"{symbol}-{bucket}-{window}-{unit}"
         levels = metrics.top_gex_levels(df)
         if majors and not levels.empty:
             # ne garde que les murs pesant au moins 25 % du plus fort
             levels = levels[levels["gex"].abs() >= 0.25 * levels["gex"].abs().max()]
         hvl = metrics.zero_gamma(df, snap.spot, weight_col="volume")
         return (
-            build_cards(symbol, lang),
-            levels_strip(levels, lang, hvl, zg),
+            build_cards(symbol, lang, basis),
+            levels_strip(levels, lang, hvl, zg, basis, fut),
             _pin(exposure_fig(sel, snap.spot, zg, "gex",
                               t(lang, "gex_title", bucket=bucket_label), lang,
-                              levels=levels, hvl=hvl, window=window), rev),
+                              levels=levels, hvl=hvl, window=window, basis=basis), rev),
             _pin(exposure_fig(sel, snap.spot, zg, "dex",
                               t(lang, "dex_title", bucket=bucket_label), lang,
-                              window=window), rev),
+                              window=window, basis=basis), rev),
             _pin(flow_fig(symbol, lang, flow_day), f"{symbol}-{flow_day}"),
             _pin(history_fig(symbol, lang), symbol),
             _pin(spot_zg_fig(symbol, lang), symbol),

@@ -18,14 +18,15 @@ class Underlying:
     key: str            # identifiant interne ("SPX")
     cboe_symbol: str    # symbole endpoint CBOE ("_SPX")
     label: str          # libellé affiché ("SPX / ES")
+    future: str | None = None   # future CME associé, pour la conversion de basis
     enabled: bool = True
 
 
 UNDERLYINGS: dict[str, Underlying] = {
     u.key: u
     for u in [
-        Underlying("SPX", "_SPX", "SPX / ES"),
-        Underlying("NDX", "_NDX", "NDX / NQ"),
+        Underlying("SPX", "_SPX", "SPX / ES", future="ES"),
+        Underlying("NDX", "_NDX", "NDX / NQ", future="NQ"),
         Underlying("SPY", "SPY", "SPY (fallback ES)", enabled=False),
         Underlying("QQQ", "QQQ", "QQQ (fallback NQ)", enabled=False),
     ]
