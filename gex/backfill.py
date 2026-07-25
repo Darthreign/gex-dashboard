@@ -416,7 +416,8 @@ def run(daily_days: int, intraday_days: int, max_cost: float, dry_run: bool,
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    from .logsetup import setup_logging
+    setup_logging()  # console + logs/gex.log
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--daily-days", type=int, default=31)
     ap.add_argument("--intraday-days", type=int, default=7)

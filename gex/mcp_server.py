@@ -122,5 +122,27 @@ def get_history(symbol: str = "SPX", last_n: int = 50) -> str:
     return json.dumps(df.to_dict("records"))
 
 
+@mcp.tool()
+def get_reports(last_n: int = 5) -> str:
+    """Derniers rapports des tâches planifiées (backfills, vérifications) écrits
+    dans logs/reports.md. À consulter pour savoir ce qui s'est passé pendant une
+    exécution automatique, dont la sortie vit dans une conversation séparée."""
+    from .logsetup import read_reports
+    return read_reports(last_n)
+
+
+@mcp.tool()
+def get_log_tail(lines: int = 50, level: str | None = None) -> str:
+    """Fin du log technique (logs/gex.log) : pulls CBOE, erreurs, backfills.
+    level optionnel pour filtrer (ex. 'ERROR', 'WARNING')."""
+    from .logsetup import LOG_FILE
+    if not LOG_FILE.exists():
+        return "Aucun log (le dashboard n'a pas encore tourné avec la journalisation)."
+    rows = LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
+    if level:
+        rows = [r for r in rows if f" {level.upper()} " in r]
+    return "\n".join(rows[-lines:]) or "Aucune ligne correspondante."
+
+
 if __name__ == "__main__":
     mcp.run()

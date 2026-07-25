@@ -2,5 +2,6 @@
 __pycache__/
 *.pyc
 data/
+logs/
 .pytest_cache/
 *.egg-info/

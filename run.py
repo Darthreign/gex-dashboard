@@ -2,17 +2,12 @@
 
 Usage : python run.py  (dashboard sur http://127.0.0.1:8050)
 """
-import logging
-
 from gex.app import create_app
+from gex.logsetup import setup_logging
 from gex.scheduler import start_scheduler
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
-logging.getLogger("werkzeug").setLevel(logging.WARNING)
-logging.getLogger("apscheduler").setLevel(logging.WARNING)
+# console + logs/gex.log (rotatif) : la trace survit à la fermeture du terminal
+setup_logging()
 
 if __name__ == "__main__":
     start_scheduler()
