@@ -1,4 +1,4 @@
-# GEX Dashboard — analyse Gamma/Delta Exposure (SPX/ES, NDX/NQ)
+# GEX Dashboard — analyse Gamma/Delta Exposure (SPX, NDX, SPY, QQQ)
 
 *[English version](README.en.md)* · *[FAQ](FAQ.md)* · *[Avertissement](DISCLAIMER.md)*
 
