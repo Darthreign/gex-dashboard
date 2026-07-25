@@ -333,16 +333,61 @@ body {
 .btn:hover { background: var(--surface-2); color: var(--ink); border-color: #3a3a37; }
 .btn:active { transform: translateY(1px); }
 
-/* dropdown Dash — habillage sombre */
-.Select-control, .Select-menu-outer {
+/* Dropdown Dash — habillage sombre.
+   ATTENTION : les versions récentes de Dash utilisent les classes
+   .dash-dropdown-* (et non les anciennes .Select-* de react-select). Sans
+   ces règles, le texte hérite du blanc du body sur fond blanc : la valeur
+   sélectionnée devient invisible. */
+.dash-dropdown {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 12.5px;
+}
+
+.dash-dropdown .dash-dropdown-trigger {
+  background: transparent;
+  color: var(--ink);
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.dash-dropdown .dash-dropdown-value,
+.dash-dropdown .dash-dropdown-value-item,
+.dash-dropdown input {
+  color: var(--ink) !important;
+  font-variant-numeric: tabular-nums;
+}
+
+.dash-dropdown .dash-dropdown-placeholder { color: var(--muted) !important; }
+.dash-dropdown svg { fill: var(--muted); }
+.dash-dropdown:hover { border-color: #3a3a37; }
+
+/* liste déroulante */
+.dash-dropdown-menu,
+.dash-dropdown-options,
+.dash-dropdown-option-list {
   background: var(--surface) !important;
-  border-color: var(--line) !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 6px !important;
+  color: var(--ink) !important;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+}
+
+.dash-dropdown-option,
+.dash-dropdown-option-item {
+  background: transparent !important;
+  color: var(--ink-2) !important;
+  padding: 5px 9px !important;
+}
+
+.dash-dropdown-option:hover,
+.dash-dropdown-option-item:hover,
+.dash-dropdown-option[aria-selected="true"],
+.dash-dropdown-option-item[aria-selected="true"] {
+  background: var(--surface-2) !important;
   color: var(--ink) !important;
 }
-.Select-value-label, .Select-placeholder { color: var(--ink-2) !important; }
-.Select-menu-outer { border-radius: 6px !important; }
-.VirtualizedSelectOption { background: var(--surface) !important; color: var(--ink-2) !important; }
-.VirtualizedSelectFocusedOption { background: var(--surface-2) !important; color: var(--ink) !important; }
 
 @media (max-width: 720px) {
   .topbar, .page { padding-left: 14px; padding-right: 14px; }
