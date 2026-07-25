@@ -33,6 +33,7 @@ dependencies = [
     "plotly>=5.24",
     "apscheduler>=3.10",
     "mcp>=1.0",
+    "websockets>=13.0",
 ]
 
 [project.optional-dependencies]

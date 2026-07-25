@@ -53,6 +53,12 @@ TR: dict[str, dict[str, str]] = {
         "unit_index": "Indice",
         "unit_futures": "Futures",
         "brand_sub": "SPX · NDX · SPY · QQQ — données CBOE delayed",
+        # spot temps réel actif : les CHAÎNES restent délayées, seul le prix
+        # courant est en direct — la nuance doit rester lisible
+        "brand_sub_rt": "SPX · NDX · SPY · QQQ — spot temps réel · chaînes CBOE delayed",
+        "rt_connected": "Spot temps réel actif",
+        "rt_degraded": "Flux dégradé — cotations en retard, repli sur le spot CBOE",
+        "rt_disconnected": "Flux déconnecté — spot CBOE delayed utilisé",
         "lbl_expiry": "Échéance",
         "lbl_window": "Fenêtre",
         "tab_main": "Vue principale",
@@ -141,6 +147,10 @@ TR: dict[str, dict[str, str]] = {
         "unit_index": "Index",
         "unit_futures": "Futures",
         "brand_sub": "SPX · NDX · SPY · QQQ — CBOE delayed data",
+        "brand_sub_rt": "SPX · NDX · SPY · QQQ — real-time spot · CBOE delayed chains",
+        "rt_connected": "Real-time spot active",
+        "rt_degraded": "Feed degraded — quotes lagging, falling back to CBOE spot",
+        "rt_disconnected": "Feed disconnected — using CBOE delayed spot",
         "lbl_expiry": "Expiry",
         "lbl_window": "Window",
         "tab_main": "Main view",

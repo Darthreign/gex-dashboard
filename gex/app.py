@@ -20,7 +20,8 @@ from . import metrics, scales, store
 from .config import SETTINGS, UNDERLYINGS
 from .i18n import LANGS, t, wall_labels
 from .metrics import ET, EXPIRY_BUCKETS
-from .scheduler import STATE
+from .rtquote import QUOTES
+from .scheduler import STATE, market_is_open
 
 # --- Palette (mode sombre, cf. skill dataviz) ---
 C = {
@@ -298,10 +299,11 @@ def exposure_fig(df: pd.DataFrame, spot: float, zg: float | None, col: str, titl
         if levels is not None and not levels.empty:
             labels = wall_labels(levels)
             for lv in levels.itertuples():
-                # rang seul : le prix figure sur l'axe et dans les chips
+                # rang ET prix : les murs sont seuls du côté gauche depuis que
+                # les niveaux de régime sont passés sur le graphe DEX, la place
+                # est donc disponible
                 items.append(dict(y=xf(lv.strike), label=labels[lv.strike],
-                                  color=C["lvl"], dash="dashdot", side="left",
-                                  short=True))
+                                  color=C["lvl"], dash="dashdot", side="left"))
     else:
         items += [dict(y=zg, label="Gamma Flip", color=C["zg"], side="left"),
                   dict(y=hvl, label="HVL", color=C["hvl"], side="left")]
@@ -655,6 +657,12 @@ def create_app() -> Dash:
                     # page statique servie depuis assets/ (nouvel onglet)
                     html.A(id="faq-link", className="linkbtn", href="/assets/faq.html",
                            target="_blank", children="FAQ"),
+                    # état du flux temps réel : masqué tant qu'aucun identifiant
+                    # n'est configuré (cas de l'installation par défaut)
+                    html.Div([html.Span(className="rt-dot"),
+                              html.Span(id="rt-label")],
+                             id="rt-badge", className="rt-badge",
+                             style={"display": "none"}),
                 ], style={"display": "flex", "gap": "10px", "flexWrap": "wrap",
                           "alignItems": "center"}),
             ], className="topbar-row"),
@@ -726,6 +734,9 @@ def create_app() -> Dash:
             ]),
 
             dcc.Interval(id="tick", interval=SETTINGS.flow_interval_s * 1000),
+            # le voyant du flux a son propre rythme : une déconnexion doit se
+            # voir tout de suite, pas au prochain pull (60 s)
+            dcc.Interval(id="rt-tick", interval=5000),
             dcc.Store(id="lang-boot", data=0),
             html.Div(id="footer", className="footer"),
         ], className="page"),
@@ -799,7 +810,7 @@ def create_app() -> Dash:
         [Output("bucket", "options"), Output("majors", "options"),
          Output("flow-day-label", "children"), Output("flow-today", "children"),
          Output("footer", "children"), Output("unit", "options"),
-         Output("app-title", "children"), Output("brand-sub", "children"),
+         Output("app-title", "children"),
          Output("lbl-bucket", "children"), Output("lbl-window", "children"),
          Output("unit", "value")],
         [Input("lang", "value"), Input("symbol", "value")],
@@ -816,8 +827,32 @@ def create_app() -> Dash:
                 {"label": "NQ", "value": "NQ"}]
         return (bucket_opts, majors_opts, t(lang, "flow_day_label"),
                 t(lang, "last_session"), t(lang, "footer"), opts,
-                t(lang, "app_title"), t(lang, "brand_sub"),
+                t(lang, "app_title"),
                 t(lang, "lbl_expiry"), t(lang, "lbl_window"), symbol)
+
+    @app.callback(
+        [Output("brand-sub", "children"), Output("rt-badge", "style"),
+         Output("rt-badge", "className"), Output("rt-badge", "title"),
+         Output("rt-label", "children")],
+        [Input("rt-tick", "n_intervals"), Input("lang", "value")],
+    )
+    def rt_status(_, lang):
+        """Provenance du spot affiché, et pastille d'état du flux temps réel.
+
+        Le badge reste masqué sur une installation sans identifiants courtier :
+        inutile d'exposer un voyant rouge permanent pour une fonction que
+        l'utilisateur n'a pas demandée.
+        """
+        state, detail = QUOTES.status(market_open=market_is_open())
+        if state == "off":
+            return (t(lang, "brand_sub"), {"display": "none"},
+                    "rt-badge", "", "")
+        key = {"connected": "rt_connected", "degraded": "rt_degraded"}.get(
+            state, "rt_disconnected")
+        tip = t(lang, key) + (f" ({detail})" if detail else "")
+        # le sous-titre ne promet le temps réel que si le flux le tient
+        sub = t(lang, "brand_sub_rt" if state == "connected" else "brand_sub")
+        return (sub, {}, f"rt-badge rt-{state}", tip, "dxFeed")
 
     @app.callback(
         [Output("cards", "children"), Output("levels", "children"), Output("gex-strike", "figure"),

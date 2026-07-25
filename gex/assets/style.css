@@ -270,6 +270,31 @@ body {
 }
 .tv-copy:hover { color: var(--ink); border-color: var(--accent); }
 
+/* --------------------------------------------- état du flux temps réel */
+.rt-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 11.5px;
+  color: var(--muted);
+  cursor: default;
+}
+.rt-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: none;
+}
+.rt-connected .rt-dot    { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+.rt-degraded .rt-dot     { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+.rt-disconnected .rt-dot { background: var(--neg); }
+.rt-connected            { color: var(--ink-2); }
+
 /* ------------------------------------------------------------------ tabs */
 
 .dash-tabs-container { margin-bottom: 14px; }
