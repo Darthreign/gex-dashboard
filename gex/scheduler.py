@@ -58,7 +58,7 @@ def pull_symbol(symbol: str, persist_snapshot: bool) -> None:
     u = UNDERLYINGS[symbol]
     snap = fetch_chain(symbol, u.cboe_symbol)
     enriched = metrics.enrich(snap)
-    summary = metrics.summarize(snap, enriched)
+    summary = metrics.summarize(snap, enriched, with_basis=u.future is not None)
     now = datetime.now(ET)
 
     st = STATE.get(symbol)

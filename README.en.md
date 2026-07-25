@@ -150,4 +150,7 @@ improvement helps just as much.
 - 15-min delayed data — structure-reading tool, not an execution tool.
 - The CBOE endpoint is not contractual: format may change (ingestion is
   isolated so another source, e.g. Tradier, can be plugged in).
-- Levels are in index points (SPX/NDX), not converted to ES/NQ futures.
+- **SPY and QQQ**: these ETFs pay dividends, while the computation assumes a
+  zero yield (q = 0). The approximation stays small on short maturities but
+  isn't zero — the SPX and NDX indices don't carry this bias. They also have
+  no associated future, so the Index/Futures toggle is inactive for them.

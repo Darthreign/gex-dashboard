@@ -22,7 +22,12 @@ code,pre{font-family:ui-monospace,"Cascadia Code",Consolas,monospace}
   backdrop-filter:blur(8px);border-bottom:1px solid var(--line);padding:12px 0}
 .wrap{max-width:820px;margin:0 auto;padding:0 22px}
 .topbar .wrap{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
-.brand{display:flex;align-items:center;gap:10px;font-weight:600;font-size:15px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:600;font-size:15px;
+  color:var(--ink);text-decoration:none;transition:opacity .12s}
+.brand:hover{opacity:.8}
+.home{display:inline-flex;align-items:center;gap:5px;
+  border-color:rgba(57,135,229,.4);color:var(--ink)}
+.home:hover{background:var(--surface-2);border-color:var(--accent)}
 .mark{width:24px;height:24px;border-radius:7px;
   background:linear-gradient(135deg,var(--accent),var(--ok));
   display:grid;place-items:center;font-size:12px;font-weight:700}
@@ -78,8 +83,11 @@ html[lang=fr] [data-lang=fr],html[lang=en] [data-lang=en]{display:revert}
 <body>
 
 <div class="topbar"><div class="wrap">
-  <div class="brand"><span class="mark">Γ</span><span>GEX Dashboard</span></div>
+  <a class="brand" href="/" title="Retour au dashboard">
+    <span class="mark">Γ</span><span>GEX Dashboard</span></a>
   <div class="tools">
+    <a class="ghlink home" href="/">←
+      <span data-lang="fr">Dashboard</span><span data-lang="en">Dashboard</span></a>
     <div class="seg" role="group" aria-label="Langue">
       <button id="fr" aria-pressed="true">FR</button>
       <button id="en" aria-pressed="false">EN</button>
@@ -94,12 +102,12 @@ html[lang=fr] [data-lang=fr],html[lang=en] [data-lang=en]{display:revert}
     <span data-lang="en">Gamma &amp; Delta Exposure analytics</span>
   </h1>
   <p>
-    <span data-lang="fr">Un dashboard libre pour lire la structure d'options du SPX et du NDX —
-      murs de gamma, Gamma Flip, HVL, flux delta — construit sur les données publiques
-      gratuites de CBOE. Aucun compte, aucun abonnement.</span>
-    <span data-lang="en">An open-source dashboard for reading SPX and NDX options structure —
-      gamma walls, Gamma Flip, HVL, delta flow — built on CBOE's free public data.
-      No account, no subscription.</span>
+    <span data-lang="fr">Un dashboard libre pour lire la structure d'options du SPX, du NDX,
+      du SPY et du QQQ — murs de gamma, Gamma Flip, HVL, flux delta — construit sur les
+      données publiques gratuites de CBOE. Aucun compte, aucun abonnement.</span>
+    <span data-lang="en">An open-source dashboard for reading SPX, NDX, SPY and QQQ options
+      structure — gamma walls, Gamma Flip, HVL, delta flow — built on CBOE's free public
+      data. No account, no subscription.</span>
   </p>
   <div class="badges">
     <span class="badge" style="--tone:var(--ok)">Licence MIT</span>

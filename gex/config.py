@@ -27,8 +27,11 @@ UNDERLYINGS: dict[str, Underlying] = {
     for u in [
         Underlying("SPX", "_SPX", "SPX / ES", future="ES"),
         Underlying("NDX", "_NDX", "NDX / NQ", future="NQ"),
-        Underlying("SPY", "SPY", "SPY (fallback ES)", enabled=False),
-        Underlying("QQQ", "QQQ", "QQQ (fallback NQ)", enabled=False),
+        # ETF : pas de future associé (le sélecteur Indice/Futures est donc
+        # désactivé), options américaines, et sous-jacents versant un dividende
+        # — voir la note sur l'approximation q=0 dans les limites du README.
+        Underlying("SPY", "SPY", "SPY"),
+        Underlying("QQQ", "QQQ", "QQQ"),
     ]
 }
 

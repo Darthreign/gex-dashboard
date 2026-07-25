@@ -169,4 +169,8 @@ inchangés. Signaler un bug ou proposer une amélioration aide tout autant.
 - Données délayées 15 min — outil de lecture de structure, pas d'exécution.
 - Endpoint CBOE non contractuel : le format peut changer (l'ingestion est
   isolée pour pouvoir brancher une autre source, ex. Tradier).
-- Niveaux exprimés en points d'indice (SPX/NDX), pas convertis en ES/NQ.
+- **SPY et QQQ** : ces ETF versent un dividende, or le calcul suppose un
+  rendement nul (q = 0). L'approximation reste faible sur les échéances
+  courtes mais n'est pas nulle — les indices SPX et NDX, eux, n'ont pas ce
+  biais. Ils n'ont par ailleurs pas de future associé, donc le sélecteur
+  Indice/Futures y est inactif.

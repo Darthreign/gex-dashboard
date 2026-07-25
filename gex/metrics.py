@@ -357,7 +357,11 @@ class SummaryMetrics:
         }
 
 
-def summarize(snapshot: ChainSnapshot, df: pd.DataFrame) -> SummaryMetrics:
+def summarize(snapshot: ChainSnapshot, df: pd.DataFrame,
+              with_basis: bool = True) -> SummaryMetrics:
+    """with_basis=False pour les sous-jacents sans future associé (ETF) :
+    la parité call-put y mesurerait un simple report de dividendes, qu'il
+    serait trompeur de stocker sous le nom de « basis »."""
     today = datetime.now(ET).date()
     ratios = put_call_ratios(df)
     return SummaryMetrics(
@@ -369,7 +373,7 @@ def summarize(snapshot: ChainSnapshot, df: pd.DataFrame) -> SummaryMetrics:
         pc_oi=ratios["pc_oi"],
         pc_volume=ratios["pc_volume"],
         net_gex_0dte=float(df.loc[bucket_mask(df, "0DTE", today), "gex"].sum()),
-        basis=futures_basis(df, snapshot.spot, today),
+        basis=futures_basis(df, snapshot.spot, today) if with_basis else None,
     )
 
 
