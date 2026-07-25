@@ -162,11 +162,29 @@ def tv_levels_string(levels: pd.DataFrame | None, hvl: float | None,
     """
     xf = xf or (lambda v: v)
     out: list[str] = []
+    seen: list[float] = []
 
-    def add(value, label, kind):
+    # Deux lignes plus proches que ça sont indiscernables à l'œil sur un
+    # graphique, et leurs étiquettes se chevauchent. Le seuil reste très en
+    # dessous de l'écart entre deux strikes (25-50 pts sur les indices, 1 $ sur
+    # les ETF) : deux murs distincts ne peuvent donc jamais être confondus.
+    MERGE_TOL = 0.0002  # 0,02 % — soit ~1,5 pt sur ES
+
+    def add(value, label, kind, dedup=False):
+        """dedup : n'écrit pas un mur déjà couvert par un niveau nommé.
+
+        Call Wall et Put Support sont choisis dans le même classement de
+        strikes que GEX1-5, et le flip tombe souvent sur un mur : sans ce
+        filtre, TradingView superpose des lignes dont les étiquettes se
+        recouvrent. Le niveau nommé l'emporte, étant le plus parlant.
+        """
         if value is None:
             return
-        out.append(f"{xf(value):.2f},{label},{kind}")
+        px = xf(value)
+        if dedup and any(abs(px - s) <= MERGE_TOL * abs(px) for s in seen):
+            return
+        seen.append(px)
+        out.append(f"{px:.2f},{label},{kind}")
 
     add(zg, "Gamma Flip", "flip")
     add(hvl, "HVL", "flip")
@@ -179,7 +197,8 @@ def tv_levels_string(levels: pd.DataFrame | None, hvl: float | None,
         labels = wall_labels(levels)
         for lv in levels.itertuples():
             # gpos/gneg = murs classés par gamma absolu, signe selon calls/puts
-            add(lv.strike, labels[lv.strike], "gpos" if lv.gex > 0 else "gneg")
+            add(lv.strike, labels[lv.strike], "gpos" if lv.gex > 0 else "gneg",
+                dedup=True)
     return ";".join(out)
 
 

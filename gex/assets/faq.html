@@ -286,6 +286,13 @@ python -m venv .venv</pre>
   worth knowing: <strong>HVL</strong> is sent as kind <code>flip</code> (it is one, weighted by the
   session's volume rather than open interest), and <strong>1D Min/Max</strong> go out as
   <code>eml</code>/<code>emh</code> — they are indeed the expected-move bounds.</span></p>
+<p><span data-lang="fr">Un mur GEX confondu avec un niveau nommé n'est pas envoyé deux fois : Call Wall
+  et Put Support sont issus du même classement de strikes que GEX1-5, et le flip tombe souvent sur un
+  mur. Seule l'étiquette la plus parlante est conservée — la ligne reste tracée, on évite simplement
+  deux étiquettes superposées.</span>
+  <span data-lang="en">A GEX wall that coincides with a named level is not sent twice: Call Wall and Put
+  Support come from the same strike ranking as GEX1-5, and the flip often lands on a wall. Only the
+  more meaningful label is kept — the line is still drawn, we just avoid two overlapping labels.</span></p>
 <p class="note"><span data-lang="fr">Les niveaux ne se mettent pas à jour tout seuls sur TradingView : la
   chaîne est un instantané. Les murs et le flip reposant sur l'open interest, publié une fois par jour,
   un collage en début de séance tient la journée — recopie après un mouvement marqué si tu veux du frais.

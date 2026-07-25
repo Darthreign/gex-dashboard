@@ -33,7 +33,13 @@ def test_format_et_codes_de_type():
     assert kinds["Put Support"] == "sup"
     assert kinds["1D Max"] == "emh"
     assert kinds["1D Min"] == "eml"
-    # murs GEX : le signe du gamma décide du code, pas le rang
+
+
+def test_signe_du_gamma_donne_le_code_du_mur():
+    # sans niveaux nommés, les murs sortent tels quels : le signe du gamma
+    # décide de gpos/gneg, pas le rang
+    s = tv_levels_string(_levels(), hvl=None, zg=None, keys=None)
+    kinds = {e.split(",")[1]: e.split(",")[2] for e in s.split(";")}
     assert kinds["GEX1"] == "gpos"
     assert kinds["GEX2"] == "gneg"
 
@@ -57,6 +63,48 @@ def test_valeurs_absentes_ignorees():
     s = tv_levels_string(None, hvl=None, zg=20950.5, keys={"call_wall": None})
     assert s == "20950.50,Gamma Flip,flip"
     assert tv_levels_string(None, None, None, None) == ""
+
+
+def test_mur_deja_nomme_non_redouble():
+    """Put Support et GEX2 peuvent désigner le même strike : le tracer deux
+    fois superpose deux lignes et rend les étiquettes illisibles."""
+    s = tv_levels_string(_levels(), hvl=None, zg=None, keys=KEYS)
+    prices = [e.split(",")[0] for e in s.split(";")]
+    assert len(prices) == len(set(prices)), "aucun prix en double"
+    labels = [e.split(",")[1] for e in s.split(";")]
+    # 21100 et 20800 sont déjà pris par Call Wall / Put Support
+    assert "GEX1" not in labels and "GEX2" not in labels
+    assert "Call Wall" in labels and "Put Support" in labels
+
+
+def test_mur_collant_au_flip_absorbe():
+    """Le flip tombe souvent à moins d'un point d'un mur : deux lignes y sont
+    indiscernables, seule l'étiquette la plus parlante est gardée."""
+    lv = pd.DataFrame({"strike": [7450.0], "gex": [-0.7e9], "rank": [1],
+                       "expiry": [pd.Timestamp("2026-07-27")]})
+    # flip à 7450.80, mur à 7450.00 : 0,8 pt d'écart sur ~7450
+    s = tv_levels_string(lv, hvl=None, zg=7450.80, keys=None)
+    assert s == "7450.80,Gamma Flip,flip"
+
+
+def test_strikes_voisins_jamais_fusionnes():
+    """La tolérance doit rester très en dessous de l'écart entre strikes,
+    sinon on effacerait des murs bien réels."""
+    lv = pd.DataFrame({"strike": [7450.0, 7425.0], "gex": [-0.7e9, -0.3e9],
+                       "rank": [1, 2],
+                       "expiry": [pd.Timestamp("2026-07-27")] * 2})
+    s = tv_levels_string(lv, hvl=None, zg=None, keys=None)
+    assert "7450.00,GEX1,gneg" in s and "7425.00,GEX2,gneg" in s
+
+
+def test_murs_distincts_conserves():
+    """Le dédoublonnage ne doit pas avaler les murs qui n'ont pas d'équivalent
+    nommé — ce sont eux qui apportent l'information supplémentaire."""
+    lv = _levels()
+    lv.loc[len(lv)] = {"strike": 20900.0, "gex": 1.1e9, "rank": 3,
+                       "expiry": pd.Timestamp("2026-07-27")}
+    s = tv_levels_string(lv, hvl=None, zg=None, keys=KEYS)
+    assert "20900.00,GEX3,gpos" in s
 
 
 def test_libelles_sans_separateur():
