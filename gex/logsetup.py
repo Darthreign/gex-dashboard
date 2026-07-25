@@ -14,7 +14,11 @@ from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+from .config import DATA_DIR
+
+# logs/ à côté de data/ : racine du dépôt en développement, dossier courant
+# après un pip install (cf. gex.config._default_data_dir).
+LOG_DIR = DATA_DIR.parent / "logs"
 LOG_FILE = LOG_DIR / "gex.log"
 REPORTS_FILE = LOG_DIR / "reports.md"
 

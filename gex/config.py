@@ -4,7 +4,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+def _default_data_dir() -> Path:
+    """data/ à la racine du dépôt si on tourne depuis les sources, sinon dans
+    le dossier courant (cas d'un `pip install` : le code vit dans
+    site-packages, où l'on n'écrit pas)."""
+    root = Path(__file__).resolve().parent.parent
+    if (root / ".git").exists() or (root / "pyproject.toml").exists():
+        return root / "data"
+    return Path.cwd() / "data"
+
+
+DATA_DIR = _default_data_dir()
 
 # Taux sans risque annualisé utilisé dans Black-Scholes (approx T-bills 3M).
 RISK_FREE_RATE = 0.045

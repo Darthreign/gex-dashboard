@@ -35,8 +35,8 @@ Endpoint delayed public CBOE (non documenté officiellement) :
 `https://cdn.cboe.com/api/global/delayed_quotes/options/_SPX.json` (indices
 préfixés `_`). Un GET ramène la chaîne complète — bid/ask, IV, open interest,
 volume, Greeks — plus le spot. **Délai ~15 min à la source**, régénéré ~toutes
-les 60 s (timestamp du feed en UTC). Sous-jacents : SPX et NDX actifs par
-défaut, SPY/QQQ en fallback désactivé (`gex/config.py`).
+les 60 s (timestamp du feed en UTC). Sous-jacents suivis : SPX, NDX, SPY et
+QQQ (`gex/config.py`).
 
 ## Installation
 
@@ -64,7 +64,7 @@ Dépôt : https://github.com/Darthreign/gex-dashboard
 2. Clone le dépôt dans le dossier courant et places-toi dedans.
 3. Crée un environnement virtuel .venv et installe requirements.txt.
 4. Lance la suite de tests (pytest tests/ -q) pour valider l'installation :
-   62 tests doivent passer.
+   tous les tests doivent passer.
 5. Adapte .mcp.json à mon système : remplace la valeur de "command" par le
    chemin ABSOLU vers le python du venv (Windows : .venv\Scripts\python.exe,
    macOS/Linux : .venv/bin/python). Le fichier livré contient un chemin
@@ -91,6 +91,21 @@ python -m venv .venv
 ```
 
 Tests : `.venv\Scripts\python -m pytest tests/`
+
+### Installation en package (optionnel)
+
+Le projet est un package Python standard. Installé, il expose deux commandes,
+sans avoir à se placer dans le dossier des sources :
+
+```
+pip install .                      # ou : pip install -e .  (mode développement)
+gex-dashboard                      # démarre le dashboard
+gex-mcp                            # démarre le serveur MCP
+```
+
+Une fois installé ainsi, `data/` et `logs/` sont créés **dans le dossier
+courant** (et non dans les sources) : lance la commande depuis le dossier où
+tu veux conserver ton historique.
 
 ## Serveur MCP — interroger ses données en langage naturel
 

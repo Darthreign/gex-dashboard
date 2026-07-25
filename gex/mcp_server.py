@@ -144,5 +144,10 @@ def get_log_tail(lines: int = 50, level: str | None = None) -> str:
     return "\n".join(rows[-lines:]) or "Aucune ligne correspondante."
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Entrée de la commande ``gex-mcp`` (équivaut à ``python -m gex.mcp_server``)."""
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()

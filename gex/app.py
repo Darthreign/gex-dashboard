@@ -564,9 +564,10 @@ def build_cards(symbol: str, lang: str, xf=None) -> list:
 
 
 def create_app() -> Dash:
-    # assets/ est à la racine du projet, pas à côté du module gex/
+    # assets/ vit dans le package (gex/assets) pour survivre à un pip install ;
+    # Dash les sert dans tous les cas sous /assets.
     app = Dash(__name__, title="GEX Dashboard",
-               assets_folder=str(Path(__file__).resolve().parent.parent / "assets"))
+               assets_folder=str(Path(__file__).resolve().parent / "assets"))
     enabled = [u for u in UNDERLYINGS.values() if u.enabled]
 
     def ctl(label_id, control):

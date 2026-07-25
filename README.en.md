@@ -33,8 +33,8 @@ CBOE public delayed endpoint (undocumented):
 `https://cdn.cboe.com/api/global/delayed_quotes/options/_SPX.json`
 (indices prefixed with `_`). One GET returns the full chain — bid/ask, IV,
 open interest, volume, Greeks — plus spot. **~15 min delayed**, regenerated
-~every 60 s (feed timestamps are UTC). Default underlyings: SPX and NDX;
-SPY/QQQ available as fallbacks (`gex/config.py`).
+~every 60 s (feed timestamps are UTC). Underlyings tracked: SPX, NDX, SPY and
+QQQ (`gex/config.py`).
 
 ## Installation
 
@@ -62,7 +62,7 @@ Steps:
 2. Clone the repository into the current folder and cd into it.
 3. Create a .venv virtual environment and install requirements.txt.
 4. Run the test suite (pytest tests/ -q) to validate the install:
-   62 tests must pass.
+   all tests must pass.
 5. Adapt .mcp.json to my system: replace the "command" value with the
    ABSOLUTE path to the venv python (Windows: .venv\Scripts\python.exe,
    macOS/Linux: .venv/bin/python). The shipped file contains a relative
@@ -89,6 +89,21 @@ python -m venv .venv
 ```
 
 Tests: `.venv/bin/python -m pytest tests/`
+
+### Install as a package (optional)
+
+The project is a standard Python package. Once installed it exposes two
+commands, with no need to sit in the source folder:
+
+```
+pip install .                      # or: pip install -e .  (development mode)
+gex-dashboard                      # start the dashboard
+gex-mcp                            # start the MCP server
+```
+
+Installed this way, `data/` and `logs/` are created **in the current
+directory** (not in the sources): run the command from wherever you want your
+history kept.
 
 ## MCP server — query your data in natural language
 

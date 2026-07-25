@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gex-dashboard"
+version = "0.1.0"
+description = "Analyse Gamma/Delta Exposure (SPX, NDX, SPY, QQQ) à partir des chaînes d'options publiques CBOE — outil d'analyse, pas de trading."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Darthreign" }]
+keywords = ["gex", "gamma-exposure", "delta-exposure", "options", "cboe", "spotgamma", "market-structure", "0dte", "dashboard"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Framework :: Dash",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "requests>=2.32",
+    "pandas>=2.2",
+    "pyarrow>=17.0",
+    "numpy>=2.0",
+    "scipy>=1.14",
+    "dash>=2.18",
+    "plotly>=5.24",
+    "apscheduler>=3.10",
+    "mcp>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3"]
+
+[project.urls]
+Homepage = "https://github.com/Darthreign/gex-dashboard"
+Repository = "https://github.com/Darthreign/gex-dashboard"
+Issues = "https://github.com/Darthreign/gex-dashboard/issues"
+
+[project.scripts]
+gex-dashboard = "gex.run:main"
+gex-mcp = "gex.mcp_server:main"
+
+[tool.setuptools]
+packages = ["gex"]
+
+[tool.setuptools.package-data]
+# CSS et page FAQ : servis par Dash, ils doivent voyager avec le code.
+# data/ et logs/ n'y sont pas — ils se créent dans le dossier de travail.
+gex = ["assets/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
