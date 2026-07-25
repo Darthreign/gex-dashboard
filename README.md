@@ -83,6 +83,32 @@ python -m venv .venv
 
 Tests : `.venv\Scripts\python -m pytest tests/`
 
+## Serveur MCP — interroger ses données en langage naturel
+
+C'est ce qui distingue vraiment cet outil d'un dashboard classique : une fois
+le serveur MCP actif, tu peux poser tes questions directement à Claude, qui
+lit tes fichiers Parquet et te répond sur **tes** données.
+
+```
+« Où sont les murs de gamma sur NDX ? »
+« Analyse le régime gamma actuel sur SPX »
+« Comment le GEX net a-t-il évolué cette semaine ? »
+« Montre-moi le flux delta de la dernière séance »
+```
+
+⚠️ **Le serveur MCP ne s'active qu'au démarrage de Claude Code, depuis le
+dossier du projet.** Si tu viens d'installer l'outil, ferme Claude Code et
+relance-le depuis ce dossier — sinon les commandes resteront invisibles.
+C'est l'unique étape qui déroute à l'installation.
+
+Le fichier [`.mcp.json`](.mcp.json) enregistre le serveur automatiquement.
+Il contient un chemin **Windows relatif** : sous macOS ou Linux, remplace la
+valeur de `command` par le chemin absolu vers `.venv/bin/python`, faute de
+quoi le serveur échoue sans message explicite.
+
+Outils exposés : `get_gex_summary`, `get_gex_by_strike` (murs de gamma),
+`get_flow_delta`, `get_history`, `get_reports`, `get_log_tail`.
+
 ## Fonctionnalités
 
 - GEX / DEX par strike (fenêtre réglable ±2/4/10 %), calls/puts au survol

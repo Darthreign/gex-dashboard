@@ -81,6 +81,32 @@ python -m venv .venv
 
 Tests: `.venv/bin/python -m pytest tests/`
 
+## MCP server — query your data in natural language
+
+This is what really sets the tool apart from a plain dashboard: once the MCP
+server is active, you can ask Claude directly, and it reads your Parquet files
+to answer on **your** data.
+
+```
+"Where are the gamma walls on NDX?"
+"Analyse the current gamma regime on SPX"
+"How has net GEX evolved this week?"
+"Show me the delta flow from the last session"
+```
+
+⚠️ **The MCP server only activates when Claude Code starts, from the project
+folder.** If you have just installed the tool, quit Claude Code and relaunch it
+from this folder — otherwise the tools stay invisible. This is the one step
+that trips people up during installation.
+
+The [`.mcp.json`](.mcp.json) file registers the server automatically. It
+contains a **relative Windows path**: on macOS or Linux, replace the `command`
+value with the absolute path to `.venv/bin/python`, otherwise the server fails
+without a clear error message.
+
+Tools exposed: `get_gex_summary`, `get_gex_by_strike` (gamma walls),
+`get_flow_delta`, `get_history`, `get_reports`, `get_log_tail`.
+
 ## Features
 
 - GEX / DEX by strike (±2/4/10 % window), calls/puts breakdown on hover
