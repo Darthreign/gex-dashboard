@@ -474,7 +474,11 @@ def create_app() -> Dash:
                         id="lang", className="seg",
                         options=[{"label": l.upper(), "value": l} for l in LANGS],
                         value="fr", inline=True),
-                ], style={"display": "flex", "gap": "10px", "flexWrap": "wrap"}),
+                    # page statique servie depuis assets/ (nouvel onglet)
+                    html.A(id="faq-link", className="linkbtn", href="/assets/faq.html",
+                           target="_blank", children="FAQ"),
+                ], style={"display": "flex", "gap": "10px", "flexWrap": "wrap",
+                          "alignItems": "center"}),
             ], className="topbar-row"),
             html.Div([
                 ctl("lbl-bucket", dcc.RadioItems(id="bucket", className="seg",

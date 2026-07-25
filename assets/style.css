@@ -333,6 +333,23 @@ body {
 .btn:hover { background: var(--surface-2); color: var(--ink); border-color: #3a3a37; }
 .btn:active { transform: translateY(1px); }
 
+/* lien-bouton de la barre haute (FAQ) */
+.linkbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--surface);
+  color: var(--ink-2);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 6px 13px;
+  font-size: 12.5px;
+  text-decoration: none;
+  transition: all 0.12s ease;
+}
+.linkbtn::after { content: "↗"; font-size: 10px; opacity: 0.6; }
+.linkbtn:hover { background: var(--surface-2); color: var(--ink); border-color: #3a3a37; }
+
 /* Dropdown Dash — habillage sombre.
    ATTENTION : les versions récentes de Dash utilisent les classes
    .dash-dropdown-* (et non les anciennes .Select-* de react-select). Sans

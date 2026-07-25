@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GEX Dashboard — FAQ</title>
+<meta name="description" content="Dashboard d'analyse Gamma/Delta Exposure (SPX/NDX) sur données CBOE gratuites. FAQ et guide d'installation.">
+<style>
+:root{
+  --surface:#1a1a19; --surface-2:#232322; --page:#0d0d0d;
+  --ink:#fff; --ink-2:#c3c2b7; --muted:#898781; --line:#2c2c2a;
+  --accent:#3987e5; --ok:#199e70; --warn:#c98500; --neg:#e66767;
+  --font:system-ui,-apple-system,"Segoe UI",sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--ink);font-family:var(--font);
+  line-height:1.6;-webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+code,pre{font-family:ui-monospace,"Cascadia Code",Consolas,monospace}
+
+.topbar{position:sticky;top:0;z-index:50;background:rgba(13,13,13,.93);
+  backdrop-filter:blur(8px);border-bottom:1px solid var(--line);padding:12px 0}
+.wrap{max-width:820px;margin:0 auto;padding:0 22px}
+.topbar .wrap{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:10px;font-weight:600;font-size:15px}
+.mark{width:24px;height:24px;border-radius:7px;
+  background:linear-gradient(135deg,var(--accent),var(--ok));
+  display:grid;place-items:center;font-size:12px;font-weight:700}
+.tools{display:flex;gap:10px;align-items:center}
+.seg{display:inline-flex;background:var(--surface);border:1px solid var(--line);
+  border-radius:7px;padding:2px;gap:2px}
+.seg button{background:none;border:0;color:var(--ink-2);padding:5px 11px;
+  border-radius:5px;font-size:12.5px;font-family:var(--font);cursor:pointer;transition:.12s}
+.seg button:hover{background:rgba(255,255,255,.05);color:var(--ink)}
+.seg button[aria-pressed=true]{background:var(--surface-2);color:var(--ink);font-weight:600;
+  box-shadow:inset 0 0 0 1px rgba(57,135,229,.45)}
+.ghlink{color:var(--ink-2);text-decoration:none;font-size:12.5px;border:1px solid var(--line);
+  border-radius:7px;padding:6px 12px;transition:.12s}
+.ghlink:hover{background:var(--surface);color:var(--ink)}
+
+.hero{padding:52px 0 30px;border-bottom:1px solid var(--line)}
+.hero h1{font-size:31px;margin:0 0 12px;letter-spacing:-.02em;line-height:1.2}
+.hero p{color:var(--ink-2);font-size:16px;margin:0 0 20px;max-width:62ch}
+.badges{display:flex;gap:8px;flex-wrap:wrap}
+.badge{font-size:11.5px;color:var(--ink-2);background:var(--surface);
+  border:1px solid var(--line);border-left:2px solid var(--tone,var(--line));
+  border-radius:6px;padding:4px 10px}
+
+main{padding:8px 0 60px}
+h2{font-size:20px;margin:38px 0 6px;letter-spacing:-.01em;scroll-margin-top:80px}
+h2 + .lead{color:var(--muted);font-size:13px;margin:0 0 14px}
+
+details{background:var(--surface);border:1px solid var(--line);border-radius:9px;
+  margin-bottom:8px;overflow:hidden}
+details[open]{background:var(--surface-2)}
+summary{cursor:pointer;padding:13px 16px;font-weight:600;font-size:14.5px;
+  list-style:none;display:flex;gap:10px;align-items:center;transition:.12s}
+summary::-webkit-details-marker{display:none}
+summary::before{content:"+";color:var(--accent);font-weight:700;width:12px;flex:none}
+details[open] summary::before{content:"−"}
+summary:hover{color:var(--accent)}
+.body{padding:0 16px 15px 38px;color:var(--ink-2);font-size:14px}
+.body p{margin:0 0 11px}
+.body p:last-child{margin-bottom:0}
+.body strong{color:var(--ink)}
+.body ul{margin:0 0 11px;padding-left:19px}
+.body li{margin-bottom:5px}
+pre{background:var(--page);border:1px solid var(--line);border-radius:7px;
+  padding:11px 13px;overflow-x:auto;font-size:12.5px;color:var(--ink-2);margin:0 0 11px}
+.note{border-left:2px solid var(--warn);padding-left:11px;color:var(--muted);font-size:13px}
+
+footer{border-top:1px solid var(--line);padding:24px 0 40px;color:var(--muted);font-size:12px}
+[data-lang]{display:none}
+html[lang=fr] [data-lang=fr],html[lang=en] [data-lang=en]{display:revert}
+@media(max-width:620px){.hero h1{font-size:25px}.body{padding-left:16px}}
+</style>
+</head>
+<body>
+
+<div class="topbar"><div class="wrap">
+  <div class="brand"><span class="mark">Γ</span><span>GEX Dashboard</span></div>
+  <div class="tools">
+    <div class="seg" role="group" aria-label="Langue">
+      <button id="fr" aria-pressed="true">FR</button>
+      <button id="en" aria-pressed="false">EN</button>
+    </div>
+    <a class="ghlink" href="https://github.com/Darthreign/gex-dashboard">GitHub ↗</a>
+  </div>
+</div></div>
+
+<div class="hero"><div class="wrap">
+  <h1>
+    <span data-lang="fr">Analyse Gamma &amp; Delta Exposure</span>
+    <span data-lang="en">Gamma &amp; Delta Exposure analytics</span>
+  </h1>
+  <p>
+    <span data-lang="fr">Un dashboard libre pour lire la structure d'options du SPX et du NDX —
+      murs de gamma, Gamma Flip, HVL, flux delta — construit sur les données publiques
+      gratuites de CBOE. Aucun compte, aucun abonnement.</span>
+    <span data-lang="en">An open-source dashboard for reading SPX and NDX options structure —
+      gamma walls, Gamma Flip, HVL, delta flow — built on CBOE's free public data.
+      No account, no subscription.</span>
+  </p>
+  <div class="badges">
+    <span class="badge" style="--tone:var(--ok)">Licence MIT</span>
+    <span class="badge" style="--tone:var(--accent)">Python · Dash</span>
+    <span class="badge" style="--tone:var(--warn)">
+      <span data-lang="fr">Données délayées 15 min</span><span data-lang="en">15-min delayed data</span>
+    </span>
+    <span class="badge" style="--tone:var(--neg)">
+      <span data-lang="fr">Analyse seule — pas d'exécution</span><span data-lang="en">Analysis only — no execution</span>
+    </span>
+  </div>
+</div></div>
+
+<main class="wrap">
+
+<h2 id="start"><span data-lang="fr">Démarrer</span><span data-lang="en">Getting started</span></h2>
+<p class="lead">
+  <span data-lang="fr">Python 3.11 ou plus récent, et Git. Environ deux minutes.</span>
+  <span data-lang="en">Python 3.11 or newer, and Git. About two minutes.</span>
+</p>
+
+<details open><summary><span data-lang="fr">Installation et lancement</span><span data-lang="en">Install and run</span></summary>
+<div class="body">
+<pre>git clone https://github.com/Darthreign/gex-dashboard.git
+cd gex-dashboard
+python -m venv .venv</pre>
+<p><span data-lang="fr">Puis, selon le système :</span><span data-lang="en">Then, depending on your system:</span></p>
+<pre>.venv\Scripts\pip install -r requirements.txt      # Windows
+.venv/bin/pip install -r requirements.txt          # macOS / Linux</pre>
+<p><span data-lang="fr">Lancement :</span><span data-lang="en">Run it:</span></p>
+<pre>.venv\Scripts\python run.py       # Windows
+.venv/bin/python run.py           # macOS / Linux</pre>
+<p><span data-lang="fr">Ouvrir <code>http://127.0.0.1:8050</code>. Aucune configuration :
+  la collecte démarre immédiatement, et l'interface suit la langue du navigateur.</span>
+  <span data-lang="en">Open <code>http://127.0.0.1:8050</code>. No configuration needed:
+  collection starts immediately, and the interface follows your browser language.</span></p>
+</div></details>
+
+<details><summary><span data-lang="fr">Faut-il le laisser tourner en permanence ?</span><span data-lang="en">Does it need to run all the time?</span></summary>
+<div class="body">
+<p><span data-lang="fr">Non, avec une nuance. Les <strong>niveaux</strong> (GEX, murs, Gamma Flip, HVL)
+  sont des photos de l'état actuel : ils se reconstruisent intégralement au premier
+  rafraîchissement, quel que soit le temps d'arrêt.</span>
+  <span data-lang="en">No, with one nuance. The <strong>levels</strong> (GEX, walls, Gamma Flip, HVL)
+  are snapshots of the current state: they rebuild completely on the first refresh,
+  no matter how long it was off.</span></p>
+<p><span data-lang="fr">En revanche le <strong>flux delta intraday</strong> se mesure entre deux
+  relevés : il ne peut être capté que si le programme tourne pendant la séance.
+  En pratique, lance-le avant l'ouverture des marchés US les jours où tu travailles.</span>
+  <span data-lang="en">The <strong>intraday delta flow</strong>, however, is measured between two
+  polls: it can only be captured while running during the session. In practice,
+  start it before the US open on days you're trading.</span></p>
+</div></details>
+
+<details><summary><span data-lang="fr">Mes données restent-elles chez moi ?</span><span data-lang="en">Does my data stay on my machine?</span></summary>
+<div class="body">
+<p><span data-lang="fr">Entièrement. Tout est stocké en local (format Parquet) et le dashboard
+  n'écoute que sur <code>127.0.0.1</code>, c'est-à-dire ta propre machine. Rien n'est envoyé nulle part.</span>
+  <span data-lang="en">Entirely. Everything is stored locally (Parquet format) and the dashboard
+  only listens on <code>127.0.0.1</code>, i.e. your own machine. Nothing is sent anywhere.</span></p>
+</div></details>
+
+<h2 id="data"><span data-lang="fr">Les données</span><span data-lang="en">The data</span></h2>
+
+<details><summary><span data-lang="fr">D'où viennent-elles ?</span><span data-lang="en">Where does it come from?</span></summary>
+<div class="body">
+<p><span data-lang="fr">De l'endpoint public <strong>delayed de CBOE</strong>, l'opérateur des marchés
+  d'options américains : chaînes SPX et NDX complètes, avec bid/ask, volatilité implicite,
+  open interest et volume. <strong>Aucun compte, aucune clé, aucun abonnement.</strong></span>
+  <span data-lang="en">From <strong>CBOE's public delayed endpoint</strong> — CBOE operates the US
+  options markets: full SPX and NDX chains with bid/ask, implied volatility, open interest
+  and volume. <strong>No account, no API key, no subscription.</strong></span></p>
+</div></details>
+
+<details><summary><span data-lang="fr">Pourquoi un délai de 15 minutes ?</span><span data-lang="en">Why a 15-minute delay?</span></summary>
+<div class="body">
+<p><span data-lang="fr">C'est le délai de la source gratuite. Le temps réel exige une licence
+  professionnelle à plusieurs centaines de dollars par mois.</span>
+  <span data-lang="en">That's the delay on the free tier. Real time requires a professional
+  licence costing several hundred dollars a month.</span></p>
+<p><span data-lang="fr">Mais <strong>ça compte beaucoup moins qu'on l'imagine</strong> : la métrique
+  centrale de l'outil — l'open interest — n'est publiée <strong>qu'une fois par jour</strong> par
+  l'OCC. Les murs de gamma et le Gamma Flip en découlent et bougent donc très peu en séance.
+  Le délai n'affecte réellement que le prix de référence et le flux intraday.</span>
+  <span data-lang="en">But <strong>it matters far less than you'd think</strong>: the metric everything
+  rests on — open interest — is published <strong>only once a day</strong> by the OCC. Gamma walls
+  and the Gamma Flip derive from it and barely move intraday. The delay only really affects
+  the reference price and the intraday flow.</span></p>
+</div></details>
+
+<details><summary><span data-lang="fr">Pourquoi ne puis-je pas utiliser ton instance ?</span><span data-lang="en">Why can't I use your instance?</span></summary>
+<div class="body">
+<p><span data-lang="fr">D'abord parce que <strong>tu n'en as pas besoin</strong> : la source CBOE est
+  gratuite et sans compte, ton instance affichera exactement les mêmes données.</span>
+  <span data-lang="en">First because <strong>you don't need to</strong>: the CBOE source is free and
+  account-free, so your instance shows exactly the same data.</span></p>
+<p><span data-lang="fr">Ensuite pour une raison de licence : si une instance est enrichie de données
+  optionnelles (historique payant, flux courtier temps réel), celles-ci sont sous licence
+  <em>usage personnel, non redistribuable</em>. Les partager serait une rediffusion interdite.
+  D'où le principe : <strong>le code se partage, pas les données.</strong></span>
+  <span data-lang="en">Then for licensing: if an instance is enriched with optional data (paid history,
+  real-time broker feed), that data is licensed for <em>personal, non-redistributable</em> use.
+  Sharing it would be prohibited redistribution. Hence the principle:
+  <strong>the code is shared, the data is not.</strong></span></p>
+</div></details>
+
+<details><summary><span data-lang="fr">Les niveaux sont-ils en points d'indice ou en futures ?</span><span data-lang="en">Index points or futures points?</span></summary>
+<div class="body">
+<p><span data-lang="fr">Les deux, au choix, via le sélecteur <strong>Indice / ES</strong> (ou NQ).
+  C'est important : l'écart atteint environ +30 points sur ES et +150 sur NQ — reporter un niveau
+  SPX brut sur un chart ES fausserait tout. Le basis est recalculé à chaque rafraîchissement par
+  parité call-put et suit le roll trimestriel automatiquement.</span>
+  <span data-lang="en">Either, via the <strong>Index / ES</strong> (or NQ) toggle. This matters: the gap
+  is around +30 points on ES and +150 on NQ — putting a raw SPX level on an ES chart would throw
+  everything off. The basis is recomputed on every refresh from put-call parity and follows the
+  quarterly roll automatically.</span></p>
+</div></details>
+
+<h2 id="levels"><span data-lang="fr">Les niveaux</span><span data-lang="en">The levels</span></h2>
+
+<details><summary>GEX · <span data-lang="fr">Gamma Exposure</span><span data-lang="en">Gamma Exposure</span></summary>
+<div class="body">
+<p><span data-lang="fr">Estimation du gamma que les teneurs de marché doivent couvrir, en
+  <strong>dollars par mouvement de 1 %</strong>.</span>
+  <span data-lang="en">An estimate of the gamma market makers must hedge, in
+  <strong>dollars per 1% move</strong>.</span></p>
+<ul>
+<li><span data-lang="fr"><strong>GEX net positif</strong> → régime stabilisant : les teneurs vendent
+  dans la hausse et achètent dans la baisse, la volatilité est amortie.</span>
+  <span data-lang="en"><strong>Positive net GEX</strong> → stabilizing regime: dealers sell strength
+  and buy weakness, volatility is dampened.</span></li>
+<li><span data-lang="fr"><strong>GEX net négatif</strong> → régime déstabilisant : ils font l'inverse
+  et amplifient les mouvements.</span>
+  <span data-lang="en"><strong>Negative net GEX</strong> → destabilizing regime: they do the opposite
+  and amplify moves.</span></li>
+</ul>
+</div></details>
+
+<details><summary>Gamma Flip</summary>
+<div class="body">
+<p><span data-lang="fr">Le niveau où le GEX net <strong>change de signe</strong> — la frontière entre
+  les deux régimes. Il n'est pas lu sur le graphique : le profil complet est recalculé sur une
+  grille de prix hypothétiques, puis le croisement est interpolé.</span>
+  <span data-lang="en">The level where net GEX <strong>changes sign</strong> — the boundary between the
+  two regimes. It isn't read off the chart: the full profile is recomputed across a grid of
+  hypothetical prices, then the crossing is interpolated.</span></p>
+</div></details>
+
+<details><summary>HVL · <span data-lang="fr">High Volatility Level</span><span data-lang="en">High Volatility Level</span></summary>
+<div class="body">
+<p><span data-lang="fr">Même calcul que le Gamma Flip, mais pondéré par le <strong>volume du jour</strong>
+  plutôt que par l'open interest. Le Flip décrit la structure héritée, le HVL reflète ce qui se
+  traite — et donc se couvre — aujourd'hui. Un écart marqué entre les deux est en soi une information.</span>
+  <span data-lang="en">Same computation as the Gamma Flip, but weighted by <strong>today's volume</strong>
+  instead of open interest. The Flip describes inherited structure, the HVL reflects what is actually
+  trading — and being hedged — today. A wide gap between them is itself information.</span></p>
+</div></details>
+
+<details><summary>Call Wall · Put Support</summary>
+<div class="body">
+<p><span data-lang="fr">Les concentrations de gamma les plus fortes, <strong>contraintes
+  directionnellement</strong> : la Call Wall est le plus gros mur de calls <strong>au-dessus</strong>
+  du prix (résistance), le Put Support le plus gros mur de puts <strong>en dessous</strong> (support).</span>
+  <span data-lang="en">The largest gamma concentrations, <strong>directionally constrained</strong>:
+  the Call Wall is the largest call wall <strong>above</strong> price (resistance), the Put Support
+  the largest put wall <strong>below</strong> (support).</span></p>
+<p class="note"><span data-lang="fr">Cette contrainte n'est pas cosmétique : le plus gros mur de puts
+  en valeur absolue peut se situer au-dessus du prix, auquel cas l'appeler « support » n'aurait aucun sens.</span>
+  <span data-lang="en">That constraint isn't cosmetic: the largest put wall in absolute terms can sit
+  above price, in which case calling it "support" would be meaningless.</span></p>
+</div></details>
+
+<details><summary>1D Min · 1D Max</summary>
+<div class="body">
+<p><span data-lang="fr">Les bornes du mouvement attendu sur l'échéance la plus proche, déduites du prix
+  du <strong>straddle à la monnaie</strong>. Le straddle <em>est</em> l'estimation du marché lui-même —
+  aucune hypothèse de modèle n'intervient.</span>
+  <span data-lang="en">Expected move boundaries for the nearest expiration, derived from the
+  <strong>at-the-money straddle</strong> price. The straddle <em>is</em> the market's own estimate —
+  no model assumption involved.</span></p>
+</div></details>
+
+<details><summary><span data-lang="fr">GEX1 à GEX5, DEX</span><span data-lang="en">GEX1 to GEX5, DEX</span></summary>
+<div class="body">
+<p><span data-lang="fr"><strong>GEX1-5</strong> : les cinq strikes au gamma le plus important en valeur
+  absolue, sans contrainte de direction — les murs bruts, classés par poids.</span>
+  <span data-lang="en"><strong>GEX1-5</strong>: the five strikes with the largest absolute gamma, with no
+  directional constraint — the raw walls, ranked by weight.</span></p>
+<p><span data-lang="fr"><strong>DEX</strong> : l'équivalent du GEX pour le delta, soit l'exposition
+  directionnelle portée à chaque strike.</span>
+  <span data-lang="en"><strong>DEX</strong>: the delta equivalent of GEX — the directional exposure
+  carried at each strike.</span></p>
+</div></details>
+
+<details><summary>Vanna · Charm</summary>
+<div class="body">
+<p><span data-lang="fr"><strong>Vanna</strong> — sensibilité du delta à la volatilité implicite.
+  Quand l'IV se détend, les teneurs de marché doivent racheter du delta : c'est la mécanique des
+  hausses lentes sans catalyseur apparent.</span>
+  <span data-lang="en"><strong>Vanna</strong> — sensitivity of delta to implied volatility. When IV
+  compresses, dealers must buy back delta: the mechanism behind slow grinds higher with no obvious
+  catalyst.</span></p>
+<p><span data-lang="fr"><strong>Charm</strong> — décroissance du delta avec le temps qui passe. Ce flux
+  est purement mécanique, donc prévisible ; il explique une partie des dérives de fin de séance et
+  des comportements de semaine d'expiration.</span>
+  <span data-lang="en"><strong>Charm</strong> — decay of delta as time passes. This flow is purely
+  mechanical and therefore predictable; it explains part of end-of-day drifts and expiration-week
+  behaviour.</span></p>
+</div></details>
+
+<details><summary><span data-lang="fr">Le flux delta — et sa limite</span><span data-lang="en">The delta flow — and its limit</span></summary>
+<div class="body">
+<p><span data-lang="fr">Une estimation du delta échangé minute par minute, obtenue en multipliant la
+  variation de volume de chaque contrat par son delta.</span>
+  <span data-lang="en">An estimate of delta traded minute by minute, from each contract's volume change
+  multiplied by its delta.</span></p>
+<p class="note"><span data-lang="fr">Le feed gratuit ne dit pas si une transaction a été initiée à
+  l'achat ou à la vente. C'est donc une mesure de <strong>pression pondérée par le delta</strong>, pas un
+  véritable flux d'ordres signé : elle indique l'intensité et la concentration, pas la direction agressive.</span>
+  <span data-lang="en">The free feed doesn't say whether a trade was buyer- or seller-initiated. So this
+  measures <strong>delta-weighted pressure</strong>, not true signed order flow: it shows intensity and
+  concentration, not aggressive direction.</span></p>
+</div></details>
+
+<h2 id="limits"><span data-lang="fr">Limites connues</span><span data-lang="en">Known limitations</span></h2>
+<p class="lead">
+  <span data-lang="fr">Assumées franchement — mieux vaut les connaître avant de s'appuyer dessus.</span>
+  <span data-lang="en">Stated plainly — better to know them before relying on any of this.</span>
+</p>
+
+<details><summary><span data-lang="fr">Ce que l'outil ne peut pas faire</span><span data-lang="en">What the tool cannot do</span></summary>
+<div class="body">
+<ul>
+<li><span data-lang="fr"><strong>Délai de 15 minutes</strong> sur la source gratuite. Outil de lecture de
+  structure, jamais d'exécution.</span>
+  <span data-lang="en"><strong>15-minute delay</strong> on the free source. A structure-reading tool,
+  never an execution tool.</span></li>
+<li><span data-lang="fr"><strong>L'open interest est quotidien.</strong> Aucun fournisseur, gratuit ou
+  payant, n'y change quoi que ce soit : c'est l'OCC qui le publie.</span>
+  <span data-lang="en"><strong>Open interest is daily.</strong> No provider, free or paid, changes that:
+  the OCC publishes it.</span></li>
+<li><span data-lang="fr"><strong>Le sens des transactions n'est pas observable</strong> dans le flux gratuit.</span>
+  <span data-lang="en"><strong>Trade direction is not observable</strong> in the free feed.</span></li>
+<li><span data-lang="fr"><strong>Hypothèse de positionnement des teneurs de marché.</strong> Comme tous les
+  outils du genre, le calcul suppose les dealers longs de calls et courts de puts. C'est une convention
+  répandue et utile, pas une vérité mesurée.</span>
+  <span data-lang="en"><strong>Dealer positioning assumption.</strong> Like every tool of this kind, the
+  computation assumes dealers are long calls and short puts. A common and useful convention, not a
+  measured fact.</span></li>
+<li><span data-lang="fr"><strong>L'endpoint CBOE n'est pas contractuel</strong> : son format peut changer
+  sans préavis.</span>
+  <span data-lang="en"><strong>The CBOE endpoint is not contractual</strong>: its format can change
+  without notice.</span></li>
+</ul>
+</div></details>
+
+</main>
+
+<footer><div class="wrap">
+  <p><span data-lang="fr"><strong>Avertissement.</strong> Cet outil sert exclusivement à l'analyse. Il ne
+    passe aucun ordre, ne se connecte à aucun compte de trading, et ne constitue ni un conseil en
+    investissement ni une recommandation. Les calculs reposent sur des conventions publiques et sur les
+    hypothèses ci-dessus, susceptibles d'être fausses.</span>
+    <span data-lang="en"><strong>Disclaimer.</strong> This tool is for analysis only. It places no orders,
+    connects to no trading account, and constitutes neither investment advice nor a recommendation.
+    Calculations rest on public conventions and on the assumptions above, which may be wrong.</span></p>
+  <p><span data-lang="fr">Distribué sous licence MIT, sans aucune garantie.</span>
+    <span data-lang="en">Distributed under the MIT licence, with no warranty of any kind.</span>
+    · <a href="https://github.com/Darthreign/gex-dashboard">GitHub</a></p>
+</div></footer>
+
+<script>
+const html = document.documentElement;
+const btns = { fr: document.getElementById('fr'), en: document.getElementById('en') };
+function setLang(l){
+  html.lang = l;
+  btns.fr.setAttribute('aria-pressed', l === 'fr');
+  btns.en.setAttribute('aria-pressed', l === 'en');
+  try { localStorage.setItem('gex-faq-lang', l); } catch (e) {}
+}
+btns.fr.onclick = () => setLang('fr');
+btns.en.onclick = () => setLang('en');
+let saved = null;
+try { saved = localStorage.getItem('gex-faq-lang'); } catch (e) {}
+setLang(saved || ((navigator.language || 'en').slice(0,2) === 'fr' ? 'fr' : 'en'));
+</script>
+</body>
+</html>
