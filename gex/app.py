@@ -84,7 +84,47 @@ def base_layout(title: str, height: int = 420) -> dict:
         yaxis=dict(gridcolor=C["grid"], zerolinecolor=C["axis"], linecolor=C["axis"], tickfont=dict(color=C["muted"])),
         hoverlabel=dict(bgcolor=C["page"], font=dict(family=FONT, color=C["ink"])),
         showlegend=False,
+        # Pan par défaut : avec le zoom, un simple glissement recadre le
+        # graphique sans intention. Le zoom reste accessible à la molette
+        # (scrollZoom) et par la barre d'outils.
+        dragmode="pan",
     )
+
+
+# Molette = zoom, barre d'outils allégée des sélections inutiles ici.
+GRAPH_CONFIG = {
+    "scrollZoom": True,
+    "displaylogo": False,
+    "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"],
+}
+
+
+def time_range_selector() -> dict:
+    """Boutons de période sur les séries temporelles longues."""
+    return dict(
+        rangeselector=dict(
+            buttons=[
+                dict(count=7, label="1S", step="day", stepmode="backward"),
+                dict(count=1, label="1M", step="month", stepmode="backward"),
+                dict(count=3, label="3M", step="month", stepmode="backward"),
+                dict(step="all", label="Tout"),
+            ],
+            bgcolor=C["surface"], activecolor=C["axis"],
+            bordercolor=C["grid"], borderwidth=1,
+            font=dict(color=C["ink2"], size=10),
+            x=1, xanchor="right", y=1.22, yanchor="top",
+        ),
+    )
+
+
+def default_window(ts: pd.Series, days: int = 7) -> list | None:
+    """Plage affichée par défaut : les `days` derniers jours, si l'historique
+    est plus long. Les boutons de période permettent d'élargir."""
+    if ts.empty:
+        return None
+    end = ts.max()
+    start = end - pd.Timedelta(days=days)
+    return [start, end] if ts.min() < start else None
 
 
 def with_legend(lay: dict) -> dict:
@@ -230,7 +270,10 @@ def history_fig(symbol: str, lang: str) -> go.Figure:
     fig.add_scatter(x=ts, y=hist["net_gex"] / 1e9, mode="lines", name="GEX",
                     line=dict(color=C["cat"][0], width=2),
                     hovertemplate="%{x|%d/%m %H:%M}<br>GEX: %{y:.1f} $Bn<extra></extra>")
-    fig.update_layout(**base_layout(title, height=300))
+    lay = base_layout(title, height=300)
+    lay["margin"]["t"] = 62
+    fig.update_layout(**lay)
+    fig.update_xaxes(**time_range_selector(), range=default_window(ts))
     return fig
 
 
@@ -250,6 +293,7 @@ def spot_zg_fig(symbol: str, lang: str) -> go.Figure:
     lay = base_layout(title, height=300)
     lay = with_legend(lay)
     fig.update_layout(**lay)
+    fig.update_xaxes(**time_range_selector(), range=default_window(ts))
     return fig
 
 
@@ -540,8 +584,8 @@ def create_app() -> Dash:
 
             html.Div(id="pane-main", children=[
                 html.Div([
-                    dcc.Graph(id="gex-strike"),
-                    dcc.Graph(id="dex-strike"),
+                    dcc.Graph(config=GRAPH_CONFIG, id="gex-strike"),
+                    dcc.Graph(config=GRAPH_CONFIG, id="dex-strike"),
                 ], className="row", style={"marginBottom": "12px"}),
                 html.Div([
                     html.Span(id="flow-day-label", className="ctl-label"),
@@ -549,32 +593,32 @@ def create_app() -> Dash:
                                  style={"width": "160px"}),
                     html.Button(id="flow-today", n_clicks=0, className="btn"),
                 ], className="daybar"),
-                dcc.Graph(id="flow", style={"marginBottom": "12px"}),
+                dcc.Graph(config=GRAPH_CONFIG, id="flow", style={"marginBottom": "12px"}),
                 html.Div([
-                    dcc.Graph(id="gex-history"),
-                    dcc.Graph(id="spot-zg"),
-                    dcc.Graph(id="smile"),
+                    dcc.Graph(config=GRAPH_CONFIG, id="gex-history"),
+                    dcc.Graph(config=GRAPH_CONFIG, id="spot-zg"),
+                    dcc.Graph(config=GRAPH_CONFIG, id="smile"),
                 ], className="row"),
             ]),
 
             html.Div(id="pane-profile", children=[
                 html.Div(id="profile-hint", className="hint"),
-                dcc.Graph(id="profile", style={"marginBottom": "12px"}),
-                dcc.Graph(id="profile-exp"),
+                dcc.Graph(config=GRAPH_CONFIG, id="profile", style={"marginBottom": "12px"}),
+                dcc.Graph(config=GRAPH_CONFIG, id="profile-exp"),
             ]),
 
             html.Div(id="pane-greeks2", children=[
                 html.Div(id="g2-hint", className="hint"),
                 html.Div(id="g2-cards", className="cards"),
                 html.Div([
-                    dcc.Graph(id="vex"),
-                    dcc.Graph(id="cex"),
+                    dcc.Graph(config=GRAPH_CONFIG, id="vex"),
+                    dcc.Graph(config=GRAPH_CONFIG, id="cex"),
                 ], className="row"),
             ]),
 
             html.Div(id="pane-pos", children=[
                 html.Div(id="pos-hint", className="hint"),
-                dcc.Graph(id="oi-change"),
+                dcc.Graph(config=GRAPH_CONFIG, id="oi-change"),
             ]),
 
             dcc.Interval(id="tick", interval=SETTINGS.flow_interval_s * 1000),
