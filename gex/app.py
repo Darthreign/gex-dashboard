@@ -196,7 +196,7 @@ def _bar_width(strikes: np.ndarray) -> float:
 def exposure_fig(df: pd.DataFrame, spot: float, zg: float | None, col: str, title: str,
                  lang: str, levels: pd.DataFrame | None = None, hvl: float | None = None,
                  window: float = 0.04, xf=None,
-                 keys: dict | None = None) -> go.Figure:
+                 keys: dict | None = None, level_set: str = "walls") -> go.Figure:
     # `xf` transpose les prix vers l'échelle d'affichage choisie.
     xf = xf or (lambda v: v)
     lo, hi = spot * (1 - window), spot * (1 + window)
@@ -226,31 +226,32 @@ def exposure_fig(df: pd.DataFrame, spot: float, zg: float | None, col: str, titl
     )
     fig.update_layout(**base_layout(title, height=560))
     fig.update_xaxes(title_text=t(lang, "axis_bn_per_move"), title_font=dict(color=C["muted"]))
-    # Niveaux : placement calculé pour éviter les chevauchements d'étiquettes.
-    # Régimes (Flip, HVL) à gauche ; prix de référence et murs à droite.
-    items = [
-        dict(y=spot, label="Spot", color=C["spot"], dash="dot", side="right"),
-        dict(y=zg, label="Gamma Flip", color=C["zg"], side="left"),
-        dict(y=hvl, label="HVL", color=C["hvl"], side="left"),
-    ]
-    for key, color, label, dash in (
-        ("call_wall", C["cw"], "Call Wall", "solid"),
-        ("put_support", C["ps"], "Put Support", "solid"),
-        ("d1_max", C["d1"], "1D Max", "dot"),
-        ("d1_min", C["d1"], "1D Min", "dot"),
-    ):
-        v = (keys or {}).get(key)
-        if v is not None:
-            items.append(dict(y=xf(v), label=label, color=color, dash=dash,
-                              width=1.5, side="right"))
-    if levels is not None and not levels.empty:
-        labels = wall_labels(levels)
-        for lv in levels.itertuples():
-            # rang seul : le prix figure déjà sur l'axe et dans les chips,
-            # une étiquette courte se superpose beaucoup moins
-            items.append(dict(y=xf(lv.strike), label=labels[lv.strike],
-                              color=C["lvl"], dash="dashdot", side="left",
-                              short=True))
+    # Niveaux répartis entre les deux graphiques pour ne pas surcharger :
+    #   "walls"  (GEX) : murs de gamma — c'est là qu'ils se lisent
+    #   "regime" (DEX) : bascules de régime et bornes de move attendu
+    items = [dict(y=spot, label="Spot", color=C["spot"], dash="dot", side="right")]
+    if level_set == "walls":
+        for key, color, label in (("call_wall", C["cw"], "Call Wall"),
+                                  ("put_support", C["ps"], "Put Support")):
+            v = (keys or {}).get(key)
+            if v is not None:
+                items.append(dict(y=xf(v), label=label, color=color,
+                                  dash="solid", width=1.5, side="right"))
+        if levels is not None and not levels.empty:
+            labels = wall_labels(levels)
+            for lv in levels.itertuples():
+                # rang seul : le prix figure sur l'axe et dans les chips
+                items.append(dict(y=xf(lv.strike), label=labels[lv.strike],
+                                  color=C["lvl"], dash="dashdot", side="left",
+                                  short=True))
+    else:
+        items += [dict(y=zg, label="Gamma Flip", color=C["zg"], side="left"),
+                  dict(y=hvl, label="HVL", color=C["hvl"], side="left")]
+        for key, label in (("d1_max", "1D Max"), ("d1_min", "1D Min")):
+            v = (keys or {}).get(key)
+            if v is not None:
+                items.append(dict(y=xf(v), label=label, color=C["d1"],
+                                  dash="dot", width=1.5, side="right"))
     _draw_levels(fig, items, lo, hi, height=560)
     return fig
 
@@ -805,7 +806,8 @@ def create_app() -> Dash:
                               keys=keys), rev),
             _pin(exposure_fig(sel, snap.spot, zg, "dex",
                               t(lang, "dex_title", bucket=bucket_label), lang,
-                              window=window, xf=xf), rev),
+                              hvl=hvl, window=window, xf=xf, keys=keys,
+                              level_set="regime"), rev),
             _pin(flow_fig(symbol, lang, flow_day), f"{symbol}-{flow_day}"),
             _pin(history_fig(symbol, lang), symbol),
             _pin(spot_zg_fig(symbol, lang), symbol),
