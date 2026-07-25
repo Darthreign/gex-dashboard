@@ -2,6 +2,8 @@
 
 *[English version](README.en.md)* · *[FAQ](FAQ.md)* · *[Avertissement](DISCLAIMER.md)*
 
+[![Tests](https://github.com/Darthreign/gex-dashboard/actions/workflows/tests.yml/badge.svg)](https://github.com/Darthreign/gex-dashboard/actions/workflows/tests.yml)
+
 [Licence MIT](LICENSE) — outil d'**analyse uniquement** : pas de trading,
 pas d'exécution, pas de conseil en investissement. Chaque instance tire ses
 propres données depuis l'endpoint delayed public de CBOE ; ce projet ne
