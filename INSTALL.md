@@ -13,6 +13,12 @@ gratuite.
 > section [En cas de problème](#en-cas-de-problème) en bas couvre les erreurs
 > les plus courantes.
 
+> 🤖 **Tu as déjà Claude Code ?** Tu peux sauter tout ce guide : ouvre Claude
+> Code dans un dossier vide et colle-lui le prompt d'installation fourni dans
+> le [README](README.md#installation-assistée-claude-code). Il exécute toutes
+> les étapes ci-dessous à ta place. Ce guide manuel reste là pour ceux qui
+> n'ont pas Claude Code.
+
 ---
 
 ## Étape 1 — Installer Python

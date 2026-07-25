@@ -12,6 +12,11 @@ key, no payment**: the data comes from a free public source.
 > [Troubleshooting](#troubleshooting) section at the bottom covers the most
 > common errors.
 
+> 🤖 **Already have Claude Code?** You can skip this whole guide: open Claude
+> Code in an empty folder and paste it the install prompt from the
+> [README](README.en.md#assisted-install-claude-code). It runs every step below
+> for you. This manual guide is here for those who don't have Claude Code.
+
 ---
 
 ## Step 1 — Install Python
