@@ -54,6 +54,31 @@ def load_flows(symbol: str, day: str) -> pd.DataFrame:
     return pd.read_parquet(path) if path.exists() else pd.DataFrame()
 
 
+def snapshot_days(symbol: str) -> list[str]:
+    """Jours (YYYY-MM-DD) pour lesquels au moins un snapshot existe."""
+    root = SETTINGS.data_dir / "snapshots" / symbol
+    if not root.exists():
+        return []
+    return sorted(d.name for d in root.iterdir() if d.is_dir() and any(d.glob("*.parquet")))
+
+
+def load_last_snapshot(symbol: str, day: str) -> pd.DataFrame | None:
+    """Dernier snapshot de chaîne enregistré pour un jour donné."""
+    root = SETTINGS.data_dir / "snapshots" / symbol / day
+    files = sorted(root.glob("*.parquet")) if root.exists() else []
+    return pd.read_parquet(files[-1]) if files else None
+
+
+def load_previous_snapshot(symbol: str, before_day: str) -> tuple[str, pd.DataFrame] | None:
+    """Dernier snapshot de la séance précédant `before_day` (jour + données)."""
+    days = [d for d in snapshot_days(symbol) if d < before_day]
+    if not days:
+        return None
+    prev = days[-1]
+    df = load_last_snapshot(symbol, prev)
+    return (prev, df) if df is not None else None
+
+
 def load_history(symbol: str | None = None) -> pd.DataFrame:
     path = SETTINGS.data_dir / "history" / "metrics.parquet"
     if not path.exists():

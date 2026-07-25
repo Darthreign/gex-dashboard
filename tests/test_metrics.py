@@ -135,6 +135,63 @@ def test_flow_delta_ignores_volume_reset():
     assert flow["flow_total"] == 0.0
 
 
+def test_gamma_profile_crosses_at_zero_gamma():
+    """Le profil et le zero gamma doivent être cohérents : le croisement
+    interpolé tombe là où le profil change de signe."""
+    exp = far_expiry()
+    snap = make_chain(100.0, [
+        {"expiry": exp, "type": "C", "strike": 93.0, "open_interest": 100.0},
+        {"expiry": exp, "type": "P", "strike": 107.0, "open_interest": 100.0},
+    ])
+    df = metrics.enrich(snap)
+    grid, profile = metrics.gamma_profile(df, 100.0)
+    zg = metrics.zero_gamma(df, 100.0)
+    assert len(grid) == len(profile)
+    assert profile[0] * profile[-1] < 0, "le profil doit changer de signe"
+    i = int(np.argmin(np.abs(grid - zg)))
+    assert abs(profile[i]) < abs(profile).max() * 0.05
+
+
+def test_second_order_exposures_signs():
+    """vex/cex suivent la convention GEX : calls positifs, puts négatifs."""
+    exp = far_expiry()
+    snap = make_chain(100.0, [
+        {"expiry": exp, "type": "C", "strike": 110.0, "open_interest": 100.0},
+        {"expiry": exp, "type": "P", "strike": 110.0, "open_interest": 100.0},
+    ])
+    df = metrics.add_second_order(metrics.enrich(snap), 100.0)
+    call = df[df["type"] == "C"].iloc[0]
+    put = df[df["type"] == "P"].iloc[0]
+    # vanna et charm identiques call/put -> expositions opposées par la convention
+    assert call["vanna"] == pytest.approx(put["vanna"])
+    assert call["vex"] == pytest.approx(-put["vex"])
+    assert call["cex"] == pytest.approx(-put["cex"])
+
+
+def test_oi_change_detects_new_positioning():
+    exp = far_expiry()
+    prev = metrics.enrich(make_chain(100.0, [
+        {"expiry": exp, "type": "C", "strike": 105.0, "open_interest": 1000.0},
+        {"expiry": exp, "type": "P", "strike": 95.0, "open_interest": 500.0},
+    ]))
+    cur = metrics.enrich(make_chain(100.0, [
+        {"expiry": exp, "type": "C", "strike": 105.0, "open_interest": 1800.0},
+        {"expiry": exp, "type": "P", "strike": 95.0, "open_interest": 200.0},
+    ]))
+    d = metrics.oi_change(prev, cur).set_index("strike")
+    assert d.loc[105.0, "d_call"] == pytest.approx(800.0)    # positions ouvertes
+    assert d.loc[95.0, "d_put"] == pytest.approx(-300.0)     # positions fermées
+    assert d.loc[105.0, "oi_call"] == pytest.approx(1800.0)
+
+
+def test_oi_change_empty_when_no_previous():
+    exp = far_expiry()
+    cur = metrics.enrich(make_chain(100.0, [
+        {"expiry": exp, "type": "C", "strike": 100.0}]))
+    assert metrics.oi_change(None, cur).empty
+    assert metrics.oi_change(pd.DataFrame(), cur).empty
+
+
 def test_key_levels_are_directional():
     """Call Wall doit être AU-DESSUS du spot, Put Support EN DESSOUS — même
     quand le plus gros mur absolu se trouve du mauvais côté."""

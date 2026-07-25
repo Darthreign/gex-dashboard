@@ -60,6 +60,50 @@ def test_deep_itm_call_delta_near_one():
     assert greeks.call_delta(100.0, 10.0, 0.1, R, SIG) == pytest.approx(1.0, abs=1e-6)
 
 
+def _num_deriv(f, x, h):
+    """Dérivée centrée — référence indépendante des formules analytiques."""
+    return (f(x + h) - f(x - h)) / (2 * h)
+
+
+@pytest.mark.parametrize("k", [85.0, 100.0, 115.0])
+@pytest.mark.parametrize("tt", [0.05, 0.5, 2.0])
+def test_vanna_matches_numerical_dvega_dsigma(k, tt):
+    """vanna == d(delta)/d(sigma), vérifié par dérivation numérique."""
+    num = _num_deriv(lambda sig: greeks.call_delta(S, k, tt, R, sig), SIG, 1e-5)
+    assert greeks.vanna(S, k, tt, R, SIG) == pytest.approx(num, rel=1e-4)
+
+
+@pytest.mark.parametrize("k", [85.0, 100.0, 115.0])
+@pytest.mark.parametrize("tt", [0.05, 0.5, 2.0])
+def test_charm_matches_numerical(k, tt):
+    """charm == d(delta)/dt (temps qui passe) == -d(delta)/dT."""
+    num_dT = _num_deriv(lambda t_: greeks.call_delta(S, k, t_, R, SIG), tt, 1e-6)
+    assert greeks.charm(S, k, tt, R, SIG) == pytest.approx(-num_dT, rel=1e-3)
+
+
+def test_vanna_charm_identical_call_put():
+    """Sans dividende, vanna et charm sont identiques call/put : delta_put =
+    delta_call - 1, et la constante disparaît en dérivant."""
+    for k in (90.0, 100.0, 110.0):
+        num_v = _num_deriv(lambda sig: greeks.put_delta(S, k, 0.5, R, sig), SIG, 1e-5)
+        assert greeks.vanna(S, k, 0.5, R, SIG) == pytest.approx(num_v, rel=1e-4)
+        num_c = _num_deriv(lambda t_: greeks.put_delta(S, k, t_, R, SIG), 0.5, 1e-6)
+        assert greeks.charm(S, k, 0.5, R, SIG) == pytest.approx(-num_c, rel=1e-3)
+
+
+def test_vanna_sign_flips_around_forward():
+    """vanna < 0 côté strikes bas, > 0 côté strikes hauts (d2 change de signe
+    au forward) : une détente d'IV ne pousse pas le delta du même côté partout."""
+    assert greeks.vanna(S, 80.0, 0.5, R, SIG) < 0
+    assert greeks.vanna(S, 130.0, 0.5, R, SIG) > 0
+
+
+def test_charm_signs_itm_vs_otm():
+    """Un call ITM gagne du delta en approchant l'expiration, un OTM en perd."""
+    assert greeks.charm_per_day(S, 85.0, 0.25, R, SIG) > 0
+    assert greeks.charm_per_day(S, 115.0, 0.25, R, SIG) < 0
+
+
 def test_implied_vol_round_trip():
     """prix BS -> inversion -> doit retrouver la vol d'origine."""
     # strikes avec valeur temps significative (un deep ITM à vol faible a une

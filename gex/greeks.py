@@ -69,6 +69,36 @@ def call_theta(s, k, t, r, sigma):
     )
 
 
+def vanna(s, k, t, r, sigma):
+    """∂delta/∂sigma = ∂vega/∂S — identique calls et puts.
+
+    Positif sous le strike ATM-forward, négatif au-dessus (d2 change de signe).
+    Multiplier par 0.01 pour l'effet d'un point de volatilité.
+    """
+    d1, d2 = _d1_d2(s, k, t, r, sigma)
+    sigma = np.maximum(np.asarray(sigma, dtype=float), _EPS)
+    return -norm.pdf(d1) * d2 / sigma
+
+
+def charm(s, k, t, r, sigma):
+    """Décroissance du delta avec le TEMPS QUI PASSE : ∂delta/∂t = -∂delta/∂T
+    (convention trader). Identique calls et puts en l'absence de dividende.
+
+    Signe intuitif : un call ITM gagne du delta en approchant de l'expiration
+    (charm > 0), un call OTM en perd (charm < 0). C'est ce flux mécanique que
+    les dealers doivent hedger, d'où les dérives de fin de séance.
+    """
+    d1, d2 = _d1_d2(s, k, t, r, sigma)
+    t = np.maximum(np.asarray(t, dtype=float), _EPS)
+    sigma = np.maximum(np.asarray(sigma, dtype=float), _EPS)
+    return -norm.pdf(d1) * (2 * r * t - d2 * sigma * np.sqrt(t)) / (2 * t * sigma * np.sqrt(t))
+
+
+def charm_per_day(s, k, t, r, sigma):
+    """Variation de delta pour une journée écoulée."""
+    return charm(s, k, t, r, sigma) / 365.0
+
+
 def implied_vol(price, s, k, t, r, is_call, tol=1e-6, max_iter=60):
     """IV par Newton-Raphson vectorisé (fallback bisection implicite via clip).
 

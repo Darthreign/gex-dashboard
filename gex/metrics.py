@@ -68,6 +68,34 @@ def enrich(snapshot: ChainSnapshot, now_et: datetime | None = None) -> pd.DataFr
     return df
 
 
+def add_second_order(df: pd.DataFrame, spot: float) -> pd.DataFrame:
+    """Ajoute vanna/charm et leurs expositions en $.
+
+    Conventions (mêmes hypothèses de signe que le GEX : dealers longs calls,
+    courts puts) :
+    - vex   : $ de delta par POINT DE VOL (1 %) — l'ampleur du re-hedging
+              quand l'IV bouge d'un point.
+    - cex   : $ de delta par JOUR écoulé — le flux mécanique que les dealers
+              doivent absorber par simple passage du temps.
+    """
+    d = df.copy()
+    valid = d["iv"] > 1e-4
+    iv = np.where(valid, d["iv"].to_numpy(), 1.0)
+    t = d["t_years"].to_numpy()
+    k = d["strike"].to_numpy()
+    v = greeks.vanna(spot, k, t, RISK_FREE_RATE, iv)
+    c = greeks.charm_per_day(spot, k, t, RISK_FREE_RATE, iv)
+    v = np.where(valid, v, 0.0)
+    c = np.where(valid, c, 0.0)
+    sign = np.where((d["type"] == "C").to_numpy(), 1.0, -1.0)
+    oi = d["open_interest"].to_numpy()
+    d["vanna"] = v
+    d["charm"] = c
+    d["vex"] = sign * v * 0.01 * oi * CONTRACT_MULTIPLIER * spot
+    d["cex"] = sign * c * oi * CONTRACT_MULTIPLIER * spot
+    return d
+
+
 def bucket_mask(df: pd.DataFrame, bucket: str, today: date) -> pd.Series:
     if bucket == "0DTE":
         # échéance la plus proche : le vrai 0DTE en séance (elle == today),
@@ -93,6 +121,34 @@ def exposure_by_strike(df: pd.DataFrame, col: str) -> pd.DataFrame:
     return pivot.reset_index()
 
 
+def gamma_profile(df: pd.DataFrame, spot: float, weight_col: str = "open_interest",
+                  range_pct: float | None = None, steps: int | None = None
+                  ) -> tuple[np.ndarray, np.ndarray] | None:
+    """Profil de GEX net recalculé sur une grille de spots hypothétiques.
+
+    IV et maturités sont figées : on ne simule que le déplacement du spot, ce
+    qui isole l'effet de position. La pente au niveau du spot dit à quelle
+    vitesse le régime se dégrade ; les creux signalent les zones
+    d'accélération.
+
+    Retourne (grille de spots, GEX net en $ par 1 %), ou None si rien d'exploitable.
+    """
+    d = df[(df["iv"] > 1e-4) & (df[weight_col] > 0)]
+    if d.empty:
+        return None
+    rng = SETTINGS.zg_range if range_pct is None else range_pct
+    n = SETTINGS.zg_steps if steps is None else steps
+    grid = np.linspace(spot * (1 - rng), spot * (1 + rng), n)
+    k = d["strike"].to_numpy()[:, None]
+    t = d["t_years"].to_numpy()[:, None]
+    iv = d["iv"].to_numpy()[:, None]
+    oi = d[weight_col].to_numpy()[:, None]
+    sign = np.where((d["type"] == "C").to_numpy()[:, None], 1.0, -1.0)
+    g = greeks.gamma(grid[None, :], k, t, RISK_FREE_RATE, iv)
+    profile = (sign * g * oi * CONTRACT_MULTIPLIER * grid[None, :] ** 2 * 0.01).sum(axis=0)
+    return grid, profile
+
+
 def zero_gamma(df: pd.DataFrame, spot: float, weight_col: str = "open_interest") -> float | None:
     """Niveau de spot où le GEX net (recalculé à ce spot) change de signe.
 
@@ -103,17 +159,10 @@ def zero_gamma(df: pd.DataFrame, spot: float, weight_col: str = "open_interest")
     weight_col="volume"        : le HVL façon volatility trigger — bascule du
     profil pondéré par ce qui se traite (et donc se hedge) aujourd'hui.
     """
-    d = df[(df["iv"] > 1e-4) & (df[weight_col] > 0)]
-    if d.empty:
+    res = gamma_profile(df, spot, weight_col)
+    if res is None:
         return None
-    grid = np.linspace(spot * (1 - SETTINGS.zg_range), spot * (1 + SETTINGS.zg_range), SETTINGS.zg_steps)
-    k = d["strike"].to_numpy()[:, None]
-    t = d["t_years"].to_numpy()[:, None]
-    iv = d["iv"].to_numpy()[:, None]
-    oi = d[weight_col].to_numpy()[:, None]
-    sign = np.where((d["type"] == "C").to_numpy()[:, None], 1.0, -1.0)
-    g = greeks.gamma(grid[None, :], k, t, RISK_FREE_RATE, iv)
-    profile = (sign * g * oi * CONTRACT_MULTIPLIER * grid[None, :] ** 2 * 0.01).sum(axis=0)
+    grid, profile = res
     crossings = np.where(np.diff(np.sign(profile)) != 0)[0]
     if len(crossings) == 0:
         return None
@@ -317,6 +366,32 @@ def summarize(snapshot: ChainSnapshot, df: pd.DataFrame) -> SummaryMetrics:
         net_gex_0dte=float(df.loc[bucket_mask(df, "0DTE", today), "gex"].sum()),
         basis=futures_basis(df, snapshot.spot, today),
     )
+
+
+def oi_change(prev: pd.DataFrame, cur: pd.DataFrame) -> pd.DataFrame:
+    """Variation d'open interest par strike entre deux séances.
+
+    L'OI n'est publié qu'une fois par jour (matin, par l'OCC) : la différence
+    entre deux séances mesure le positionnement NET réellement ouvert ou
+    fermé, à distinguer du gamma résiduel hérité de positions anciennes.
+
+    Retourne un DataFrame strike / d_call / d_put / d_net / oi_call / oi_put.
+    """
+    if prev is None or prev.empty or cur.empty:
+        return pd.DataFrame()
+    keys = ["strike", "type"]
+    a = cur.groupby(keys)["open_interest"].sum().rename("cur")
+    b = prev.groupby(keys)["open_interest"].sum().rename("prev")
+    m = pd.concat([a, b], axis=1).fillna(0.0).reset_index()
+    m["delta"] = m["cur"] - m["prev"]
+    piv = m.pivot_table(index="strike", columns="type",
+                        values=["delta", "cur"], aggfunc="sum").fillna(0.0)
+    out = pd.DataFrame({"strike": piv.index})
+    for side, name in (("C", "call"), ("P", "put")):
+        out[f"d_{name}"] = piv["delta"][side].to_numpy() if side in piv["delta"] else 0.0
+        out[f"oi_{name}"] = piv["cur"][side].to_numpy() if side in piv["cur"] else 0.0
+    out["d_net"] = out["d_call"] - out["d_put"]
+    return out.reset_index(drop=True)
 
 
 def flow_delta(prev: pd.DataFrame, cur: pd.DataFrame, spot: float) -> dict[str, float]:

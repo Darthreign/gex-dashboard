@@ -7,12 +7,14 @@ Interface FR/EN (gex/i18n.py) ; termes de trading standards dans les deux.
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from dash import Dash, ctx, dcc, html
 from dash.dependencies import Input, Output, State
+from dash.exceptions import PreventUpdate
 
 from . import metrics, store
 from .config import SETTINGS, UNDERLYINGS
@@ -49,6 +51,14 @@ LOCAL_TZ = datetime.now().astimezone().tzinfo
 BUCKET_KEYS = {"0DTE": "bucket_0DTE", "Semaine": "bucket_week",
                "Mois": "bucket_month", "Tout": "bucket_all"}
 
+TAB_STYLE = {"backgroundColor": "#0d0d0d", "color": "#898781",
+             "border": "1px solid #2c2c2a", "padding": "8px 14px", "fontSize": "13px"}
+TAB_SELECTED = {"backgroundColor": "#1a1a19", "color": "#ffffff",
+                "border": "1px solid #2c2c2a", "borderTop": "2px solid #3987e5",
+                "padding": "8px 14px", "fontSize": "13px", "fontWeight": "600"}
+HINT_STYLE = {"color": "#898781", "fontSize": "11px", "marginBottom": "8px"}
+TABS = ("main", "profile", "greeks2", "pos")
+
 
 def to_local(ts: pd.Series) -> pd.Series:
     """Timestamps stockés naïfs en heure de New York → heure locale (naïve)."""
@@ -62,18 +72,29 @@ def to_local(ts: pd.Series) -> pd.Series:
 
 def base_layout(title: str, height: int = 420) -> dict:
     return dict(
-        title=dict(text=title, font=dict(size=14, color=C["ink"], family=FONT), x=0.02),
+        title=dict(text=title, font=dict(size=13, color=C["ink"], family=FONT),
+                   x=0.012, y=0.97, xanchor="left"),
         template=None,
         paper_bgcolor=C["surface"],
         plot_bgcolor=C["surface"],
         font=dict(family=FONT, size=11, color=C["ink2"]),
-        margin=dict(l=60, r=20, t=44, b=40),
+        margin=dict(l=58, r=18, t=42, b=38),
         height=height,
         xaxis=dict(gridcolor=C["grid"], zerolinecolor=C["axis"], linecolor=C["axis"], tickfont=dict(color=C["muted"])),
         yaxis=dict(gridcolor=C["grid"], zerolinecolor=C["axis"], linecolor=C["axis"], tickfont=dict(color=C["muted"])),
         hoverlabel=dict(bgcolor=C["page"], font=dict(family=FONT, color=C["ink"])),
         showlegend=False,
     )
+
+
+def with_legend(lay: dict) -> dict:
+    """Légende en haut à droite + marge suffisante : le titre est aligné à
+    gauche, une légende centrée viendrait le chevaucher."""
+    lay["showlegend"] = True
+    lay["margin"]["t"] = 62
+    lay["legend"] = dict(orientation="h", y=1.13, x=1, xanchor="right",
+                         font=dict(color=C["ink2"], size=11))
+    return lay
 
 
 def empty_fig(msg: str, title: str = "") -> go.Figure:
@@ -226,8 +247,7 @@ def spot_zg_fig(symbol: str, lang: str) -> go.Figure:
                     line=dict(color=C["zg"], width=2, dash="dash"),
                     hovertemplate="%{x|%d/%m %H:%M}<br>Gamma Flip: %{y:.0f}<extra></extra>")
     lay = base_layout(title, height=300)
-    lay["showlegend"] = True
-    lay["legend"] = dict(orientation="h", y=1.12, font=dict(color=C["ink2"]))
+    lay = with_legend(lay)
     fig.update_layout(**lay)
     return fig
 
@@ -249,25 +269,150 @@ def smile_fig(df: pd.DataFrame, spot: float, lang: str) -> go.Figure:
                         name=str(exp), line=dict(color=C["cat"][i % 4], width=2),
                         hovertemplate=f"{exp}<br>{t(lang, 'hover_strike')} %{{x}}<br>IV: %{{y:.1f}}%<extra></extra>")
     lay = base_layout(title, height=300)
-    lay["showlegend"] = True
-    lay["legend"] = dict(orientation="h", y=1.15, font=dict(color=C["ink2"]))
+    lay = with_legend(lay)
     fig.update_layout(**lay)
     fig.add_vline(x=spot, line_color=C["spot"], line_dash="dot", line_width=1)
     fig.update_yaxes(title_text=t(lang, "axis_iv"), title_font=dict(color=C["muted"]))
     return fig
 
 
+def profile_fig(df: pd.DataFrame, spot: float, zg: float | None, lang: str,
+                window: float, basis: float = 0.0) -> go.Figure:
+    """Courbe de GEX net en fonction d'un spot hypothétique."""
+    title = t(lang, "profile_title")
+    res = metrics.gamma_profile(df, spot, range_pct=window, steps=201)
+    if res is None:
+        return empty_fig(t(lang, "no_data_window"), title)
+    grid, prof = res
+    x = grid + basis
+    y = prof / 1e9
+    fig = go.Figure()
+    # deux traces pour colorer par polarité sans trompe-l'œil sur l'axe
+    fig.add_scatter(x=x, y=np.where(y >= 0, y, np.nan), mode="lines",
+                    line=dict(color=C["pos"], width=2), name="GEX +",
+                    hovertemplate="%{x:.0f}<br>%{y:.1f} $Bn<extra></extra>")
+    fig.add_scatter(x=x, y=np.where(y < 0, y, np.nan), mode="lines",
+                    line=dict(color=C["neg"], width=2), name="GEX −",
+                    hovertemplate="%{x:.0f}<br>%{y:.1f} $Bn<extra></extra>")
+    fig.update_layout(**base_layout(title, height=420))
+    fig.update_xaxes(title_text=t(lang, "profile_axis"), title_font=dict(color=C["muted"]))
+    fig.update_yaxes(title_text="$Bn / 1%", title_font=dict(color=C["muted"]))
+    fig.add_hline(y=0, line_color=C["axis"], line_width=1)
+    fig.add_vline(x=spot + basis, line_color=C["spot"], line_dash="dot", line_width=1,
+                  annotation_text=f"Spot {spot + basis:.0f}", annotation_font_color=C["ink"])
+    if zg is not None:
+        fig.add_vline(x=zg + basis, line_color=C["zg"], line_dash="dash", line_width=1,
+                      annotation_text=f"Gamma Flip {zg + basis:.0f}",
+                      annotation_font_color=C["zg"], annotation_position="bottom right")
+    return fig
+
+
+def profile_by_expiry_fig(df: pd.DataFrame, spot: float, lang: str,
+                          window: float, basis: float = 0.0) -> go.Figure:
+    """Profil décomposé par bucket d'échéance : ce que pèse le 0DTE seul."""
+    title = t(lang, "profile_by_exp")
+    today = datetime.now(ET).date()
+    fig = go.Figure()
+    drawn = 0
+    for i, bucket in enumerate(EXPIRY_BUCKETS):
+        sub = df[metrics.bucket_mask(df, bucket, today)]
+        res = metrics.gamma_profile(sub, spot, range_pct=window, steps=201)
+        if res is None:
+            continue
+        grid, prof = res
+        fig.add_scatter(x=grid + basis, y=prof / 1e9, mode="lines",
+                        name=t(lang, BUCKET_KEYS[bucket]),
+                        line=dict(color=C["cat"][i % 4], width=2),
+                        hovertemplate="%{x:.0f}<br>%{y:.1f} $Bn<extra></extra>")
+        drawn += 1
+    if drawn == 0:
+        return empty_fig(t(lang, "no_data_window"), title)
+    lay = base_layout(title, height=340)
+    lay = with_legend(lay)
+    fig.update_layout(**lay)
+    fig.add_hline(y=0, line_color=C["axis"], line_width=1)
+    fig.add_vline(x=spot + basis, line_color=C["spot"], line_dash="dot", line_width=1)
+    fig.update_xaxes(title_text=t(lang, "profile_axis"), title_font=dict(color=C["muted"]))
+    return fig
+
+
+def second_order_fig(df: pd.DataFrame, spot: float, col: str, title: str,
+                     window: float, basis: float = 0.0) -> go.Figure:
+    """Exposition vanna (vex) ou charm (cex) par strike."""
+    lo, hi = spot * (1 - window), spot * (1 + window)
+    d = df[df["strike"].between(lo, hi)]
+    if d.empty:
+        return empty_fig("—", title)
+    agg = d.groupby("strike")[col].sum() / 1e6
+    strikes = agg.index.to_numpy() + basis
+    vals = agg.to_numpy()
+    fig = go.Figure(go.Bar(
+        y=strikes, x=vals, orientation="h",
+        width=_bar_width(agg.index.to_numpy()),
+        marker=dict(color=np.where(vals >= 0, C["pos"], C["neg"]), line=dict(width=0)),
+        hovertemplate="%{y}<br>%{x:.1f} $M<extra></extra>",
+    ))
+    fig.update_layout(**base_layout(title, height=460))
+    fig.add_hline(y=spot + basis, line_color=C["spot"], line_dash="dot", line_width=1,
+                  annotation_text=f"Spot {spot + basis:.0f}", annotation_font_color=C["ink"],
+                  annotation_position="top right")
+    fig.update_xaxes(title_text="$M", title_font=dict(color=C["muted"]))
+    return fig
+
+
+def oi_change_fig(chg: pd.DataFrame, spot: float, lang: str, prev_day: str,
+                  window: float, basis: float = 0.0) -> go.Figure:
+    """Variation d'OI par strike, calls et puts distingués (identité, pas polarité)."""
+    title = t(lang, "pos_title", day=prev_day)
+    if chg.empty:
+        return empty_fig(t(lang, "pos_no_prev"), title)
+    lo, hi = spot * (1 - window), spot * (1 + window)
+    d = chg[chg["strike"].between(lo, hi)]
+    if d.empty:
+        return empty_fig(t(lang, "no_data_window"), title)
+    if (d["d_call"].abs().sum() + d["d_put"].abs().sum()) == 0:
+        # même séance des deux côtés : l'OI n'est publié qu'une fois par jour
+        return empty_fig(t(lang, "pos_no_change"), title)
+    strikes = d["strike"].to_numpy() + basis
+    w = _bar_width(d["strike"].to_numpy()) / 2
+    fig = go.Figure()
+    fig.add_bar(y=strikes, x=d["d_call"] / 1000, orientation="h", width=w,
+                name=t(lang, "legend_calls"),
+                marker=dict(color=C["cat"][0], line=dict(width=0)),
+                hovertemplate="%{y}<br>Calls %{x:+.1f}k<extra></extra>")
+    fig.add_bar(y=strikes, x=d["d_put"] / 1000, orientation="h", width=w,
+                name=t(lang, "legend_puts"),
+                marker=dict(color=C["cat"][1], line=dict(width=0)),
+                hovertemplate="%{y}<br>Puts %{x:+.1f}k<extra></extra>")
+    lay = base_layout(title, height=520)
+    lay = with_legend(lay)
+    lay["barmode"] = "group"
+    fig.update_layout(**lay)
+    fig.add_hline(y=spot + basis, line_color=C["spot"], line_dash="dot", line_width=1,
+                  annotation_text=f"Spot {spot + basis:.0f}", annotation_font_color=C["ink"],
+                  annotation_position="top right")
+    fig.update_xaxes(title_text="Δ OI (milliers de contrats)", title_font=dict(color=C["muted"]))
+    return fig
+
+
+def _basis_for(symbol: str, unit: str, summary) -> float:
+    """Décalage à appliquer aux prix affichés (0 en mode indice)."""
+    if unit != "futures" or summary is None:
+        return 0.0
+    return (summary.basis or 0.0) if UNDERLYINGS[symbol].future else 0.0
+
+
 def card(label: str, value: str, sub: str = "", accent: str | None = None) -> html.Div:
+    """Tuile d'indicateur : liseré coloré à gauche quand la valeur porte un signe."""
     return html.Div(
         [
-            html.Div(label, style={"fontSize": "11px", "color": C["muted"], "textTransform": "uppercase", "letterSpacing": "0.05em"}),
-            html.Div(value, style={"fontSize": "26px", "color": accent or C["ink"], "fontWeight": "600", "margin": "2px 0"}),
-            html.Div(sub, style={"fontSize": "11px", "color": C["ink2"]}),
+            html.Div(label, className="stat-label"),
+            html.Div(value, className="stat-value",
+                     style={"color": accent} if accent else None),
+            html.Div(sub, className="stat-sub"),
         ],
-        style={
-            "background": C["surface"], "borderRadius": "8px", "padding": "12px 16px",
-            "border": "1px solid rgba(255,255,255,0.10)", "flex": "1", "minWidth": "140px",
-        },
+        className="stat",
+        style={"--accent-bar": accent} if accent else None,
     )
 
 
@@ -300,98 +445,107 @@ def build_cards(symbol: str, lang: str, basis: float = 0.0) -> list:
 
 
 def create_app() -> Dash:
-    app = Dash(__name__, title="GEX Dashboard")
+    # assets/ est à la racine du projet, pas à côté du module gex/
+    app = Dash(__name__, title="GEX Dashboard",
+               assets_folder=str(Path(__file__).resolve().parent.parent / "assets"))
     enabled = [u for u in UNDERLYINGS.values() if u.enabled]
-    radio_style = dict(inputStyle={"marginRight": "4px"},
-                       labelStyle={"marginRight": "14px", "color": C["ink2"]})
-    app.layout = html.Div(
-        style={"background": C["page"], "minHeight": "100vh", "padding": "16px 24px",
-               "fontFamily": FONT, "color": C["ink"]},
-        children=[
-            html.Div(
-                [
-                    html.H1(t("fr", "app_title"), id="app-title",
-                            style={"fontSize": "20px", "margin": "0", "fontWeight": "600"}),
-                    html.Div(
-                        [
-                            dcc.RadioItems(
-                                id="symbol",
-                                options=[{"label": u.label, "value": u.key} for u in enabled],
-                                value=enabled[0].key, inline=True, **radio_style,
-                            ),
-                            dcc.RadioItems(id="bucket", value="Tout", inline=True, **radio_style),
-                            dcc.Checklist(id="majors", value=[], inline=True,
-                                          inputStyle={"marginRight": "4px"},
-                                          labelStyle={"color": C["ink2"]}),
-                            dcc.RadioItems(
-                                id="window",
-                                options=[{"label": "±2%", "value": 0.02},
-                                         {"label": "±4%", "value": 0.04},
-                                         {"label": "±10%", "value": 0.10}],
-                                value=0.04, inline=True, **radio_style,
-                            ),
-                            dcc.RadioItems(id="unit", value="index", inline=True, **radio_style),
-                            dcc.RadioItems(
-                                id="lang",
-                                options=[{"label": l.upper(), "value": l} for l in LANGS],
-                                value="fr", inline=True, **radio_style,
-                            ),
-                        ],
-                        style={"display": "flex", "gap": "20px", "alignItems": "center",
-                               "flexWrap": "wrap"},
-                    ),
-                ],
-                style={"display": "flex", "justifyContent": "space-between",
-                       "alignItems": "center", "marginBottom": "16px", "flexWrap": "wrap", "gap": "8px"},
-            ),
-            html.Div(id="cards", style={"display": "flex", "gap": "12px", "marginBottom": "12px", "flexWrap": "wrap"}),
-            html.Div(id="levels", style={"display": "flex", "gap": "10px", "marginBottom": "16px",
-                                         "flexWrap": "wrap", "alignItems": "center"}),
-            html.Div(
-                [
-                    dcc.Graph(id="gex-strike", style={"flex": "1", "minWidth": "440px"}),
-                    dcc.Graph(id="dex-strike", style={"flex": "1", "minWidth": "440px"}),
-                ],
-                style={"display": "flex", "gap": "12px", "flexWrap": "wrap", "marginBottom": "12px"},
-            ),
-            html.Div(
-                [
-                    html.Span(id="flow-day-label", style={"color": C["muted"], "fontSize": "12px"}),
+
+    def ctl(label_id, control):
+        """Contrôle étiqueté : la légende dit ce que le segment pilote."""
+        return html.Div([html.Span(id=label_id, className="ctl-label"), control],
+                        className="ctl")
+
+    app.layout = html.Div([
+        # ------------------------------------------------------ barre haute
+        html.Div([
+            html.Div([
+                html.Div([
+                    html.Div("Γ", className="brand-mark"),
+                    html.Span(id="app-title"),
+                    html.Span(id="brand-sub", className="brand-sub"),
+                ], className="brand"),
+                html.Div([
+                    dcc.RadioItems(
+                        id="symbol", className="seg",
+                        options=[{"label": u.label, "value": u.key} for u in enabled],
+                        value=enabled[0].key, inline=True),
+                    dcc.RadioItems(id="unit", className="seg", value="index", inline=True),
+                    dcc.RadioItems(
+                        id="lang", className="seg",
+                        options=[{"label": l.upper(), "value": l} for l in LANGS],
+                        value="fr", inline=True),
+                ], style={"display": "flex", "gap": "10px", "flexWrap": "wrap"}),
+            ], className="topbar-row"),
+            html.Div([
+                ctl("lbl-bucket", dcc.RadioItems(id="bucket", className="seg",
+                                                 value="Tout", inline=True)),
+                ctl("lbl-window", dcc.RadioItems(
+                    id="window", className="seg",
+                    options=[{"label": "±2%", "value": 0.02},
+                             {"label": "±4%", "value": 0.04},
+                             {"label": "±10%", "value": 0.10}],
+                    value=0.04, inline=True)),
+                dcc.Checklist(id="majors", className="check", value=[], inline=True),
+            ], className="toolbar"),
+        ], className="topbar"),
+
+        # ---------------------------------------------------------- contenu
+        html.Div([
+            html.Div(id="cards", className="cards"),
+            html.Div(id="levels", className="chips"),
+            dcc.Tabs(id="tab", value="main", className="tabbar", children=[
+                dcc.Tab(value=v, label="", id=f"tabh-{v}",
+                        className="tab-item", selected_className="tab-item--selected")
+                for v in TABS
+            ]),
+
+            html.Div(id="pane-main", children=[
+                html.Div([
+                    dcc.Graph(id="gex-strike"),
+                    dcc.Graph(id="dex-strike"),
+                ], className="row", style={"marginBottom": "12px"}),
+                html.Div([
+                    html.Span(id="flow-day-label", className="ctl-label"),
                     dcc.Dropdown(id="flow-day", clearable=False,
-                                 style={"width": "160px", "color": "#111"}),
-                    html.Button(
-                        id="flow-today", n_clicks=0,
-                        style={"background": C["surface"], "color": C["ink2"],
-                               "border": "1px solid rgba(255,255,255,0.15)",
-                               "borderRadius": "6px", "padding": "5px 12px",
-                               "fontSize": "12px", "cursor": "pointer"},
-                    ),
-                ],
-                style={"display": "flex", "gap": "8px", "alignItems": "center",
-                       "marginBottom": "4px"},
-            ),
-            dcc.Graph(id="flow", style={"marginBottom": "12px"}),
-            html.Div(
-                [
-                    dcc.Graph(id="gex-history", style={"flex": "1", "minWidth": "340px"}),
-                    dcc.Graph(id="spot-zg", style={"flex": "1", "minWidth": "340px"}),
-                    dcc.Graph(id="smile", style={"flex": "1", "minWidth": "340px"}),
-                ],
-                style={"display": "flex", "gap": "12px", "flexWrap": "wrap"},
-            ),
+                                 style={"width": "160px"}),
+                    html.Button(id="flow-today", n_clicks=0, className="btn"),
+                ], className="daybar"),
+                dcc.Graph(id="flow", style={"marginBottom": "12px"}),
+                html.Div([
+                    dcc.Graph(id="gex-history"),
+                    dcc.Graph(id="spot-zg"),
+                    dcc.Graph(id="smile"),
+                ], className="row"),
+            ]),
+
+            html.Div(id="pane-profile", children=[
+                html.Div(id="profile-hint", className="hint"),
+                dcc.Graph(id="profile", style={"marginBottom": "12px"}),
+                dcc.Graph(id="profile-exp"),
+            ]),
+
+            html.Div(id="pane-greeks2", children=[
+                html.Div(id="g2-hint", className="hint"),
+                html.Div(id="g2-cards", className="cards"),
+                html.Div([
+                    dcc.Graph(id="vex"),
+                    dcc.Graph(id="cex"),
+                ], className="row"),
+            ]),
+
+            html.Div(id="pane-pos", children=[
+                html.Div(id="pos-hint", className="hint"),
+                dcc.Graph(id="oi-change"),
+            ]),
+
             dcc.Interval(id="tick", interval=SETTINGS.flow_interval_s * 1000),
             dcc.Store(id="lang-boot", data=0),
-            html.Div(id="footer",
-                     style={"color": C["muted"], "fontSize": "11px", "marginTop": "12px"}),
-        ],
-    )
+            html.Div(id="footer", className="footer"),
+        ], className="page"),
+    ])
 
     def _chip(children, accent):
-        return html.Span(
-            children,
-            style={"background": C["surface"], "border": f"1px solid {accent}",
-                   "borderRadius": "6px", "padding": "4px 10px", "fontSize": "13px"},
-        )
+        return html.Span(children, className="chip", style={"--chip-accent": accent})
 
     def levels_strip(levels: pd.DataFrame | None, lang: str,
                      hvl: float | None = None, zg: float | None = None,
@@ -458,7 +612,9 @@ def create_app() -> Dash:
     @app.callback(
         [Output("bucket", "options"), Output("majors", "options"),
          Output("flow-day-label", "children"), Output("flow-today", "children"),
-         Output("footer", "children"), Output("unit", "options")],
+         Output("footer", "children"), Output("unit", "options"),
+         Output("app-title", "children"), Output("brand-sub", "children"),
+         Output("lbl-bucket", "children"), Output("lbl-window", "children")],
         [Input("lang", "value"), Input("symbol", "value")],
     )
     def apply_lang(lang, symbol):
@@ -469,7 +625,9 @@ def create_app() -> Dash:
                      {"label": fut or t(lang, "unit_futures"), "value": "futures",
                       "disabled": fut is None}]
         return (bucket_opts, majors_opts, t(lang, "flow_day_label"),
-                t(lang, "last_session"), t(lang, "footer"), unit_opts)
+                t(lang, "last_session"), t(lang, "footer"), unit_opts,
+                t(lang, "app_title"), t(lang, "brand_sub"),
+                t(lang, "lbl_expiry"), t(lang, "lbl_window"))
 
     @app.callback(
         [Output("cards", "children"), Output("levels", "children"), Output("gex-strike", "figure"),
@@ -514,9 +672,7 @@ def create_app() -> Dash:
         # basis futures : déjà calculé au pull (et historisé) — pas recalculé
         # à chaque interaction UI. Il décroît vers 0 à l'approche de l'échéance.
         fut = UNDERLYINGS[symbol].future
-        basis = 0.0
-        if unit == "futures" and fut and summary is not None:
-            basis = summary.basis or 0.0
+        basis = _basis_for(symbol, unit, summary)
         rev = f"{symbol}-{bucket}-{window}-{unit}"
         levels = metrics.top_gex_levels(df)
         if majors and not levels.empty:
@@ -539,6 +695,92 @@ def create_app() -> Dash:
             _pin(spot_zg_fig(symbol, lang), symbol),
             _pin(smile_fig(sel, snap.spot, lang), rev),
         )
+
+    @app.callback(
+        [Output(f"pane-{v}", "style") for v in TABS] +
+        [Output(f"tabh-{v}", "label") for v in TABS],
+        [Input("tab", "value"), Input("lang", "value")],
+    )
+    def switch_tab(tab, lang):
+        styles = [{"display": "block"} if v == tab else {"display": "none"} for v in TABS]
+        labels = [t(lang, f"tab_{v}") for v in TABS]
+        return styles + labels
+
+    @app.callback(
+        [Output("profile", "figure"), Output("profile-exp", "figure"),
+         Output("profile-hint", "children")],
+        [Input("tick", "n_intervals"), Input("tab", "value"), Input("symbol", "value"),
+         Input("window", "value"), Input("lang", "value"), Input("unit", "value")],
+    )
+    def refresh_profile(_, tab, symbol, window, lang, unit):
+        if tab != "profile":   # onglet masqué : rien à recalculer
+            raise PreventUpdate
+        st = STATE.get(symbol)
+        with STATE.lock:
+            df, snap, summary = st.enriched, st.snapshot, st.summary
+        if df is None or snap is None:
+            e = empty_fig(t(lang, "waiting_first_pull"), t(lang, "profile_title"))
+            return e, e, t(lang, "profile_hint")
+        basis = _basis_for(symbol, unit, summary)
+        zg = summary.zero_gamma if summary else None
+        # fenêtre élargie : la courbe n'a d'intérêt que si elle montre le flip
+        w = max(window, 0.06)
+        return (profile_fig(df, snap.spot, zg, lang, w, basis),
+                profile_by_expiry_fig(df, snap.spot, lang, w, basis),
+                t(lang, "profile_hint"))
+
+    @app.callback(
+        [Output("vex", "figure"), Output("cex", "figure"),
+         Output("g2-cards", "children"), Output("g2-hint", "children")],
+        [Input("tick", "n_intervals"), Input("tab", "value"), Input("symbol", "value"),
+         Input("bucket", "value"), Input("window", "value"),
+         Input("lang", "value"), Input("unit", "value")],
+    )
+    def refresh_greeks2(_, tab, symbol, bucket, window, lang, unit):
+        if tab != "greeks2":
+            raise PreventUpdate
+        st = STATE.get(symbol)
+        with STATE.lock:
+            df, snap, summary = st.enriched, st.snapshot, st.summary
+        if df is None or snap is None:
+            e = empty_fig(t(lang, "waiting_first_pull"))
+            return e, e, [], t(lang, "vex_hint")
+        basis = _basis_for(symbol, unit, summary)
+        today = datetime.now(ET).date()
+        sel = metrics.add_second_order(df[metrics.bucket_mask(df, bucket, today)], snap.spot)
+        cards = [
+            card(t(lang, "vex_card"), f"{sel['vex'].sum() / 1e9:+.2f} $Bn",
+                 t(lang, "vex_title").split("(")[-1].rstrip(")")),
+            card(t(lang, "cex_card"), f"{sel['cex'].sum() / 1e9:+.2f} $Bn",
+                 t(lang, "cex_title").split("(")[-1].rstrip(")")),
+        ]
+        return (second_order_fig(sel, snap.spot, "vex", t(lang, "vex_title"), window, basis),
+                second_order_fig(sel, snap.spot, "cex", t(lang, "cex_title"), window, basis),
+                cards, t(lang, "vex_hint"))
+
+    @app.callback(
+        [Output("oi-change", "figure"), Output("pos-hint", "children")],
+        [Input("tick", "n_intervals"), Input("tab", "value"), Input("symbol", "value"),
+         Input("window", "value"), Input("lang", "value"), Input("unit", "value")],
+    )
+    def refresh_positioning(_, tab, symbol, window, lang, unit):
+        if tab != "pos":
+            raise PreventUpdate
+        st = STATE.get(symbol)
+        with STATE.lock:
+            df, snap, summary = st.enriched, st.snapshot, st.summary
+        if df is None or snap is None:
+            return empty_fig(t(lang, "waiting_first_pull")), t(lang, "pos_hint")
+        basis = _basis_for(symbol, unit, summary)
+        today = datetime.now(ET).strftime("%Y-%m-%d")
+        prev = store.load_previous_snapshot(symbol, today)
+        if prev is None:
+            return (empty_fig(t(lang, "pos_no_prev"), t(lang, "pos_title", day="—")),
+                    t(lang, "pos_hint"))
+        prev_day, prev_df = prev
+        chg = metrics.oi_change(prev_df, df)
+        return (oi_change_fig(chg, snap.spot, lang, prev_day, window, basis),
+                t(lang, "pos_hint"))
 
     @app.callback(
         [Output("flow-day", "options"), Output("flow-day", "value")],
