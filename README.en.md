@@ -71,6 +71,19 @@ Tests: `.venv/bin/python -m pytest tests/`
 - Expiries set at 16:00 ET; expired contracts excluded; 0DTE kept intraday
   with a 5-minute floor on t.
 
+## Supporting the project
+
+The dashboard is free, ad-free and collects no data — and it will stay that
+way. If you use it and it saves you time, you can buy the development a
+coffee:
+
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-dwarfsquirrel-FFDD00?style=flat-square&logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/dwarfsquirrel)
+
+Entirely optional. A donation grants no support, no priority on features and
+no warranty — the terms of the [MIT licence](LICENSE) and the
+[disclaimer](DISCLAIMER.md) are unchanged. Reporting a bug or suggesting an
+improvement helps just as much.
+
 ## Known limits
 
 - 15-min delayed data — structure-reading tool, not an execution tool.

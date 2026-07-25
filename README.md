@@ -90,6 +90,19 @@ semaine (`--end` + `--daily-days 7`).
 - Échéances posées à 16:00 ET ; contrats expirés exclus ; 0DTE gardé en séance
   avec plancher de 5 min sur t.
 
+## Soutenir le projet
+
+Le dashboard est gratuit, sans publicité et sans collecte de données — et il le
+restera. Si tu l'utilises et qu'il te fait gagner du temps, tu peux offrir un
+café au développement :
+
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-dwarfsquirrel-FFDD00?style=flat-square&logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/dwarfsquirrel)
+
+C'est entièrement facultatif. Un don n'ouvre droit à aucun support, aucune
+priorité sur les fonctionnalités et aucune garantie — les termes de la
+[licence MIT](LICENSE) et de l'[avertissement](DISCLAIMER.md) restent
+inchangés. Signaler un bug ou proposer une amélioration aide tout autant.
+
 ## Limites connues
 
 - Données délayées 15 min — outil de lecture de structure, pas d'exécution.
