@@ -144,6 +144,45 @@ def empty_fig(msg: str, title: str = "") -> go.Figure:
     return fig
 
 
+def tv_levels_string(levels: pd.DataFrame | None, hvl: float | None,
+                     zg: float | None, keys: dict | None, xf=None) -> str:
+    """Sérialise les niveaux au format attendu par l'indicateur TradingView
+    « GEX Levels (Dealer Gamma Exposure) » : ``prix,libellé,type;...``
+
+    Les codes de type (``res``, ``sup``, ``flip``…) pilotent le style de tracé
+    côté indicateur. Deux correspondances méritent d'être signalées :
+    - HVL est envoyé en ``flip`` : c'est bien une bascule, pondérée par le
+      volume du jour plutôt que par l'open interest ;
+    - 1D Min/Max part en ``eml``/``emh`` (expected move), ce qu'ils sont —
+      les bornes du straddle ATM.
+
+    Les prix sont transposés par ``xf`` : la chaîne sort donc déjà dans
+    l'échelle affichée (indice, ES ou NQ), prête pour la zone de collage
+    correspondante de l'indicateur.
+    """
+    xf = xf or (lambda v: v)
+    out: list[str] = []
+
+    def add(value, label, kind):
+        if value is None:
+            return
+        out.append(f"{xf(value):.2f},{label},{kind}")
+
+    add(zg, "Gamma Flip", "flip")
+    add(hvl, "HVL", "flip")
+    k = keys or {}
+    add(k.get("call_wall"), "Call Wall", "res")
+    add(k.get("put_support"), "Put Support", "sup")
+    add(k.get("d1_max"), "1D Max", "emh")
+    add(k.get("d1_min"), "1D Min", "eml")
+    if levels is not None and not levels.empty:
+        labels = wall_labels(levels)
+        for lv in levels.itertuples():
+            # gpos/gneg = murs classés par gamma absolu, signe selon calls/puts
+            add(lv.strike, labels[lv.strike], "gpos" if lv.gex > 0 else "gneg")
+    return ";".join(out)
+
+
 def _draw_levels(fig, items: list[dict], lo: float, hi: float, height: int) -> None:
     """Trace des lignes horizontales de niveau en évitant que les étiquettes
     se chevauchent.
@@ -616,7 +655,12 @@ def create_app() -> Dash:
         # ---------------------------------------------------------- contenu
         html.Div([
             html.Div(id="cards", className="cards"),
-            html.Div(id="levels", className="chips"),
+            html.Div([
+                html.Div(id="levels", className="chips"),
+                # copie des niveaux au format de l'indicateur TradingView
+                # (cf. tv_levels_string) — la chaîne suit l'échelle affichée
+                dcc.Clipboard(id="tv-copy", className="tv-copy"),
+            ], className="levels-row"),
             dcc.Tabs(id="tab", value="main", className="tabbar", children=[
                 dcc.Tab(value=v, label="", id=f"tabh-{v}",
                         className="tab-item", selected_className="tab-item--selected")
@@ -760,7 +804,8 @@ def create_app() -> Dash:
         [Output("cards", "children"), Output("levels", "children"), Output("gex-strike", "figure"),
          Output("dex-strike", "figure"), Output("flow", "figure"),
          Output("gex-history", "figure"), Output("spot-zg", "figure"),
-         Output("smile", "figure")],
+         Output("smile", "figure"), Output("tv-copy", "content"),
+         Output("tv-copy", "title")],
         [Input("tick", "n_intervals"), Input("symbol", "value"),
          Input("bucket", "value"), Input("window", "value"),
          Input("majors", "value"), Input("flow-day", "value"),
@@ -785,6 +830,7 @@ def create_app() -> Dash:
                 empty_fig(wait, t(lang, "hist_title")),
                 empty_fig(wait, t(lang, "spotzg_title")),
                 empty_fig(wait, t(lang, "smile_title")),
+                "", t(lang, "tv_copy_title", scale=unit),
             )
         today = datetime.now(ET).date()
         sel = df[metrics.bucket_mask(df, bucket, today)]
@@ -821,6 +867,8 @@ def create_app() -> Dash:
             _pin(history_fig(symbol, lang), symbol),
             _pin(spot_zg_fig(symbol, lang), symbol),
             _pin(smile_fig(sel, snap.spot, lang), rev),
+            tv_levels_string(levels, hvl, zg, keys, xf),
+            t(lang, "tv_copy_title", scale=unit),
         )
 
     @app.callback(

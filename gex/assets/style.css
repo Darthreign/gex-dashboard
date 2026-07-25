@@ -250,6 +250,26 @@ body {
 .chip .chip-meta { color: var(--muted); font-size: 10.5px; }
 .chips-prefix { font-size: 11px; color: var(--muted); margin-right: 2px; }
 
+/* bandeau de niveaux + bouton de copie TradingView, alignés sur une ligne :
+   le bouton reste à droite, la bande de chips absorbe la largeur restante */
+.levels-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.levels-row .chips { flex: 1; min-width: 0; }
+.tv-copy {
+  flex: none;
+  margin-top: 1px;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 7px;
+  background: var(--surface);
+  transition: color .15s, border-color .15s;
+}
+.tv-copy:hover { color: var(--ink); border-color: var(--accent); }
+
 /* ------------------------------------------------------------------ tabs */
 
 .dash-tabs-container { margin-bottom: 14px; }

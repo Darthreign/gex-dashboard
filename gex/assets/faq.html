@@ -260,6 +260,42 @@ python -m venv .venv</pre>
   source underlying — it is its gamma, merely repositioned.</span></p>
 </div></details>
 
+<details><summary><span data-lang="fr">Puis-je tracer ces niveaux sur TradingView ?</span><span data-lang="en">Can I plot these levels on TradingView?</span></summary>
+<div class="body">
+<p><span data-lang="fr">Oui. Le bouton de copie <strong>à droite du bandeau de niveaux</strong> place
+  tous les niveaux du moment dans le presse-papiers, au format attendu par l'indicateur
+  <a href="https://www.tradingview.com/script/TfBS3GjM-GEX-Levels-Dealer-Gamma-Exposure/" target="_blank" rel="noopener">GEX
+  Levels (Dealer Gamma Exposure)</a>. Ajoute cet indicateur à ton graphique, ouvre ses réglages,
+  et colle la chaîne dans la zone correspondant à ton marché (NQ, ES ou SPX).</span>
+  <span data-lang="en">Yes. The copy button <strong>to the right of the levels strip</strong> puts every
+  current level on the clipboard, in the format expected by the
+  <a href="https://www.tradingview.com/script/TfBS3GjM-GEX-Levels-Dealer-Gamma-Exposure/" target="_blank" rel="noopener">GEX
+  Levels (Dealer Gamma Exposure)</a> indicator. Add it to your chart, open its settings, and paste
+  the string into the zone matching your market (NQ, ES or SPX).</span></p>
+<p><span data-lang="fr">La chaîne suit <strong>l'échelle sélectionnée</strong> : si tu affiches ES, les
+  niveaux sont déjà convertis en points ES. Choisis donc l'échelle du graphique sur lequel tu vas
+  coller, sinon les lignes tomberont à côté du basis.</span>
+  <span data-lang="en">The string follows the <strong>selected scale</strong>: if you are viewing ES, the
+  levels are already converted to ES points. So pick the scale of the chart you will paste onto,
+  otherwise the lines land off by the basis.</span></p>
+<p><span data-lang="fr">Le format est <code>prix,libellé,type</code> séparé par des points-virgules. Deux
+  correspondances valent d'être connues : le <strong>HVL</strong> est envoyé en type <code>flip</code>
+  (c'en est un, pondéré par le volume du jour au lieu de l'open interest), et <strong>1D Min/Max</strong>
+  part en <code>eml</code>/<code>emh</code> — ce sont bien les bornes du move attendu.</span>
+  <span data-lang="en">The format is <code>price,label,kind</code> separated by semicolons. Two mappings are
+  worth knowing: <strong>HVL</strong> is sent as kind <code>flip</code> (it is one, weighted by the
+  session's volume rather than open interest), and <strong>1D Min/Max</strong> go out as
+  <code>eml</code>/<code>emh</code> — they are indeed the expected-move bounds.</span></p>
+<p class="note"><span data-lang="fr">Les niveaux ne se mettent pas à jour tout seuls sur TradingView : la
+  chaîne est un instantané. Les murs et le flip reposant sur l'open interest, publié une fois par jour,
+  un collage en début de séance tient la journée — recopie après un mouvement marqué si tu veux du frais.
+  Cette même chaîne dépanne sur toute plateforme fermée aux appels réseau (Tradovate, par exemple).</span>
+  <span data-lang="en">Levels do not refresh by themselves on TradingView: the string is a snapshot. Since
+  walls and the flip rest on open interest, published once a day, pasting at the open holds for the
+  session — re-copy after a sharp move if you want it fresh. The same string is the workaround on any
+  platform that blocks outbound network calls (Tradovate, for one).</span></p>
+</div></details>
+
 <h2 id="levels"><span data-lang="fr">Les niveaux</span><span data-lang="en">The levels</span></h2>
 
 <details><summary>GEX · <span data-lang="fr">Gamma Exposure</span><span data-lang="en">Gamma Exposure</span></summary>
