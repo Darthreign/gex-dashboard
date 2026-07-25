@@ -1,11 +1,28 @@
 # GEX Dashboard — analyse Gamma/Delta Exposure (SPX/ES, NDX/NQ)
 
-*[English version](README.en.md)* · *[FAQ](FAQ.md)*
+*[English version](README.en.md)* · *[FAQ](FAQ.md)* · *[Avertissement](DISCLAIMER.md)*
 
 [Licence MIT](LICENSE) — outil d'**analyse uniquement** : pas de trading,
 pas d'exécution, pas de conseil en investissement. Chaque instance tire ses
 propres données depuis l'endpoint delayed public de CBOE ; ce projet ne
 rediffuse aucune donnée de marché.
+
+> ⚠️ **Le trading d'options et de dérivés comporte un risque élevé de perte.**
+> Cet outil est fourni à titre éducatif, sans garantie, et ne constitue pas un
+> conseil en investissement. Lisez l'[avertissement complet](DISCLAIMER.md)
+> avant toute utilisation.
+
+## Aperçu
+
+| Vue principale | Gamma Profile |
+|---|---|
+| ![Vue principale](docs/screenshots/01-vue-principale.png) | ![Gamma Profile](docs/screenshots/02-gamma-profile.png) |
+| GEX/DEX par strike, niveaux 0DTE, flux delta, historique | Profil de GEX net selon le spot, décomposé par échéance |
+
+| Vanna & Charm | Positionnement |
+|---|---|
+| ![Vanna et Charm](docs/screenshots/03-vanna-charm.png) | ![Positionnement](docs/screenshots/04-positionnement.png) |
+| Grecques de second ordre par strike | Variation d'open interest entre séances |
 
 Dashboard **d'analyse uniquement** (pas de trading) qui reconstruit les métriques
 de structure de marché façon SpotGamma à partir des chaînes d'options CBOE :
