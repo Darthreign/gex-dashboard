@@ -124,21 +124,12 @@ def t(lang: str, key: str, **fmt) -> str:
 
 
 def wall_labels(levels) -> dict:
-    """Étiquettes standard des niveaux : le plus gros GEX positif = Call Wall,
-    le plus négatif = Put Wall, le reste garde son rang GEXn. Termes identiques
-    dans toutes les langues (vocabulaire trader standard)."""
-    labels: dict = {}
+    """Classement non directionnel des murs de gamma : GEX1..GEXn par |GEX|.
+
+    Les niveaux directionnels (Call Wall au-dessus du spot, Put Support en
+    dessous) sont calculés à part par metrics.key_levels — les mélanger ici
+    produirait des « supports » situés au-dessus du prix.
+    """
     if levels is None or len(levels) == 0:
-        return labels
-    pos = levels[levels["gex"] > 0]
-    neg = levels[levels["gex"] < 0]
-    call_wall = pos.loc[pos["gex"].idxmax()]["strike"] if len(pos) else None
-    put_wall = neg.loc[neg["gex"].idxmin()]["strike"] if len(neg) else None
-    for lv in levels.itertuples():
-        if call_wall is not None and lv.strike == call_wall:
-            labels[lv.strike] = "Call Wall"
-        elif put_wall is not None and lv.strike == put_wall:
-            labels[lv.strike] = "Put Wall"
-        else:
-            labels[lv.strike] = f"GEX{lv.rank}"
-    return labels
+        return {}
+    return {lv.strike: f"GEX{lv.rank}" for lv in levels.itertuples()}

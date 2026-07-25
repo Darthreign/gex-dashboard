@@ -205,6 +205,67 @@ def top_gex_levels(df: pd.DataFrame, n: int = 5) -> pd.DataFrame:
     return agg
 
 
+def expected_move(df: pd.DataFrame, spot: float) -> float | None:
+    """Move attendu sur l'échéance la plus proche, via le straddle ATM.
+
+    Le prix du straddle à la monnaie EST l'estimation de move du marché, sans
+    hypothèse de modèle. Sert de bornes 1D Min / 1D Max (façon MenthorQ).
+    """
+    if df.empty:
+        return None
+    nearest = df["expiry"].min()
+    e = df[df["expiry"] == nearest]
+    e = e.sort_values("volume").drop_duplicates(["type", "strike"], keep="last")
+    calls = e[e["type"] == "C"].set_index("strike")
+    puts = e[e["type"] == "P"].set_index("strike")
+    common = calls.index.intersection(puts.index)
+    if len(common) == 0:
+        return None
+    k_atm = min(common, key=lambda k: abs(k - spot))
+    cmid = (calls.loc[k_atm, "bid"] + calls.loc[k_atm, "ask"]) / 2
+    pmid = (puts.loc[k_atm, "bid"] + puts.loc[k_atm, "ask"]) / 2
+    if cmid <= 0 or pmid <= 0:
+        return None
+    move = float(cmid + pmid)
+    # garde-fou : un move attendu > 10 % du spot sur l'échéance front est
+    # incohérent hors krach — quotes probablement aberrantes.
+    return move if 0 < move < 0.10 * spot else None
+
+
+def key_levels(df: pd.DataFrame, spot: float) -> dict[str, float | None]:
+    """Niveaux directionnels de l'échéance la plus proche (esprit MenthorQ) :
+
+    - call_wall  : plus forte concentration de gamma call AU-DESSUS du spot
+                   (résistance)
+    - put_support: plus forte concentration de gamma put SOUS le spot (support)
+    - d1_max/d1_min : bornes de move attendu (straddle ATM)
+
+    Contrairement au classement GEX1-5 (non directionnel), ces niveaux ne sont
+    cherchés que du côté où ils font sens comme support/résistance.
+    """
+    out: dict[str, float | None] = {
+        "call_wall": None, "put_support": None, "d1_min": None, "d1_max": None,
+    }
+    if df.empty:
+        return out
+    nearest = df["expiry"].min()
+    sub = df[df["expiry"] == nearest]
+    agg = sub.groupby("strike")["gex"].sum()
+
+    above = agg[(agg.index >= spot) & (agg > 0)]
+    if len(above):
+        out["call_wall"] = float(above.idxmax())
+    below = agg[(agg.index <= spot) & (agg < 0)]
+    if len(below):
+        out["put_support"] = float(below.idxmin())
+
+    move = expected_move(df, spot)
+    if move is not None:
+        out["d1_min"] = spot - move
+        out["d1_max"] = spot + move
+    return out
+
+
 def put_call_ratios(df: pd.DataFrame) -> dict[str, float]:
     calls = df[df["type"] == "C"]
     puts = df[df["type"] == "P"]

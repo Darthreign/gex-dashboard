@@ -135,6 +135,60 @@ def test_flow_delta_ignores_volume_reset():
     assert flow["flow_total"] == 0.0
 
 
+def test_key_levels_are_directional():
+    """Call Wall doit être AU-DESSUS du spot, Put Support EN DESSOUS — même
+    quand le plus gros mur absolu se trouve du mauvais côté."""
+    exp = far_expiry()
+    snap = make_chain(100.0, [
+        # plus gros mur de puts au-dessus du spot : ne doit PAS servir de support
+        {"expiry": exp, "type": "P", "strike": 105.0, "open_interest": 5000.0},
+        {"expiry": exp, "type": "P", "strike": 95.0, "open_interest": 800.0},
+        {"expiry": exp, "type": "C", "strike": 108.0, "open_interest": 900.0},
+        # gros mur de calls sous le spot : ne doit PAS servir de résistance
+        {"expiry": exp, "type": "C", "strike": 92.0, "open_interest": 4000.0},
+    ])
+    df = metrics.enrich(snap)
+    k = metrics.key_levels(df, 100.0)
+    assert k["call_wall"] == 108.0, "la résistance doit être au-dessus du spot"
+    assert k["put_support"] == 95.0, "le support doit être sous le spot"
+
+
+def test_key_levels_none_when_side_empty():
+    exp = far_expiry()
+    snap = make_chain(100.0, [
+        {"expiry": exp, "type": "C", "strike": 110.0, "open_interest": 100.0},
+    ])
+    df = metrics.enrich(snap)
+    k = metrics.key_levels(df, 100.0)
+    assert k["call_wall"] == 110.0
+    assert k["put_support"] is None  # aucun mur de puts sous le spot
+
+
+def test_expected_move_from_straddle():
+    """1D Min/Max encadrent le spot du prix du straddle ATM."""
+    exp = far_expiry()
+    rows = []
+    for k in (98.0, 100.0, 102.0):
+        for typ, mid in (("C", 3.0), ("P", 2.0)):  # straddle ATM = 5.0
+            rows.append({"expiry": exp, "type": typ, "strike": k,
+                         "bid": mid - 0.1, "ask": mid + 0.1, "volume": 5.0})
+    snap = make_chain(100.0, rows)
+    df = metrics.enrich(snap)
+    assert metrics.expected_move(df, 100.0) == pytest.approx(5.0, abs=0.01)
+    k = metrics.key_levels(df, 100.0)
+    assert k["d1_min"] == pytest.approx(95.0, abs=0.01)
+    assert k["d1_max"] == pytest.approx(105.0, abs=0.01)
+
+
+def test_expected_move_rejects_absurd():
+    exp = far_expiry()
+    rows = [{"expiry": exp, "type": typ, "strike": 100.0,
+             "bid": 49.0, "ask": 51.0, "volume": 5.0} for typ in ("C", "P")]
+    snap = make_chain(100.0, rows)
+    df = metrics.enrich(snap)
+    assert metrics.expected_move(df, 100.0) is None  # straddle = 100 % du spot
+
+
 def test_third_friday():
     # échéances CME connues
     assert metrics.third_friday(2026, 9) == date(2026, 9, 18)

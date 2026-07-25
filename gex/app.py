@@ -35,6 +35,9 @@ C = {
     "zg": "#c98500",    # jaune sombre — Gamma Flip
     "lvl": "#9085e9",   # violet — niveaux GEX 0DTE
     "hvl": "#199e70",   # aqua — HVL (bascule pondérée par le volume du jour)
+    "cw": "#3987e5",    # bleu — Call Wall (résistance, au-dessus du spot)
+    "ps": "#e66767",    # rouge — Put Support (support, sous le spot)
+    "d1": "#898781",    # gris — bornes 1D Min / 1D Max (move attendu)
     "cat": ["#3987e5", "#d95926", "#199e70", "#c98500"],  # slots 1-4
 }
 
@@ -87,7 +90,8 @@ def _bar_width(strikes: np.ndarray) -> float:
 
 def exposure_fig(df: pd.DataFrame, spot: float, zg: float | None, col: str, title: str,
                  lang: str, levels: pd.DataFrame | None = None, hvl: float | None = None,
-                 window: float = 0.04, basis: float = 0.0) -> go.Figure:
+                 window: float = 0.04, basis: float = 0.0,
+                 keys: dict | None = None) -> go.Figure:
     # `basis` décale l'échelle de prix vers le future (0 = points d'indice).
     lo, hi = spot * (1 - window), spot * (1 + window)
     d = df[df["strike"].between(lo, hi)]
@@ -127,6 +131,21 @@ def exposure_fig(df: pd.DataFrame, spot: float, zg: float | None, col: str, titl
         fig.add_hline(y=hvl, line_color=C["hvl"], line_dash="dash", line_width=1,
                       annotation_text=f"HVL {hvl:.0f}", annotation_font_color=C["hvl"],
                       annotation_position="bottom right")
+    for key, color, label, dash in (
+        ("call_wall", C["cw"], "Call Wall", "solid"),
+        ("put_support", C["ps"], "Put Support", "solid"),
+        ("d1_max", C["d1"], "1D Max", "dot"),
+        ("d1_min", C["d1"], "1D Min", "dot"),
+    ):
+        v = (keys or {}).get(key)
+        if v is None:
+            continue
+        y = v + basis
+        if lo <= y <= hi:
+            fig.add_hline(y=y, line_color=color, line_dash=dash, line_width=1.5,
+                          annotation_text=f"{label} {y:.0f}",
+                          annotation_font=dict(color=color, size=10),
+                          annotation_position="top right")
     if levels is not None and not levels.empty:
         labels = wall_labels(levels)
         for lv in levels.itertuples():
@@ -376,7 +395,8 @@ def create_app() -> Dash:
 
     def levels_strip(levels: pd.DataFrame | None, lang: str,
                      hvl: float | None = None, zg: float | None = None,
-                     basis: float = 0.0, future: str | None = None) -> list:
+                     basis: float = 0.0, future: str | None = None,
+                     keys: dict | None = None) -> list:
         if levels is None or levels.empty:
             return [html.Span(t(lang, "levels_unavailable"),
                               style={"color": C["muted"], "fontSize": "12px"})]
@@ -394,6 +414,15 @@ def create_app() -> Dash:
         if hvl is not None:
             items.append(_chip([html.B("HVL ", style={"color": C["hvl"]}),
                                 f"{hvl + basis:.0f}"], C["hvl"]))
+        # niveaux directionnels (support/résistance) et bornes de move attendu
+        for key, color, label in (("call_wall", C["cw"], "Call Wall"),
+                                  ("put_support", C["ps"], "Put Support"),
+                                  ("d1_min", C["d1"], "1D Min"),
+                                  ("d1_max", C["d1"], "1D Max")):
+            v = (keys or {}).get(key)
+            if v is not None:
+                items.append(_chip([html.B(f"{label} ", style={"color": color}),
+                                    f"{v + basis:.0f}"], color))
         for lv in levels.itertuples():
             side = t(lang, "side_call") if lv.gex > 0 else t(lang, "side_put")
             items.append(_chip(
@@ -494,12 +523,14 @@ def create_app() -> Dash:
             # ne garde que les murs pesant au moins 25 % du plus fort
             levels = levels[levels["gex"].abs() >= 0.25 * levels["gex"].abs().max()]
         hvl = metrics.zero_gamma(df, snap.spot, weight_col="volume")
+        keys = metrics.key_levels(df, snap.spot)
         return (
             build_cards(symbol, lang, basis),
-            levels_strip(levels, lang, hvl, zg, basis, fut),
+            levels_strip(levels, lang, hvl, zg, basis, fut, keys),
             _pin(exposure_fig(sel, snap.spot, zg, "gex",
                               t(lang, "gex_title", bucket=bucket_label), lang,
-                              levels=levels, hvl=hvl, window=window, basis=basis), rev),
+                              levels=levels, hvl=hvl, window=window, basis=basis,
+                              keys=keys), rev),
             _pin(exposure_fig(sel, snap.spot, zg, "dex",
                               t(lang, "dex_title", bucket=bucket_label), lang,
                               window=window, basis=basis), rev),
