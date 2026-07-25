@@ -16,7 +16,7 @@ from dash import Dash, ctx, dcc, html
 from dash.dependencies import Input, Output, State
 from dash.exceptions import PreventUpdate
 
-from . import metrics, store
+from . import metrics, scales, store
 from .config import SETTINGS, UNDERLYINGS
 from .i18n import LANGS, t, wall_labels
 from .metrics import ET, EXPIRY_BUCKETS
@@ -111,20 +111,21 @@ def _bar_width(strikes: np.ndarray) -> float:
 
 def exposure_fig(df: pd.DataFrame, spot: float, zg: float | None, col: str, title: str,
                  lang: str, levels: pd.DataFrame | None = None, hvl: float | None = None,
-                 window: float = 0.04, basis: float = 0.0,
+                 window: float = 0.04, xf=None,
                  keys: dict | None = None) -> go.Figure:
-    # `basis` décale l'échelle de prix vers le future (0 = points d'indice).
+    # `xf` transpose les prix vers l'échelle d'affichage choisie.
+    xf = xf or (lambda v: v)
     lo, hi = spot * (1 - window), spot * (1 + window)
     d = df[df["strike"].between(lo, hi)]
     agg = metrics.exposure_by_strike(d, col)
     if agg.empty:
         return empty_fig(t(lang, "no_data_window"), title)
     net = agg["net"].to_numpy() / 1e9
-    strikes = agg["strike"].to_numpy() + basis
-    spot = spot + basis
-    zg = zg + basis if zg is not None else None
-    hvl = hvl + basis if hvl is not None else None
-    lo, hi = lo + basis, hi + basis
+    strikes = xf(agg["strike"].to_numpy())
+    spot = xf(spot)
+    zg = xf(zg) if zg is not None else None
+    hvl = xf(hvl) if hvl is not None else None
+    lo, hi = xf(lo), xf(hi)
     colors = np.where(net >= 0, C["pos"], C["neg"])
     fig = go.Figure(
         go.Bar(
@@ -161,7 +162,7 @@ def exposure_fig(df: pd.DataFrame, spot: float, zg: float | None, col: str, titl
         v = (keys or {}).get(key)
         if v is None:
             continue
-        y = v + basis
+        y = xf(v)
         if lo <= y <= hi:
             fig.add_hline(y=y, line_color=color, line_dash=dash, line_width=1.5,
                           annotation_text=f"{label} {y:.0f}",
@@ -170,7 +171,7 @@ def exposure_fig(df: pd.DataFrame, spot: float, zg: float | None, col: str, titl
     if levels is not None and not levels.empty:
         labels = wall_labels(levels)
         for lv in levels.itertuples():
-            y = lv.strike + basis
+            y = xf(lv.strike)
             if not (lo <= y <= hi):
                 continue
             fig.add_hline(
@@ -277,14 +278,15 @@ def smile_fig(df: pd.DataFrame, spot: float, lang: str) -> go.Figure:
 
 
 def profile_fig(df: pd.DataFrame, spot: float, zg: float | None, lang: str,
-                window: float, basis: float = 0.0) -> go.Figure:
+                window: float, xf=None) -> go.Figure:
     """Courbe de GEX net en fonction d'un spot hypothétique."""
+    xf = xf or (lambda v: v)
     title = t(lang, "profile_title")
     res = metrics.gamma_profile(df, spot, range_pct=window, steps=201)
     if res is None:
         return empty_fig(t(lang, "no_data_window"), title)
     grid, prof = res
-    x = grid + basis
+    x = xf(grid)
     y = prof / 1e9
     fig = go.Figure()
     # deux traces pour colorer par polarité sans trompe-l'œil sur l'axe
@@ -298,19 +300,20 @@ def profile_fig(df: pd.DataFrame, spot: float, zg: float | None, lang: str,
     fig.update_xaxes(title_text=t(lang, "profile_axis"), title_font=dict(color=C["muted"]))
     fig.update_yaxes(title_text="$Bn / 1%", title_font=dict(color=C["muted"]))
     fig.add_hline(y=0, line_color=C["axis"], line_width=1)
-    fig.add_vline(x=spot + basis, line_color=C["spot"], line_dash="dot", line_width=1,
-                  annotation_text=f"Spot {spot + basis:.0f}", annotation_font_color=C["ink"])
+    fig.add_vline(x=xf(spot), line_color=C["spot"], line_dash="dot", line_width=1,
+                  annotation_text=f"Spot {xf(spot):.0f}", annotation_font_color=C["ink"])
     if zg is not None:
-        fig.add_vline(x=zg + basis, line_color=C["zg"], line_dash="dash", line_width=1,
-                      annotation_text=f"Gamma Flip {zg + basis:.0f}",
+        fig.add_vline(x=xf(zg), line_color=C["zg"], line_dash="dash", line_width=1,
+                      annotation_text=f"Gamma Flip {xf(zg):.0f}",
                       annotation_font_color=C["zg"], annotation_position="bottom right")
     return fig
 
 
 def profile_by_expiry_fig(df: pd.DataFrame, spot: float, lang: str,
-                          window: float, basis: float = 0.0) -> go.Figure:
+                          window: float, xf=None) -> go.Figure:
     """Profil décomposé par bucket d'échéance : ce que pèse le 0DTE seul."""
     title = t(lang, "profile_by_exp")
+    xf = xf or (lambda v: v)
     today = datetime.now(ET).date()
     fig = go.Figure()
     drawn = 0
@@ -320,7 +323,7 @@ def profile_by_expiry_fig(df: pd.DataFrame, spot: float, lang: str,
         if res is None:
             continue
         grid, prof = res
-        fig.add_scatter(x=grid + basis, y=prof / 1e9, mode="lines",
+        fig.add_scatter(x=xf(grid), y=prof / 1e9, mode="lines",
                         name=t(lang, BUCKET_KEYS[bucket]),
                         line=dict(color=C["cat"][i % 4], width=2),
                         hovertemplate="%{x:.0f}<br>%{y:.1f} $Bn<extra></extra>")
@@ -331,20 +334,21 @@ def profile_by_expiry_fig(df: pd.DataFrame, spot: float, lang: str,
     lay = with_legend(lay)
     fig.update_layout(**lay)
     fig.add_hline(y=0, line_color=C["axis"], line_width=1)
-    fig.add_vline(x=spot + basis, line_color=C["spot"], line_dash="dot", line_width=1)
+    fig.add_vline(x=xf(spot), line_color=C["spot"], line_dash="dot", line_width=1)
     fig.update_xaxes(title_text=t(lang, "profile_axis"), title_font=dict(color=C["muted"]))
     return fig
 
 
 def second_order_fig(df: pd.DataFrame, spot: float, col: str, title: str,
-                     window: float, basis: float = 0.0) -> go.Figure:
+                     window: float, xf=None) -> go.Figure:
     """Exposition vanna (vex) ou charm (cex) par strike."""
+    xf = xf or (lambda v: v)
     lo, hi = spot * (1 - window), spot * (1 + window)
     d = df[df["strike"].between(lo, hi)]
     if d.empty:
         return empty_fig("—", title)
     agg = d.groupby("strike")[col].sum() / 1e6
-    strikes = agg.index.to_numpy() + basis
+    strikes = xf(agg.index.to_numpy())
     vals = agg.to_numpy()
     fig = go.Figure(go.Bar(
         y=strikes, x=vals, orientation="h",
@@ -353,17 +357,18 @@ def second_order_fig(df: pd.DataFrame, spot: float, col: str, title: str,
         hovertemplate="%{y}<br>%{x:.1f} $M<extra></extra>",
     ))
     fig.update_layout(**base_layout(title, height=460))
-    fig.add_hline(y=spot + basis, line_color=C["spot"], line_dash="dot", line_width=1,
-                  annotation_text=f"Spot {spot + basis:.0f}", annotation_font_color=C["ink"],
+    fig.add_hline(y=xf(spot), line_color=C["spot"], line_dash="dot", line_width=1,
+                  annotation_text=f"Spot {xf(spot):.0f}", annotation_font_color=C["ink"],
                   annotation_position="top right")
     fig.update_xaxes(title_text="$M", title_font=dict(color=C["muted"]))
     return fig
 
 
 def oi_change_fig(chg: pd.DataFrame, spot: float, lang: str, prev_day: str,
-                  window: float, basis: float = 0.0) -> go.Figure:
+                  window: float, xf=None) -> go.Figure:
     """Variation d'OI par strike, calls et puts distingués (identité, pas polarité)."""
     title = t(lang, "pos_title", day=prev_day)
+    xf = xf or (lambda v: v)
     if chg.empty:
         return empty_fig(t(lang, "pos_no_prev"), title)
     lo, hi = spot * (1 - window), spot * (1 + window)
@@ -373,7 +378,7 @@ def oi_change_fig(chg: pd.DataFrame, spot: float, lang: str, prev_day: str,
     if (d["d_call"].abs().sum() + d["d_put"].abs().sum()) == 0:
         # même séance des deux côtés : l'OI n'est publié qu'une fois par jour
         return empty_fig(t(lang, "pos_no_change"), title)
-    strikes = d["strike"].to_numpy() + basis
+    strikes = xf(d["strike"].to_numpy())
     w = _bar_width(d["strike"].to_numpy()) / 2
     fig = go.Figure()
     fig.add_bar(y=strikes, x=d["d_call"] / 1000, orientation="h", width=w,
@@ -388,18 +393,47 @@ def oi_change_fig(chg: pd.DataFrame, spot: float, lang: str, prev_day: str,
     lay = with_legend(lay)
     lay["barmode"] = "group"
     fig.update_layout(**lay)
-    fig.add_hline(y=spot + basis, line_color=C["spot"], line_dash="dot", line_width=1,
-                  annotation_text=f"Spot {spot + basis:.0f}", annotation_font_color=C["ink"],
+    fig.add_hline(y=xf(spot), line_color=C["spot"], line_dash="dot", line_width=1,
+                  annotation_text=f"Spot {xf(spot):.0f}", annotation_font_color=C["ink"],
                   annotation_position="top right")
     fig.update_xaxes(title_text="Δ OI (milliers de contrats)", title_font=dict(color=C["muted"]))
     return fig
 
 
-def _basis_for(symbol: str, unit: str, summary) -> float:
-    """Décalage à appliquer aux prix affichés (0 en mode indice)."""
-    if unit != "futures" or summary is None:
-        return 0.0
-    return (summary.basis or 0.0) if UNDERLYINGS[symbol].future else 0.0
+def _transform_for(symbol: str, scale_key: str | None):
+    """Fonction de transposition des prix vers l'échelle demandée.
+
+    Lit les spots et basis de TOUS les sous-jacents collectés : transposer
+    SPX vers NQ suppose de connaître le spot NDX et son basis.
+    """
+    spots, bases = {}, {}
+    for key in UNDERLYINGS:
+        st = STATE.get(key)
+        with STATE.lock:
+            summ = st.summary
+        if summ is not None:
+            spots[key] = summ.spot
+            bases[key] = summ.basis
+    target = scales.scale_by_key(scale_key) if scale_key else None
+    return scales.transform(symbol, target, spots, bases)
+
+
+def _scale_note(lang: str, symbol: str, scale_key: str | None,
+                ratio: float, mode: str) -> str | None:
+    """Mention affichée au-dessus des niveaux quand ils sont transposés.
+
+    La transposition croisée (SP <-> ND) est signalée séparément : son ratio
+    dérive dans le temps, les niveaux ne sont qu'un repère instantané.
+    """
+    if mode == "native":
+        return None
+    target = scales.scale_by_key(scale_key)
+    if target is None:
+        return None
+    if mode == "basis":
+        return t(lang, "scale_basis", scale=target.label)
+    key = "scale_cross" if target.cross_family(symbol) else "scale_ratio"
+    return t(lang, key, scale=target.label, ratio=f"{ratio:.4f}")
 
 
 def card(label: str, value: str, sub: str = "", accent: str | None = None) -> html.Div:
@@ -416,23 +450,24 @@ def card(label: str, value: str, sub: str = "", accent: str | None = None) -> ht
     )
 
 
-def build_cards(symbol: str, lang: str, basis: float = 0.0) -> list:
+def build_cards(symbol: str, lang: str, xf=None) -> list:
     st = STATE.get(symbol)
     with STATE.lock:
         s = st.summary
         err = STATE.last_error
     if s is None:
         return [card(t(lang, "card_status"), "…", err or t(lang, "waiting_short"))]
-    zg_txt = f"{s.zero_gamma + basis:.0f}" if s.zero_gamma else "n/a"
+    xf = xf or (lambda v: v)
+    zg_txt = f"{xf(s.zero_gamma):.0f}" if s.zero_gamma else "n/a"
     zg_sub = ""
     if s.zero_gamma:
-        d = s.spot - s.zero_gamma  # écart inchangé par le basis
+        d = s.spot - s.zero_gamma  # écart natif, non transposé
         zg_sub = t(lang, "card_zg_sub", sign="+" if d >= 0 else "",
                    pts=f"{d:.0f}", reg="+" if d >= 0 else "-")
     gex_color = C["pos"] if s.net_gex >= 0 else C["neg"]
     feed_local = s.timestamp.replace(tzinfo=ET).astimezone(LOCAL_TZ)
     return [
-        card(t(lang, "card_spot"), f"{s.spot + basis:,.0f}",
+        card(t(lang, "card_spot"), f"{xf(s.spot):,.0f}",
              t(lang, "card_feed", local=f"{feed_local:%H:%M:%S}", et=f"{s.timestamp:%H:%M}")),
         card(t(lang, "card_net_gex"), f"{s.net_gex / 1e9:+.1f} $Bn",
              t(lang, "stabilizing") if s.net_gex >= 0 else t(lang, "destabilizing"),
@@ -469,7 +504,7 @@ def create_app() -> Dash:
                         id="symbol", className="seg",
                         options=[{"label": u.label, "value": u.key} for u in enabled],
                         value=enabled[0].key, inline=True),
-                    dcc.RadioItems(id="unit", className="seg", value="index", inline=True),
+                    dcc.RadioItems(id="unit", className="seg", inline=True),
                     dcc.RadioItems(
                         id="lang", className="seg",
                         options=[{"label": l.upper(), "value": l} for l in LANGS],
@@ -553,25 +588,24 @@ def create_app() -> Dash:
 
     def levels_strip(levels: pd.DataFrame | None, lang: str,
                      hvl: float | None = None, zg: float | None = None,
-                     basis: float = 0.0, future: str | None = None,
+                     xf=None, scale_note: str | None = None,
                      keys: dict | None = None) -> list:
         if levels is None or levels.empty:
             return [html.Span(t(lang, "levels_unavailable"),
                               style={"color": C["muted"], "fontSize": "12px"})]
         exp = levels["expiry"].iloc[0]
         labels = wall_labels(levels)
+        xf = xf or (lambda v: v)
         items = [html.Span(t(lang, "levels_prefix", exp=f"{exp:%d/%m}"),
                            style={"color": C["muted"], "fontSize": "12px", "marginRight": "4px"})]
-        if basis and future:
-            items.append(html.Span(
-                t(lang, "basis_note", fut=future, basis=basis),
-                style={"color": C["hvl"], "fontSize": "11px", "marginRight": "4px"}))
+        if scale_note:
+            items.append(html.Span(scale_note, className="scale-note"))
         if zg is not None:
             items.append(_chip([html.B("Gamma Flip ", style={"color": C["zg"]}),
-                                f"{zg + basis:.0f}"], C["zg"]))
+                                f"{xf(zg):.0f}"], C["zg"]))
         if hvl is not None:
             items.append(_chip([html.B("HVL ", style={"color": C["hvl"]}),
-                                f"{hvl + basis:.0f}"], C["hvl"]))
+                                f"{xf(hvl):.0f}"], C["hvl"]))
         # niveaux directionnels (support/résistance) et bornes de move attendu
         for key, color, label in (("call_wall", C["cw"], "Call Wall"),
                                   ("put_support", C["ps"], "Put Support"),
@@ -580,12 +614,12 @@ def create_app() -> Dash:
             v = (keys or {}).get(key)
             if v is not None:
                 items.append(_chip([html.B(f"{label} ", style={"color": color}),
-                                    f"{v + basis:.0f}"], color))
+                                    f"{xf(v):.0f}"], color))
         for lv in levels.itertuples():
             side = t(lang, "side_call") if lv.gex > 0 else t(lang, "side_put")
             items.append(_chip(
                 [html.B(f"{labels[lv.strike]} ", style={"color": C["lvl"]}),
-                 f"{lv.strike + basis:.0f} ",
+                 f"{xf(lv.strike):.0f} ",
                  html.Span(f"({lv.gex / 1e9:+.1f} $Bn {side})",
                            style={"color": C["ink2"], "fontSize": "11px"})],
                 "rgba(255,255,255,0.10)",
@@ -618,20 +652,24 @@ def create_app() -> Dash:
          Output("flow-day-label", "children"), Output("flow-today", "children"),
          Output("footer", "children"), Output("unit", "options"),
          Output("app-title", "children"), Output("brand-sub", "children"),
-         Output("lbl-bucket", "children"), Output("lbl-window", "children")],
+         Output("lbl-bucket", "children"), Output("lbl-window", "children"),
+         Output("unit", "value")],
         [Input("lang", "value"), Input("symbol", "value")],
     )
     def apply_lang(lang, symbol):
         bucket_opts = [{"label": t(lang, BUCKET_KEYS[b]), "value": b} for b in EXPIRY_BUCKETS]
         majors_opts = [{"label": t(lang, "majors_only"), "value": "on"}]
-        fut = UNDERLYINGS[symbol].future
-        unit_opts = [{"label": t(lang, "unit_index"), "value": "index"},
-                     {"label": fut or t(lang, "unit_futures"), "value": "futures",
-                      "disabled": fut is None}]
+        # échelles : le sous-jacent natif, puis les deux futures (la
+        # transposition croisée SPX→NQ est le cas d'usage visé)
+        native_label = (t(lang, "unit_index")
+                        if UNDERLYINGS[symbol].future else symbol)
+        opts = [{"label": native_label, "value": symbol},
+                {"label": "ES", "value": "ES"},
+                {"label": "NQ", "value": "NQ"}]
         return (bucket_opts, majors_opts, t(lang, "flow_day_label"),
-                t(lang, "last_session"), t(lang, "footer"), unit_opts,
+                t(lang, "last_session"), t(lang, "footer"), opts,
                 t(lang, "app_title"), t(lang, "brand_sub"),
-                t(lang, "lbl_expiry"), t(lang, "lbl_window"))
+                t(lang, "lbl_expiry"), t(lang, "lbl_window"), symbol)
 
     @app.callback(
         [Output("cards", "children"), Output("levels", "children"), Output("gex-strike", "figure"),
@@ -673,10 +711,9 @@ def create_app() -> Dash:
             fig.update_layout(uirevision=rev)
             return fig
 
-        # basis futures : déjà calculé au pull (et historisé) — pas recalculé
-        # à chaque interaction UI. Il décroît vers 0 à l'approche de l'échéance.
-        fut = UNDERLYINGS[symbol].future
-        basis = _basis_for(symbol, unit, summary)
+        # transposition vers l'échelle d'affichage (voir gex/scales.py)
+        xf, ratio, mode = _transform_for(symbol, unit)
+        note = _scale_note(lang, symbol, unit, ratio, mode)
         rev = f"{symbol}-{bucket}-{window}-{unit}"
         levels = metrics.top_gex_levels(df)
         if majors and not levels.empty:
@@ -685,15 +722,15 @@ def create_app() -> Dash:
         hvl = metrics.zero_gamma(df, snap.spot, weight_col="volume")
         keys = metrics.key_levels(df, snap.spot)
         return (
-            build_cards(symbol, lang, basis),
-            levels_strip(levels, lang, hvl, zg, basis, fut, keys),
+            build_cards(symbol, lang, xf),
+            levels_strip(levels, lang, hvl, zg, xf, note, keys),
             _pin(exposure_fig(sel, snap.spot, zg, "gex",
                               t(lang, "gex_title", bucket=bucket_label), lang,
-                              levels=levels, hvl=hvl, window=window, basis=basis,
+                              levels=levels, hvl=hvl, window=window, xf=xf,
                               keys=keys), rev),
             _pin(exposure_fig(sel, snap.spot, zg, "dex",
                               t(lang, "dex_title", bucket=bucket_label), lang,
-                              window=window, basis=basis), rev),
+                              window=window, xf=xf), rev),
             _pin(flow_fig(symbol, lang, flow_day), f"{symbol}-{flow_day}"),
             _pin(history_fig(symbol, lang), symbol),
             _pin(spot_zg_fig(symbol, lang), symbol),
@@ -725,12 +762,12 @@ def create_app() -> Dash:
         if df is None or snap is None:
             e = empty_fig(t(lang, "waiting_first_pull"), t(lang, "profile_title"))
             return e, e, t(lang, "profile_hint")
-        basis = _basis_for(symbol, unit, summary)
+        xf, _, _ = _transform_for(symbol, unit)
         zg = summary.zero_gamma if summary else None
         # fenêtre élargie : la courbe n'a d'intérêt que si elle montre le flip
         w = max(window, 0.06)
-        return (profile_fig(df, snap.spot, zg, lang, w, basis),
-                profile_by_expiry_fig(df, snap.spot, lang, w, basis),
+        return (profile_fig(df, snap.spot, zg, lang, w, xf),
+                profile_by_expiry_fig(df, snap.spot, lang, w, xf),
                 t(lang, "profile_hint"))
 
     @app.callback(
@@ -749,7 +786,7 @@ def create_app() -> Dash:
         if df is None or snap is None:
             e = empty_fig(t(lang, "waiting_first_pull"))
             return e, e, [], t(lang, "vex_hint")
-        basis = _basis_for(symbol, unit, summary)
+        xf, _, _ = _transform_for(symbol, unit)
         today = datetime.now(ET).date()
         sel = metrics.add_second_order(df[metrics.bucket_mask(df, bucket, today)], snap.spot)
         cards = [
@@ -758,8 +795,8 @@ def create_app() -> Dash:
             card(t(lang, "cex_card"), f"{sel['cex'].sum() / 1e9:+.2f} $Bn",
                  t(lang, "cex_title").split("(")[-1].rstrip(")")),
         ]
-        return (second_order_fig(sel, snap.spot, "vex", t(lang, "vex_title"), window, basis),
-                second_order_fig(sel, snap.spot, "cex", t(lang, "cex_title"), window, basis),
+        return (second_order_fig(sel, snap.spot, "vex", t(lang, "vex_title"), window, xf),
+                second_order_fig(sel, snap.spot, "cex", t(lang, "cex_title"), window, xf),
                 cards, t(lang, "vex_hint"))
 
     @app.callback(
@@ -775,7 +812,7 @@ def create_app() -> Dash:
             df, snap, summary = st.enriched, st.snapshot, st.summary
         if df is None or snap is None:
             return empty_fig(t(lang, "waiting_first_pull")), t(lang, "pos_hint")
-        basis = _basis_for(symbol, unit, summary)
+        xf, _, _ = _transform_for(symbol, unit)
         today = datetime.now(ET).strftime("%Y-%m-%d")
         prev = store.load_previous_snapshot(symbol, today)
         if prev is None:
@@ -783,7 +820,7 @@ def create_app() -> Dash:
                     t(lang, "pos_hint"))
         prev_day, prev_df = prev
         chg = metrics.oi_change(prev_df, df)
-        return (oi_change_fig(chg, snap.spot, lang, prev_day, window, basis),
+        return (oi_change_fig(chg, snap.spot, lang, prev_day, window, xf),
                 t(lang, "pos_hint"))
 
     @app.callback(

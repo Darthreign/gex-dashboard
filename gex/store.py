@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -22,11 +23,25 @@ def _ensure(p: Path) -> Path:
     return p
 
 
+def _write_atomic(df: pd.DataFrame, path: Path) -> None:
+    """Écrit via un fichier temporaire puis remplace.
+
+    Indispensable : le dashboard lit ces fichiers pendant que le scheduler les
+    réécrit. Sans atomicité, une lecture peut tomber sur un fichier
+    partiellement écrit — pyarrow lève alors « Invalid column metadata
+    (corrupt file?) » alors que les données sont saines. os.replace est
+    atomique sur un même système de fichiers.
+    """
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    df.to_parquet(tmp, index=False)
+    os.replace(tmp, path)
+
+
 def save_snapshot(symbol: str, df: pd.DataFrame, ts: datetime) -> Path:
     path = _ensure(
         SETTINGS.data_dir / "snapshots" / symbol / ts.strftime("%Y-%m-%d") / f"{ts:%H%M%S}.parquet"
     )
-    df.to_parquet(path, index=False)
+    _write_atomic(df, path)
     return path
 
 
@@ -36,7 +51,7 @@ def append_daily(kind: str, symbol: str, row: dict, ts: datetime) -> Path:
     new = pd.DataFrame([row])
     if path.exists():
         new = pd.concat([pd.read_parquet(path), new], ignore_index=True)
-    new.to_parquet(path, index=False)
+    _write_atomic(new, path)
     return path
 
 
@@ -45,7 +60,7 @@ def append_history(row: dict) -> Path:
     new = pd.DataFrame([row])
     if path.exists():
         new = pd.concat([pd.read_parquet(path), new], ignore_index=True)
-    new.to_parquet(path, index=False)
+    _write_atomic(new, path)
     return path
 
 

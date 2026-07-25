@@ -19,19 +19,24 @@ class Underlying:
     cboe_symbol: str    # symbole endpoint CBOE ("_SPX")
     label: str          # libellé affiché ("SPX / ES")
     future: str | None = None   # future CME associé, pour la conversion de basis
+    # Famille d'indice : la transposition entre familles est possible mais son
+    # ratio dérive dans le temps (cf. gex/scales.py).
+    family: str = "SP"
     enabled: bool = True
 
 
 UNDERLYINGS: dict[str, Underlying] = {
     u.key: u
     for u in [
-        Underlying("SPX", "_SPX", "SPX / ES", future="ES"),
-        Underlying("NDX", "_NDX", "NDX / NQ", future="NQ"),
+        # libellés = simples tickers : l'échelle d'affichage (ES/NQ) se choisit
+        # dans son propre sélecteur, la mentionner ici ferait doublon
+        Underlying("SPX", "_SPX", "SPX", future="ES", family="SP"),
+        Underlying("NDX", "_NDX", "NDX", future="NQ", family="ND"),
         # ETF : pas de future associé (le sélecteur Indice/Futures est donc
         # désactivé), options américaines, et sous-jacents versant un dividende
         # — voir la note sur l'approximation q=0 dans les limites du README.
-        Underlying("SPY", "SPY", "SPY"),
-        Underlying("QQQ", "QQQ", "QQQ"),
+        Underlying("SPY", "SPY", "SPY", family="SP"),
+        Underlying("QQQ", "QQQ", "QQQ", family="ND"),
     ]
 }
 

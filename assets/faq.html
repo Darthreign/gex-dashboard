@@ -226,6 +226,32 @@ python -m venv .venv</pre>
   quarterly roll automatically.</span></p>
 </div></details>
 
+<details><summary><span data-lang="fr">Puis-je afficher les niveaux SPX sur une échelle NQ ?</span><span data-lang="en">Can I display SPX levels on an NQ scale?</span></summary>
+<div class="body">
+<p><span data-lang="fr">Oui — le sélecteur <strong>Indice / ES / NQ</strong> transpose tous les niveaux
+  vers l'échelle choisie, y compris en croisé (SPX vers NQ, NDX vers ES). Certains traders
+  croisent ces données parce que les teneurs de marché ne se couvrent pas toujours sur le
+  sous-jacent direct.</span>
+  <span data-lang="en">Yes — the <strong>Index / ES / NQ</strong> selector transposes all levels to the
+  chosen scale, including across families (SPX to NQ, NDX to ES). Some traders cross these
+  because market makers don't always hedge on the direct underlying.</span></p>
+<p><span data-lang="fr">Deux régimes de conversion : vers le future du <em>même</em> indice, le basis
+  est appliqué (conversion exacte) ; dans tous les autres cas, la conversion est proportionnelle
+  et préserve la distance relative au spot — un mur à +1,2 % du spot SPX s'affiche à +1,2 % du
+  spot cible.</span>
+  <span data-lang="en">Two conversion modes: to the future of the <em>same</em> index, the basis is
+  applied (exact conversion); otherwise it is proportional and preserves the relative distance to
+  spot — a wall 1.2% above SPX spot shows 1.2% above the target spot.</span></p>
+<p class="note"><span data-lang="fr">En croisé, le ratio SPX/NDX <strong>dérive en permanence</strong>
+  selon la surperformance relative : le niveau transposé est un repère à l'instant T, pas un niveau
+  stable. Le ratio employé est affiché, et un avertissement accompagne ce mode. Les montants en $
+  restent ceux du sous-jacent source — c'est son gamma, simplement repositionné.</span>
+  <span data-lang="en">Across families, the SPX/NDX ratio <strong>drifts continuously</strong> with
+  relative performance: a transposed level is a point-in-time reference, not a stable level. The
+  ratio used is displayed, and a warning accompanies this mode. Dollar amounts remain those of the
+  source underlying — it is its gamma, merely repositioned.</span></p>
+</div></details>
+
 <h2 id="levels"><span data-lang="fr">Les niveaux</span><span data-lang="en">The levels</span></h2>
 
 <details><summary>GEX · <span data-lang="fr">Gamma Exposure</span><span data-lang="en">Gamma Exposure</span></summary>
