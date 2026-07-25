@@ -144,6 +144,50 @@ def empty_fig(msg: str, title: str = "") -> go.Figure:
     return fig
 
 
+def _draw_levels(fig, items: list[dict], lo: float, hi: float, height: int) -> None:
+    """Trace des lignes horizontales de niveau en évitant que les étiquettes
+    se chevauchent.
+
+    Toutes les étiquettes sont posées AU-DESSUS de leur ligne (mélanger
+    au-dessus/en dessous crée des superpositions dès que deux niveaux sont
+    proches). Les collisions restantes sont réglées par un décalage vertical
+    calculé en pixels, côté par côté.
+
+    items : dicts {y, label, color, dash, side} ; side ∈ {"left", "right"}.
+    """
+    visible = [i for i in items if i["y"] is not None and lo <= i["y"] <= hi]
+    if not visible:
+        return
+    span = (hi - lo) or 1.0
+    min_px = 15          # hauteur d'une étiquette
+    # Plafond du décalage : au-delà, l'étiquette s'éloignerait trop de sa
+    # ligne et induirait en erreur sur le niveau réel — mieux vaut alors
+    # tolérer un chevauchement partiel.
+    max_px = 28
+    last: dict[str, tuple[float, float]] = {}   # côté -> (px du dernier, décalage)
+
+    for it in sorted(visible, key=lambda i: i["y"]):
+        side = it.get("side", "right")
+        px = (it["y"] - lo) / span * height     # position verticale en pixels
+        shift = 0.0
+        prev = last.get(side)
+        if prev is not None:
+            prev_px, prev_shift = prev
+            overlap = min_px - ((px + shift) - (prev_px + prev_shift))
+            if overlap > 0:
+                shift = min(prev_shift + overlap, max_px)
+        last[side] = (px, shift)
+        fig.add_hline(
+            y=it["y"], line_color=it["color"], line_dash=it.get("dash", "dash"),
+            line_width=it.get("width", 1),
+            annotation_text=(it["label"] if it.get("short")
+                             else f"{it['label']} {it['y']:.0f}"),
+            annotation_font=dict(color=it["color"], size=10),
+            annotation_position=f"top {side}",
+            annotation_yshift=shift,
+        )
+
+
 def _bar_width(strikes: np.ndarray) -> float:
     diffs = np.diff(np.sort(np.unique(strikes)))
     return float(np.median(diffs)) * 0.75 if len(diffs) else 1.0
@@ -182,17 +226,13 @@ def exposure_fig(df: pd.DataFrame, spot: float, zg: float | None, col: str, titl
     )
     fig.update_layout(**base_layout(title, height=560))
     fig.update_xaxes(title_text=t(lang, "axis_bn_per_move"), title_font=dict(color=C["muted"]))
-    fig.add_hline(y=spot, line_color=C["spot"], line_dash="dot", line_width=1,
-                  annotation_text=f"Spot {spot:.0f}", annotation_font_color=C["ink"],
-                  annotation_position="top right")
-    if zg is not None and lo <= zg <= hi:
-        fig.add_hline(y=zg, line_color=C["zg"], line_dash="dash", line_width=1,
-                      annotation_text=f"Gamma Flip {zg:.0f}", annotation_font_color=C["zg"],
-                      annotation_position="bottom left")
-    if hvl is not None and lo <= hvl <= hi:
-        fig.add_hline(y=hvl, line_color=C["hvl"], line_dash="dash", line_width=1,
-                      annotation_text=f"HVL {hvl:.0f}", annotation_font_color=C["hvl"],
-                      annotation_position="bottom right")
+    # Niveaux : placement calculé pour éviter les chevauchements d'étiquettes.
+    # Régimes (Flip, HVL) à gauche ; prix de référence et murs à droite.
+    items = [
+        dict(y=spot, label="Spot", color=C["spot"], dash="dot", side="right"),
+        dict(y=zg, label="Gamma Flip", color=C["zg"], side="left"),
+        dict(y=hvl, label="HVL", color=C["hvl"], side="left"),
+    ]
     for key, color, label, dash in (
         ("call_wall", C["cw"], "Call Wall", "solid"),
         ("put_support", C["ps"], "Put Support", "solid"),
@@ -200,27 +240,18 @@ def exposure_fig(df: pd.DataFrame, spot: float, zg: float | None, col: str, titl
         ("d1_min", C["d1"], "1D Min", "dot"),
     ):
         v = (keys or {}).get(key)
-        if v is None:
-            continue
-        y = xf(v)
-        if lo <= y <= hi:
-            fig.add_hline(y=y, line_color=color, line_dash=dash, line_width=1.5,
-                          annotation_text=f"{label} {y:.0f}",
-                          annotation_font=dict(color=color, size=10),
-                          annotation_position="top right")
+        if v is not None:
+            items.append(dict(y=xf(v), label=label, color=color, dash=dash,
+                              width=1.5, side="right"))
     if levels is not None and not levels.empty:
         labels = wall_labels(levels)
         for lv in levels.itertuples():
-            y = xf(lv.strike)
-            if not (lo <= y <= hi):
-                continue
-            fig.add_hline(
-                y=y, line_color=C["lvl"], line_dash="dashdot",
-                line_width=1, opacity=0.8,
-                annotation_text=f"{labels[lv.strike]} {y:.0f}",
-                annotation_font=dict(color=C["lvl"], size=10),
-                annotation_position="top left",
-            )
+            # rang seul : le prix figure déjà sur l'axe et dans les chips,
+            # une étiquette courte se superpose beaucoup moins
+            items.append(dict(y=xf(lv.strike), label=labels[lv.strike],
+                              color=C["lvl"], dash="dashdot", side="left",
+                              short=True))
+    _draw_levels(fig, items, lo, hi, height=560)
     return fig
 
 
