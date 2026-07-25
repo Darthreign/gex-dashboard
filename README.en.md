@@ -36,6 +36,15 @@ open interest, volume, Greeks — plus spot. **~15 min delayed**, regenerated
 ~every 60 s (feed timestamps are UTC). Default underlyings: SPX and NDX;
 SPY/QQQ available as fallbacks (`gex/config.py`).
 
+## Installation
+
+**Beginner, never installed something like this?** → follow the
+**[illustrated step-by-step guide](INSTALL.en.md)** (15 min, no knowledge
+required, no command line to understand).
+
+Otherwise, the [Claude Code assisted install](#assisted-install-claude-code)
+or the [manual quick start](#quick-start) below.
+
 ## Assisted install (Claude Code)
 
 If you use [Claude Code](https://claude.com/claude-code), open it in an empty

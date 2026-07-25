@@ -38,6 +38,15 @@ volume, Greeks — plus le spot. **Délai ~15 min à la source**, régénéré ~
 les 60 s (timestamp du feed en UTC). Sous-jacents : SPX et NDX actifs par
 défaut, SPY/QQQ en fallback désactivé (`gex/config.py`).
 
+## Installation
+
+**Débutant, jamais installé ce genre d'outil ?** → suis le
+**[guide pas à pas illustré](INSTALL.md)** (15 min, aucune connaissance
+requise, sans ligne de commande à comprendre).
+
+Sinon, l'[installation assistée par Claude Code](#installation-assistée-claude-code)
+ou le [démarrage manuel](#démarrage) ci-dessous.
+
 ## Installation assistée (Claude Code)
 
 Si tu utilises [Claude Code](https://claude.com/claude-code), ouvre-le dans un
