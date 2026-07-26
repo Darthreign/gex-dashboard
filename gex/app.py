@@ -773,6 +773,16 @@ def card(label: str, value: str, sub: str = "", accent: str | None = None) -> ht
     )
 
 
+def ref_spot(symbol: str, fallback: float) -> float:
+    """Spot auquel évaluer les murs de gamma : la clôture de la veille.
+
+    L'open interest lu le matin décrit les positions arrêtées à cette clôture.
+    L'évaluer au spot courant ferait glisser les murs avec le prix — ils
+    désigneraient alors l'endroit où est le marché, pas une zone de couverture.
+    """
+    return store.previous_close_spot(symbol) or fallback
+
+
 def live_spot(symbol: str, fallback: float) -> tuple[float, bool]:
     """Spot temps réel si le flux le fournit, sinon celui de la chaîne CBOE.
 
@@ -1135,12 +1145,13 @@ def create_app() -> Dash:
         xf, ratio, mode = _transform_for(symbol, unit)
         note = _scale_note(lang, symbol, unit, ratio, mode)
         rev = f"{symbol}-{bucket}-{window}-{unit}"
-        levels = metrics.top_gex_levels(df)
+        ref = ref_spot(symbol, snap.spot)
+        levels = metrics.top_gex_levels(df, ref_spot=ref)
         if majors and not levels.empty:
             # ne garde que les murs pesant au moins 25 % du plus fort
             levels = levels[levels["gex"].abs() >= 0.25 * levels["gex"].abs().max()]
         hvl = metrics.zero_gamma(df, snap.spot, weight_col="volume")
-        keys = metrics.key_levels(df, snap.spot)
+        keys = metrics.key_levels(df, snap.spot, ref_spot=ref)
         return (
             levels_strip(levels, lang, hvl, zg, xf, note, keys),
             _pin(exposure_fig(sel, snap.spot, zg, "gex",

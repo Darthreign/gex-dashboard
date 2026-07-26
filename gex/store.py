@@ -81,6 +81,23 @@ def append_prices(symbol: str, rows: list[dict], ts: datetime) -> Path:
     return path
 
 
+def previous_close_spot(symbol: str, day: str | None = None) -> float | None:
+    """Spot de clôture de la séance précédant `day`.
+
+    C'est la référence à laquelle évaluer les murs de gamma : l'open interest
+    qu'on lit le matin décrit les positions arrêtées à cette clôture. Évaluer
+    le gamma au spot courant ferait glisser les murs avec le prix
+    (cf. metrics.gex_at_spot).
+    """
+    day = day or datetime.now().strftime("%Y-%m-%d")
+    h = load_history(symbol)
+    if h.empty or "spot" not in h.columns:
+        return None
+    ts = pd.to_datetime(h["timestamp"])
+    prev = h[ts.dt.strftime("%Y-%m-%d") < day].sort_values("timestamp")
+    return float(prev["spot"].iloc[-1]) if not prev.empty else None
+
+
 def price_days(symbol: str) -> list[str]:
     """Jours (YYYY-MM-DD) pour lesquels des bougies existent."""
     root = SETTINGS.data_dir / "prices" / symbol

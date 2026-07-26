@@ -165,13 +165,16 @@ def session_levels(symbol: str, day: str, spot: float | None = None) -> dict[str
     if spot is None and "spot" in df.columns:
         spot = float(df["spot"].iloc[0])
     out: dict[str, float] = {}
+    # murs évalués à la clôture de la veille, comme dans le dashboard : sinon
+    # le backtest testerait des niveaux que l'outil n'a jamais affichés
+    ref = store.previous_close_spot(symbol, day) or spot
     if spot is not None:
-        keys = metrics.key_levels(df, spot)
+        keys = metrics.key_levels(df, spot, ref_spot=ref)
         out.update({k: v for k, v in keys.items() if v is not None})
         zg = metrics.zero_gamma(df, spot)
         if zg is not None:
             out["gamma_flip"] = zg
-    lv = metrics.top_gex_levels(df)
+    lv = metrics.top_gex_levels(df, ref_spot=ref)
     for row in lv.itertuples():
         out[f"GEX{row.rank}"] = float(row.strike)
     return out

@@ -303,3 +303,65 @@ def test_expired_contracts_dropped():
     ])
     df = metrics.enrich(snap)
     assert len(df) == 1
+
+
+def _chain_pour_murs():
+    """Chaîne réaliste : open interest concentré sur quelques strikes ronds."""
+    rows = []
+    for k, oi_c, oi_p in [(7350, 500, 4000), (7400, 800, 6000),
+                          (7450, 5000, 900), (7500, 3000, 400)]:
+        for typ, oi in (("C", oi_c), ("P", oi_p)):
+            rows.append({"strike": float(k), "type": typ, "iv": 0.15,
+                         "t_years": 0.02, "open_interest": float(oi),
+                         "volume": 100.0, "expiry": pd.Timestamp("2026-07-27").date(),
+                         "gex": 0.0})
+    return pd.DataFrame(rows)
+
+
+def test_murs_figes_au_spot_de_reference():
+    """Le classement des murs ne doit PAS suivre le prix.
+
+    Le gamma culminant à la monnaie, l'évaluer au spot courant fait migrer le
+    mur le plus fort vers le marché : le niveau désigne alors où EST le prix,
+    pas une zone de couverture. Mesuré sur une chaîne SPX réelle, faire varier
+    la référence de 7350 à 7500 déplaçait les cinq murs de bout en bout.
+    """
+    df = _chain_pour_murs()
+    ref = 7400.0
+    attendu = metrics.top_gex_levels(df, ref_spot=ref)["strike"].tolist()
+    for spot_courant in (7200.0, 7400.0, 7600.0):
+        got = metrics.top_gex_levels(df, ref_spot=ref)["strike"].tolist()
+        assert got == attendu, f"murs déplacés au spot {spot_courant}"
+
+
+def test_sensibilite_au_spot_sur_chaine_etalee():
+    """Documente le défaut corrigé, et sa condition d'apparition.
+
+    Sur une chaîne étalée à open interest homogène — le cas des indices, où des
+    centaines de strikes cotent — c'est la forme du gamma qui décide du
+    classement, et elle suit le spot. Sur une chaîne très concentrée l'open
+    interest domine et les murs sont naturellement stables : d'où l'importance
+    de figer la référence plutôt que de compter sur la concentration.
+    """
+    rows = []
+    for k in range(7200, 7601, 25):
+        # déséquilibre calls/puts : à parts égales le net s'annule exactement
+        # à chaque strike et le classement n'a plus de sens
+        for typ, oi in (("C", 800.0), ("P", 1200.0)):
+            rows.append({"strike": float(k), "type": typ, "iv": 0.15,
+                         "t_years": 0.02, "open_interest": oi,
+                         "volume": 100.0,
+                         "expiry": pd.Timestamp("2026-07-27").date(), "gex": 0.0})
+    df = pd.DataFrame(rows)
+    bas = metrics.gex_at_spot(df, 7250.0).abs().idxmax()
+    haut = metrics.gex_at_spot(df, 7550.0).abs().idxmax()
+    assert bas != haut
+    # le mur se cale sur la monnaie : c'est exactement le défaut
+    assert abs(bas - 7250) < 100 and abs(haut - 7550) < 100
+
+
+def test_gex_at_spot_ignore_iv_absente():
+    df = _chain_pour_murs()
+    df.loc[df["type"] == "C", "iv"] = 0.0
+    s = metrics.gex_at_spot(df, 7400.0)
+    assert (s < 0).all()      # puts seuls

@@ -153,6 +153,35 @@ def gamma_profile(df: pd.DataFrame, spot: float, weight_col: str = "open_interes
     return grid, profile
 
 
+def gex_at_spot(df: pd.DataFrame, ref_spot: float,
+                weight_col: str = "open_interest") -> pd.Series:
+    """GEX par strike, gamma RECALCULÉ à un spot de référence donné.
+
+    Distinct de `gex_by_strike_weighted`, qui réutilise le gamma déjà stocké —
+    donc celui du spot au moment du pull.
+
+    Pourquoi c'est nécessaire : le gamma culmine à la monnaie. Évalué au spot
+    courant, le strike au plus fort |GEX| migre avec le prix, et le « mur »
+    finit par désigner l'endroit où se trouve le marché plutôt qu'une zone de
+    couverture. Mesuré sur une chaîne SPX réelle, faire varier la référence de
+    7350 à 7500 déplace les cinq murs de bout en bout.
+
+    Un mur est une propriété de la distribution d'open interest, qui ne change
+    qu'une fois par jour. L'évaluer à un spot figé — la clôture de la veille,
+    quand cet open interest a été arrêté — le rend stable en séance, ce qu'un
+    plan de trading exige.
+    """
+    d = df[(df["iv"] > 1e-4) & (df[weight_col] > 0)]
+    if d.empty:
+        return pd.Series(dtype=float)
+    g = greeks.gamma(ref_spot, d["strike"].to_numpy(), d["t_years"].to_numpy(),
+                     RISK_FREE_RATE, d["iv"].to_numpy())
+    sign = np.where((d["type"] == "C").to_numpy(), 1.0, -1.0)
+    gex = (sign * g * d[weight_col].to_numpy()
+           * CONTRACT_MULTIPLIER * ref_spot ** 2 * 0.01)
+    return pd.Series(gex, index=d["strike"].to_numpy()).groupby(level=0).sum()
+
+
 def gex_by_strike_weighted(df: pd.DataFrame, spot: float,
                            weight_col: str = "open_interest") -> pd.Series:
     """GEX par strike, pondéré par l'open interest ou par le volume du jour.
@@ -274,9 +303,14 @@ def futures_basis(df: pd.DataFrame, spot: float, today: date | None = None) -> f
     return basis
 
 
-def top_gex_levels(df: pd.DataFrame, n: int = 5) -> pd.DataFrame:
+def top_gex_levels(df: pd.DataFrame, n: int = 5,
+                   ref_spot: float | None = None) -> pd.DataFrame:
     """Les n strikes au |GEX| le plus fort sur l'échéance la plus proche
     (le 0DTE en séance ; la prochaine séance après la cloche).
+
+    `ref_spot` fige le spot auquel le gamma est évalué — la clôture de la
+    veille, quand l'open interest a été arrêté. Sans lui, le gamma est repris
+    du dernier pull et les murs se déplacent avec le prix (cf. `gex_at_spot`).
 
     Retourne strike, gex net, rang (1 = mur le plus fort) et l'expiration utilisée.
     """
@@ -284,7 +318,11 @@ def top_gex_levels(df: pd.DataFrame, n: int = 5) -> pd.DataFrame:
         return pd.DataFrame()
     nearest = df["expiry"].min()
     sub = df[df["expiry"] == nearest]
-    agg = sub.groupby("strike")["gex"].sum().reset_index()
+    if ref_spot:
+        agg = gex_at_spot(sub, ref_spot).rename("gex").reset_index()
+        agg = agg.rename(columns={"index": "strike"})
+    else:
+        agg = sub.groupby("strike")["gex"].sum().reset_index()
     agg = agg.loc[agg["gex"].abs().nlargest(n).index]
     agg = agg.sort_values("gex", key=abs, ascending=False).reset_index(drop=True)
     agg["rank"] = agg.index + 1
@@ -334,7 +372,8 @@ def expected_move(df: pd.DataFrame, spot: float) -> float | None:
     return move if 0 < move < 0.10 * spot else None
 
 
-def key_levels(df: pd.DataFrame, spot: float) -> dict[str, float | None]:
+def key_levels(df: pd.DataFrame, spot: float,
+               ref_spot: float | None = None) -> dict[str, float | None]:
     """Niveaux directionnels de l'échéance la plus proche (esprit MenthorQ) :
 
     - call_wall  : plus forte concentration de gamma call AU-DESSUS du spot
@@ -352,7 +391,10 @@ def key_levels(df: pd.DataFrame, spot: float) -> dict[str, float | None]:
         return out
     nearest = df["expiry"].min()
     sub = df[df["expiry"] == nearest]
-    agg = sub.groupby("strike")["gex"].sum()
+    # Le CLASSEMENT des murs se fait au spot de référence (structure figée) ;
+    # le côté où on les cherche dépend en revanche du spot COURANT, une
+    # résistance n'ayant de sens qu'au-dessus du marché du moment.
+    agg = gex_at_spot(sub, ref_spot) if ref_spot else sub.groupby("strike")["gex"].sum()
 
     above = agg[(agg.index >= spot) & (agg > 0)]
     if len(above):
