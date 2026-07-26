@@ -41,6 +41,7 @@ C = {
     "cw": "#3987e5",    # bleu — Call Wall (résistance, au-dessus du spot)
     "ps": "#e66767",    # rouge — Put Support (support, sous le spot)
     "d1": "#898781",    # gris — bornes 1D Min / 1D Max (move attendu)
+    "ok": "#199e70",    # vert — donnée temps réel
     "cat": ["#3987e5", "#d95926", "#199e70", "#c98500"],  # slots 1-4
 }
 
@@ -574,27 +575,54 @@ def card(label: str, value: str, sub: str = "", accent: str | None = None) -> ht
     )
 
 
+def live_spot(symbol: str, fallback: float) -> tuple[float, bool]:
+    """Spot temps réel si le flux le fournit, sinon celui de la chaîne CBOE.
+
+    Renvoie (prix, vient_du_temps_réel) pour que l'affichage puisse le dire.
+    """
+    px = QUOTES.price(symbol)
+    return (px, True) if px else (fallback, False)
+
+
 def build_cards(symbol: str, lang: str, xf=None) -> list:
     st = STATE.get(symbol)
     with STATE.lock:
         s = st.summary
+        df = st.enriched
         err = STATE.last_error
     if s is None:
         return [card(t(lang, "card_status"), "…", err or t(lang, "waiting_short"))]
     xf = xf or (lambda v: v)
+
+    # Le GEX net dépend surtout du spot : l'open interest ne bouge qu'une fois
+    # par jour et l'IV lentement, tandis que le gamma de chaque contrat suit le
+    # spot en continu. Un déplacement de 0,4 % change le GEX net de moitié —
+    # avec un spot vieux de 15 min, la lecture du régime est fausse en séance.
+    # On recalcule donc au spot temps réel quand il est disponible.
+    spot, is_live = live_spot(symbol, s.spot)
+    net_gex = s.net_gex
+    if is_live and df is not None:
+        recomputed = metrics.net_gex_at(df, spot)
+        if recomputed is not None:
+            net_gex = recomputed
+
     zg_txt = f"{xf(s.zero_gamma):.0f}" if s.zero_gamma else "n/a"
     zg_sub = ""
     if s.zero_gamma:
-        d = s.spot - s.zero_gamma  # écart natif, non transposé
+        d = spot - s.zero_gamma  # écart natif, non transposé
         zg_sub = t(lang, "card_zg_sub", sign="+" if d >= 0 else "",
                    pts=f"{d:.0f}", reg="+" if d >= 0 else "-")
-    gex_color = C["pos"] if s.net_gex >= 0 else C["neg"]
+    gex_color = C["pos"] if net_gex >= 0 else C["neg"]
     feed_local = s.timestamp.replace(tzinfo=ET).astimezone(LOCAL_TZ)
+    spot_sub = (t(lang, "card_spot_live") if is_live else
+                t(lang, "card_feed", local=f"{feed_local:%H:%M:%S}",
+                  et=f"{s.timestamp:%H:%M}"))
     return [
-        card(t(lang, "card_spot"), f"{xf(s.spot):,.0f}",
-             t(lang, "card_feed", local=f"{feed_local:%H:%M:%S}", et=f"{s.timestamp:%H:%M}")),
-        card(t(lang, "card_net_gex"), f"{s.net_gex / 1e9:+.1f} $Bn",
-             t(lang, "stabilizing") if s.net_gex >= 0 else t(lang, "destabilizing"),
+        card(t(lang, "card_spot_rt") if is_live else t(lang, "card_spot"),
+             f"{xf(spot):,.0f}", spot_sub,
+             accent=C["ok"] if is_live else None),
+        card(t(lang, "card_net_gex"), f"{net_gex / 1e9:+.1f} $Bn",
+             t(lang, "stabilizing") if net_gex >= 0 else t(lang, "destabilizing"),
              accent=gex_color),
         card(t(lang, "card_zero_gamma"), zg_txt, zg_sub, accent=C["zg"]),
         card(t(lang, "card_gex_0dte"), f"{s.net_gex_0dte / 1e9:+.1f} $Bn"),
@@ -835,7 +863,23 @@ def create_app() -> Dash:
         return (sub, {}, f"rt-badge rt-{state}", tip, "dxFeed")
 
     @app.callback(
-        [Output("cards", "children"), Output("levels", "children"), Output("gex-strike", "figure"),
+        Output("cards", "children"),
+        [Input("rt-tick", "n_intervals"), Input("symbol", "value"),
+         Input("lang", "value"), Input("unit", "value")],
+    )
+    def refresh_cards(_, symbol, lang, unit):
+        """Tuiles au rythme du flux (5 s) et non des pulls (60 s).
+
+        Le GEX net y est recalculé au spot courant : c'est la valeur qui dit
+        si le marché est amorti ou amplifié, et elle se périme en quelques
+        minutes. Le recalcul porte sur un seul point de spot, donc son coût
+        est négligeable devant la grille de 161 points du Gamma Flip.
+        """
+        xf, _, _ = _transform_for(symbol, unit)
+        return build_cards(symbol, lang, xf)
+
+    @app.callback(
+        [Output("levels", "children"), Output("gex-strike", "figure"),
          Output("dex-strike", "figure"), Output("flow", "figure"),
          Output("gex-history", "figure"), Output("spot-zg", "figure"),
          Output("smile", "figure"), Output("tv-copy", "content"),
@@ -855,7 +899,6 @@ def create_app() -> Dash:
         if df is None or snap is None:
             wait = t(lang, "waiting_first_pull")
             return (
-                build_cards(symbol, lang),
                 levels_strip(None, lang),
 
                 empty_fig(wait, t(lang, "gex_title", bucket=bucket_label)),
@@ -887,7 +930,6 @@ def create_app() -> Dash:
         hvl = metrics.zero_gamma(df, snap.spot, weight_col="volume")
         keys = metrics.key_levels(df, snap.spot)
         return (
-            build_cards(symbol, lang, xf),
             levels_strip(levels, lang, hvl, zg, xf, note, keys),
             _pin(exposure_fig(sel, snap.spot, zg, "gex",
                               t(lang, "gex_title", bucket=bucket_label), lang,

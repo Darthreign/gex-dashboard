@@ -149,6 +149,23 @@ def gamma_profile(df: pd.DataFrame, spot: float, weight_col: str = "open_interes
     return grid, profile
 
 
+def net_gex_at(df: pd.DataFrame, spot: float,
+               weight_col: str = "open_interest") -> float | None:
+    """GEX net recalculé à un spot donné, IV et maturités figées.
+
+    Sert à rafraîchir le GEX net au spot temps réel sans chaîne d'options
+    fraîche : l'open interest ne change qu'une fois par jour et l'IV bouge
+    lentement, alors que le gamma de chaque contrat suit le spot en continu.
+    C'est donc le spot qui rend la mesure périmée, pas la chaîne.
+
+    Le calcul est celui de `gamma_profile` évalué en un point, donc sur le même
+    sous-ensemble de contrats que le Gamma Flip : GEX net et distance au flip
+    restent cohérents entre eux, ce qui est ce qui compte pour lire le régime.
+    """
+    res = gamma_profile(df, spot, weight_col, range_pct=0.0, steps=1)
+    return None if res is None else float(res[1][0])
+
+
 def zero_gamma(df: pd.DataFrame, spot: float, weight_col: str = "open_interest") -> float | None:
     """Niveau de spot où le GEX net (recalculé à ce spot) change de signe.
 
