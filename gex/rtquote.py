@@ -62,6 +62,51 @@ def credentials_present() -> bool:
                ("TT_REFRESH", "TASTYTRADE_CLIENT_ID", "TASTYTRADE_CLIENT_SECRET"))
 
 
+def quote_token() -> tuple[str, str, str]:
+    """(jeton dxFeed, URL dxLink, access token tastytrade).
+
+    Fonction de module : le backfill historique s'en sert aussi, sans avoir à
+    instancier un client de streaming.
+    """
+    r = requests.post(TOKEN_URL, data={
+        "grant_type": "refresh_token",
+        "refresh_token": _env("TT_REFRESH"),
+        "client_id": _env("TASTYTRADE_CLIENT_ID"),
+        "client_secret": _env("TASTYTRADE_CLIENT_SECRET"),
+    }, timeout=30)
+    r.raise_for_status()
+    access = r.json()["access_token"]
+    q = requests.get(QUOTE_TOKEN_URL,
+                     headers={"Authorization": f"Bearer {access}"}, timeout=30)
+    q.raise_for_status()
+    d = q.json()["data"]
+    return d["token"], d["dxlink-url"], access
+
+
+def resolve_symbols(access: str) -> dict[str, str]:
+    """Table clé interne -> symbole dxFeed.
+
+    Indices, ETF et actions portent leur ticker. Les futures exigent le contrat
+    actif, dont le symbole streamer (`/ESU26:XCME`, année sur DEUX chiffres) ne
+    se devine pas : il est lu depuis l'API.
+    """
+    out = {u.key: u.key for u in UNDERLYINGS.values() if u.enabled}
+    h = {"Authorization": f"Bearer {access}"}
+    for code in {u.future for u in UNDERLYINGS.values() if u.future and u.enabled}:
+        try:
+            r = requests.get(FUTURES_URL, params={"product-code": code},
+                             headers=h, timeout=30)
+            r.raise_for_status()
+            items = [i for i in r.json()["data"]["items"] if i.get("active-month")]
+            if items:
+                out[code] = items[0]["streamer-symbol"]
+            else:
+                log.warning("Aucun contrat actif pour %s", code)
+        except Exception as exc:  # pragma: no cover - dépend du réseau
+            log.warning("Symbole future %s non résolu : %s", code, exc)
+    return out
+
+
 @dataclass
 class Tick:
     bid: float | None = None
@@ -161,46 +206,10 @@ class RealtimeQuotes:
 
     # -------------------------------------------------------------- interne
     def _quote_token(self) -> tuple[str, str, str]:
-        """(jeton dxFeed, URL dxLink, access token tastytrade)."""
-        r = requests.post(TOKEN_URL, data={
-            "grant_type": "refresh_token",
-            "refresh_token": _env("TT_REFRESH"),
-            "client_id": _env("TASTYTRADE_CLIENT_ID"),
-            "client_secret": _env("TASTYTRADE_CLIENT_SECRET"),
-        }, timeout=30)
-        r.raise_for_status()
-        access = r.json()["access_token"]
-        q = requests.get(QUOTE_TOKEN_URL,
-                         headers={"Authorization": f"Bearer {access}"}, timeout=30)
-        q.raise_for_status()
-        d = q.json()["data"]
-        return d["token"], d["dxlink-url"], access
+        return quote_token()
 
     def _resolve_symbols(self, access: str) -> dict[str, str]:
-        """Table clé interne -> symbole dxFeed.
-
-        Indices et ETF portent leur ticker. Les futures exigent le contrat
-        actif, dont le symbole streamer (`/ESU26:XCME`, année sur DEUX
-        chiffres) ne se devine pas : il est lu depuis l'API.
-        """
-        out: dict[str, str] = {}
-        for u in UNDERLYINGS.values():
-            if u.enabled:
-                out[u.key] = u.key
-        h = {"Authorization": f"Bearer {access}"}
-        for code in {u.future for u in UNDERLYINGS.values() if u.future and u.enabled}:
-            try:
-                r = requests.get(FUTURES_URL, params={"product-code": code},
-                                 headers=h, timeout=30)
-                r.raise_for_status()
-                items = [i for i in r.json()["data"]["items"] if i.get("active-month")]
-                if items:
-                    out[code] = items[0]["streamer-symbol"]
-                else:
-                    log.warning("Aucun contrat actif pour %s", code)
-            except Exception as exc:  # pragma: no cover - dépend du réseau
-                log.warning("Symbole future %s non résolu : %s", code, exc)
-        return out
+        return resolve_symbols(access)
 
     def _run(self) -> None:
         backoff = BACKOFF_START
