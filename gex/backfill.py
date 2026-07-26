@@ -34,7 +34,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import greeks, metrics
+from . import greeks, metrics, store
 from .config import CONTRACT_MULTIPLIER, RISK_FREE_RATE, SETTINGS
 from .metrics import ET, YEAR_SECONDS
 
@@ -232,8 +232,18 @@ def spot_from_parity(chain: pd.DataFrame, day: date) -> float | None:
 
 
 def build_day(chain: pd.DataFrame, symbol: str, day: date,
-              spot: float | None = None) -> dict | None:
-    """Chaîne d'un jour (OI + close jointées) -> ligne d'historique."""
+              spot: float | None = None, persist_chain: bool = False) -> dict | None:
+    """Chaîne d'un jour (OI + close jointées) -> ligne d'historique.
+
+    `persist_chain` enregistre en plus la chaîne reconstruite comme snapshot,
+    ce qui permet d'en recalculer les niveaux a posteriori (backtest). Sans
+    cela la reconstruction est jetée après le calcul des agrégats, et le
+    backtest se limite aux quelques séances collectées en direct.
+
+    Horodatage à 16:00 : c'est bien la clôture que décrivent ces données —
+    l'open interest de règlement du jour, celui qui sera publié le lendemain
+    matin. Le dater autrement laisserait croire qu'il était connu plus tôt.
+    """
     if spot is None:
         spot = spot_from_parity(chain, day)
     if spot is None or not np.isfinite(spot):
@@ -256,7 +266,14 @@ def build_day(chain: pd.DataFrame, symbol: str, day: date,
     d["delta_bs"] = np.where(is_call, dc, dc - 1.0)
     sign = np.where(is_call, 1.0, -1.0)
     d["gex"] = sign * g * d["open_interest"] * CONTRACT_MULTIPLIER * spot**2 * 0.01
+    d["dex"] = d["delta_bs"] * d["open_interest"] * CONTRACT_MULTIPLIER * spot
+    d["spot"] = float(spot)
     zg = metrics.zero_gamma(d, spot)
+    if persist_chain:
+        try:
+            store.save_snapshot(symbol, d, datetime.combine(day, time(16, 0)))
+        except Exception:  # noqa: BLE001 — l'historique prime sur le snapshot
+            log.exception("%s %s : échec d'écriture du snapshot", symbol, day)
     oi_c = d.loc[is_call, "open_interest"].sum()
     oi_p = d.loc[~is_call, "open_interest"].sum()
     v_c = d.loc[is_call, "volume"].sum()
@@ -303,7 +320,10 @@ def build_flows(minute_df: pd.DataFrame, deltas: pd.DataFrame, spot: float,
 # ----------------------------------------------------------------------- main
 
 def run(daily_days: int, intraday_days: int, max_cost: float, dry_run: bool,
-        end: date | None = None) -> None:
+        end: date | None = None, persist_chains: bool = True) -> None:
+    """`persist_chains` enregistre les chaînes reconstruites comme snapshots,
+    ce qui rend leurs niveaux rejouables (backtest). Coûte de l'espace disque,
+    rien de plus : les fichiers bruts sont déjà téléchargés."""
     client = _client()
     end = end or (date.today() - timedelta(days=1))
     daily_start = end - timedelta(days=daily_days)
@@ -378,7 +398,8 @@ def run(daily_days: int, intraday_days: int, max_cost: float, dry_run: bool,
     for (symbol, day), chain in chains.groupby(["symbol", "day"]):
         if day.weekday() >= 5:  # artefacts de publication le week-end
             continue
-        res = build_day(chain, symbol, day, spots.get(symbol, {}).get(day))
+        res = build_day(chain, symbol, day, spots.get(symbol, {}).get(day),
+                        persist_chain=persist_chains)
         if res is None:
             continue
         day_results[(symbol, day)] = res
@@ -427,10 +448,14 @@ def main() -> None:
     ap.add_argument("--intraday-days", type=int, default=7)
     ap.add_argument("--max-cost", type=float, default=40.0)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--no-chains", action="store_true",
+                    help="ne pas enregistrer les chaînes reconstruites "
+                         "(elles servent au backtest de niveaux)")
     ap.add_argument("--end", type=lambda s: date.fromisoformat(s), default=None,
                     help="borne de fin EXCLUSIVE (défaut : hier)")
     a = ap.parse_args()
-    run(a.daily_days, a.intraday_days, a.max_cost, a.dry_run, end=a.end)
+    run(a.daily_days, a.intraday_days, a.max_cost, a.dry_run, end=a.end,
+        persist_chains=not a.no_chains)
 
 
 if __name__ == "__main__":

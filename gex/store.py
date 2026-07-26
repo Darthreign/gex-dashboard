@@ -81,6 +81,14 @@ def append_prices(symbol: str, rows: list[dict], ts: datetime) -> Path:
     return path
 
 
+def price_days(symbol: str) -> list[str]:
+    """Jours (YYYY-MM-DD) pour lesquels des bougies existent."""
+    root = SETTINGS.data_dir / "prices" / symbol
+    if not root.exists():
+        return []
+    return sorted(p.stem for p in root.glob("*.parquet"))
+
+
 def load_prices(symbol: str, day: str) -> pd.DataFrame:
     path = SETTINGS.data_dir / "prices" / symbol / f"{day}.parquet"
     return pd.read_parquet(path) if path.exists() else pd.DataFrame()

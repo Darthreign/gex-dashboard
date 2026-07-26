@@ -31,9 +31,18 @@ import pandas as pd
 from . import metrics, store
 
 # Marge au-delà de laquelle un dépassement compte comme une cassure, en
-# fraction du prix. 0,05 % ≈ 3,7 pts sur SPX à 7400 — au-dessus du bruit de
-# cotation, en dessous d'un mouvement significatif.
-BREAK_TOL = 0.0005
+# fraction du prix.
+#
+# Une première version utilisait 0,05 %, valeur choisie pour filtrer le bruit
+# de cotation. Mesuré sur 22 séances SPX, le dépassement médian d'un niveau
+# testé est de 0,24 % : à 0,05 %, presque tout contact était compté comme une
+# rupture et le taux de cassure montait à 90 % — un filtre de bruit ne fait pas
+# une définition de cassure, ce sont deux besoins distincts.
+#
+# 0,15 % (≈ 11 pts sur SPX à 7400) reste au-dessus du bruit tout en exigeant un
+# franchissement franc. Le seuil demeure une convention : `close_beyond`, qui ne
+# dépend d'aucun réglage, est la mesure la plus robuste de l'échec d'un niveau.
+BREAK_TOL = 0.0015
 
 
 @dataclass(frozen=True)
@@ -139,8 +148,18 @@ def session_levels(symbol: str, day: str, spot: float | None = None) -> dict[str
     `spot` peut être fourni par l'appelant : les snapshots antérieurs à
     l'ajout de la colonne `spot` ne le portent pas, et le premier prix du
     parcours de la séance fait tout aussi bien l'affaire.
+
+    À défaut de snapshot ce jour-là, on prend le DERNIER de la séance
+    précédente. Ce n'est pas un pis-aller : l'open interest publié le matin
+    reflète la clôture de la veille, donc les niveaux qu'un trader a sous les
+    yeux à l'ouverture sont exactement ceux de cette chaîne. C'est aussi ce qui
+    rend exploitables les chaînes reconstruites depuis Databento, qui sont des
+    photos de clôture.
     """
     df = store.load_first_snapshot(symbol, day)
+    if df is None or df.empty:
+        prev = store.load_previous_snapshot(symbol, day)
+        df = prev[1] if prev else None
     if df is None or df.empty:
         return {}
     if spot is None and "spot" in df.columns:
@@ -195,8 +214,15 @@ def path_resolution(symbol: str, day: str) -> str:
 
 
 def run(symbol: str, days: list[str] | None = None) -> pd.DataFrame:
-    """Backtest sur toutes les séances disposant à la fois de niveaux et de prix."""
-    days = days or store.snapshot_days(symbol)
+    """Backtest sur toutes les séances disposant à la fois de niveaux et de prix.
+
+    Les jours candidats sont ceux où l'on a un parcours de prix : les niveaux,
+    eux, peuvent venir de la séance précédente (cf. `session_levels`). Se
+    limiter aux jours porteurs d'un snapshot écarterait des séances pourtant
+    testables.
+    """
+    days = days or sorted(set(store.price_days(symbol))
+                          | set(store.snapshot_days(symbol)))
     outcomes: list[dict] = []
     for day in days:
         path = session_path(symbol, day)

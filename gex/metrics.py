@@ -309,9 +309,24 @@ def expected_move(df: pd.DataFrame, spot: float) -> float | None:
     if len(common) == 0:
         return None
     k_atm = min(common, key=lambda k: abs(k - spot))
-    cmid = (calls.loc[k_atm, "bid"] + calls.loc[k_atm, "ask"]) / 2
-    pmid = (puts.loc[k_atm, "bid"] + puts.loc[k_atm, "ask"]) / 2
-    if cmid <= 0 or pmid <= 0:
+
+    def _price(side: pd.DataFrame) -> float | None:
+        """Milieu de fourchette, à défaut le close.
+
+        Les chaînes reconstruites depuis Databento ne portent pas de bid/ask :
+        ce sont des photos de clôture, où le prix de règlement tient lieu de
+        valorisation. Le straddle y reste calculable.
+        """
+        row = side.loc[k_atm]
+        if "bid" in side.columns and "ask" in side.columns:
+            mid = (row["bid"] + row["ask"]) / 2
+            if mid > 0:
+                return float(mid)
+        close = row.get("close")
+        return float(close) if close is not None and close > 0 else None
+
+    cmid, pmid = _price(calls), _price(puts)
+    if not cmid or not pmid:
         return None
     move = float(cmid + pmid)
     # garde-fou : un move attendu > 10 % du spot sur l'échéance front est
