@@ -76,24 +76,36 @@ def test_available_scales_include_futures():
     assert es.is_future and es.source == "SPX"
 
 
-def test_basis_mesure_sur_les_prix_reels(monkeypatch):
-    """Le spot transposé doit retomber EXACTEMENT sur le prix du future.
-
-    Le basis dérivé par parité call-put d'une chaîne délayée dérive dès que
-    l'indice cesse de coter alors que le future continue — hors séance, l'écart
-    observé atteignait 21 points sur NQ. Mesuré sur les deux flux, il est juste
-    par construction.
-    """
+def test_basis_mesure_en_seance(monkeypatch):
+    """En séance, indice et future cotent ensemble : leur écart EST le basis,
+    et le spot transposé retombe exactement sur le prix du future."""
     from gex import app as A
     from gex.rtquote import QUOTES
 
     live = {"NDX": 28128.34, "NQ": 28306.25, "SPX": 7407.68, "ES": 7444.12}
     monkeypatch.setattr(QUOTES, "price", lambda k: live.get(k))
+    monkeypatch.setattr(A, "market_is_open", lambda *a, **k: True)
 
     for index, future in (("NDX", "NQ"), ("SPX", "ES")):
         xf, _, mode = A._transform_for(index, future)
         assert mode == "basis"
         assert xf(live[index]) == pytest.approx(live[future])
+
+
+def test_basis_fige_hors_seance(monkeypatch):
+    """Hors séance l'indice ne cote plus : son écart au future absorbe tout le
+    mouvement overnight. L'utiliser ferait dériver TOUS les niveaux transposés
+    avec le future — un gap de 330 pts sur NQ décalerait les murs d'autant,
+    alors qu'ils décrivent des positions arrêtées la veille.
+    """
+    from gex import app as A
+    from gex.rtquote import QUOTES
+
+    monkeypatch.setattr(A, "market_is_open", lambda *a, **k: False)
+    appels = []
+    monkeypatch.setattr(QUOTES, "price", lambda k: appels.append(k))
+    A._transform_for("NDX", "NQ")
+    assert appels == [], "le flux temps réel ne doit pas servir de basis hors séance"
 
 
 def test_repli_sur_le_basis_de_la_chaine_sans_flux(monkeypatch):

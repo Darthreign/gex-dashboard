@@ -365,3 +365,21 @@ def test_gex_at_spot_ignore_iv_absente():
     df.loc[df["type"] == "C", "iv"] = 0.0
     s = metrics.gex_at_spot(df, 7400.0)
     assert (s < 0).all()      # puts seuls
+
+
+def test_gap_de_futures_ninvalide_pas_les_murs():
+    """Hors séance, un gap de futures ne doit pas écarter un mur.
+
+    Call Wall et Put Support sont cherchés d'un côté donné du prix. Si ce prix
+    est celui du future en pré-session, un gap haussier fait disparaître le Put
+    Support d'origine au profit d'un strike plus haut — le plan bâti la veille
+    est invalidé avant même que le cash n'ouvre.
+    """
+    df = _chain_pour_murs()
+    ref = 7400.0
+    a_la_cloture = metrics.key_levels(df, ref, ref_spot=ref)
+    apres_gap = metrics.key_levels(df, ref * 1.012, ref_spot=ref)
+    assert a_la_cloture["put_support"] != apres_gap["put_support"]
+    # c'est bien le spot passé qui décide : en le figeant à la clôture,
+    # les niveaux de la veille survivent au gap
+    assert metrics.key_levels(df, ref, ref_spot=ref) == a_la_cloture

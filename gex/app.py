@@ -723,19 +723,25 @@ def _transform_for(symbol: str, scale_key: str | None):
             spots[key] = summ.spot
             bases[key] = summ.basis
 
-    # Basis mesuré sur les deux prix réels plutôt que dérivé par parité
-    # call-put d'une chaîne délayée. La différence n'est pas cosmétique : hors
-    # séance l'indice est figé à la clôture pendant que le future continue de
-    # coter, et le basis calculé le matin devient faux de plusieurs dizaines de
-    # points. Mesuré ainsi, le spot transposé retombe exactement sur le prix du
-    # future affiché par n'importe quelle plateforme.
-    for u in UNDERLYINGS.values():
-        if not u.future:
-            continue
-        idx, fut = QUOTES.price(u.key), QUOTES.price(u.future)
-        if idx and fut:
-            spots[u.key] = idx
-            bases[u.key] = fut - idx
+    # Basis mesuré sur les deux prix réels — mais SEULEMENT quand l'indice et
+    # son future cotent ensemble.
+    #
+    # Hors séance l'indice est figé à sa clôture pendant que le future continue
+    # : leur écart n'est alors plus un basis, il absorbe tout le mouvement
+    # overnight du future. L'appliquer ferait dériver TOUS les niveaux
+    # transposés avec lui — un gap de 330 points sur NQ décalerait les murs
+    # d'autant, alors qu'ils décrivent des positions arrêtées la veille.
+    #
+    # Marché fermé, on garde donc le basis de parité call-put du dernier pull,
+    # qui est un vrai coût de portage et reste stable.
+    if market_is_open():
+        for u in UNDERLYINGS.values():
+            if not u.future:
+                continue
+            idx, fut = QUOTES.price(u.key), QUOTES.price(u.future)
+            if idx and fut:
+                spots[u.key] = idx
+                bases[u.key] = fut - idx
 
     target = scales.scale_by_key(scale_key) if scale_key else None
     return scales.transform(symbol, target, spots, bases)
@@ -792,7 +798,7 @@ def live_spot(symbol: str, fallback: float) -> tuple[float, bool]:
     return (px, True) if px else (fallback, False)
 
 
-def build_cards(symbol: str, lang: str, xf=None) -> list:
+def build_cards(symbol: str, lang: str, xf=None, scale: str | None = None) -> list:
     st = STATE.get(symbol)
     with STATE.lock:
         s = st.summary
@@ -822,12 +828,17 @@ def build_cards(symbol: str, lang: str, xf=None) -> list:
                    pts=f"{d:.0f}", reg="+" if d >= 0 else "-")
     gex_color = C["pos"] if net_gex >= 0 else C["neg"]
     feed_local = s.timestamp.replace(tzinfo=ET).astimezone(LOCAL_TZ)
+    fut_px = QUOTES.price(scale) if scale and scale not in UNDERLYINGS else None
+    display_spot = fut_px if fut_px else xf(spot)
     spot_sub = (t(lang, "card_spot_live") if is_live else
                 t(lang, "card_feed", local=f"{feed_local:%H:%M:%S}",
                   et=f"{s.timestamp:%H:%M}"))
     return [
+        # En échelle future, on affiche le prix RÉEL du future plutôt que le
+        # spot indice transposé : hors séance, l'indice est figé et aucune
+        # conversion ne peut restituer le mouvement overnight du future.
         card(t(lang, "card_spot_rt") if is_live else t(lang, "card_spot"),
-             f"{xf(spot):,.0f}", spot_sub,
+             f"{display_spot:,.0f}", spot_sub,
              accent=C["ok"] if is_live else None),
         card(t(lang, "card_net_gex"), f"{net_gex / 1e9:+.1f} $Bn",
              t(lang, "stabilizing") if net_gex >= 0 else t(lang, "destabilizing"),
@@ -1096,7 +1107,7 @@ def create_app() -> Dash:
         est négligeable devant la grille de 161 points du Gamma Flip.
         """
         xf, _, _ = _transform_for(symbol, unit)
-        return build_cards(symbol, lang, xf)
+        return build_cards(symbol, lang, xf, scale=unit)
 
     @app.callback(
         [Output("levels", "children"), Output("gex-strike", "figure"),
@@ -1146,12 +1157,17 @@ def create_app() -> Dash:
         note = _scale_note(lang, symbol, unit, ratio, mode)
         rev = f"{symbol}-{bucket}-{window}-{unit}"
         ref = ref_spot(symbol, snap.spot)
+        # Le côté où chercher résistance et support suit le marché EN SÉANCE
+        # seulement. Hors séance, un gap de futures invaliderait des murs avant
+        # même l'ouverture du cash : le prix de référence reste alors celui de
+        # la clôture, qui est l'état sur lequel le plan a été bâti.
+        side_spot = snap.spot if market_is_open() else ref
         levels = metrics.top_gex_levels(df, ref_spot=ref)
         if majors and not levels.empty:
             # ne garde que les murs pesant au moins 25 % du plus fort
             levels = levels[levels["gex"].abs() >= 0.25 * levels["gex"].abs().max()]
         hvl = metrics.zero_gamma(df, snap.spot, weight_col="volume")
-        keys = metrics.key_levels(df, snap.spot, ref_spot=ref)
+        keys = metrics.key_levels(df, side_spot, ref_spot=ref)
         return (
             levels_strip(levels, lang, hvl, zg, xf, note, keys),
             _pin(exposure_fig(sel, snap.spot, zg, "gex",
