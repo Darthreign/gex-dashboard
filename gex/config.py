@@ -33,6 +33,15 @@ class Underlying:
     # ratio dérive dans le temps (cf. gex/scales.py).
     family: str = "SP"
     enabled: bool = True
+    # "target"      : sous-jacent analysé, visible dans l'interface
+    # "constituent" : collecté uniquement pour alimenter les niveaux de
+    #                 confluence (Blind Spots) — jamais proposé à l'affichage,
+    #                 et pullé plus lentement car ses murs reposent sur l'open
+    #                 interest, publié une fois par jour
+    role: str = "target"
+    # Cibles que ce constituant informe. Un titre présent dans deux indices
+    # (AAPL, MSFT…) en alimente deux.
+    links: tuple[str, ...] = ()
 
 
 UNDERLYINGS: dict[str, Underlying] = {
@@ -47,8 +56,43 @@ UNDERLYINGS: dict[str, Underlying] = {
         # — voir la note sur l'approximation q=0 dans les limites du README.
         Underlying("SPY", "SPY", "SPY", family="SP"),
         Underlying("QQQ", "QQQ", "QQQ", family="ND"),
+
+        # --- Constituants (Blind Spots) -------------------------------------
+        # Leurs murs de gamma n'ont d'intérêt que projetés sur l'indice qu'ils
+        # composent : un mur sur NVDA pèse sur le NQ parce que le titre pèse
+        # ~9 % de l'indice et que ceux qui couvrent ce gamma tradent NVDA.
+        # C'est ce lien mécanique qui distingue un constituant d'un actif
+        # simplement corrélé (l'or face à l'ES n'a pas cette propriété).
+        *[Underlying(k, k, k, family="ND", role="constituent",
+                     links=("NDX", "SPX"))
+          for k in ("SMH", "NVDA", "AVGO", "AMD", "MU", "TSM")],
+        # Méga-capitalisations : présentes dans les deux indices, avec un poids
+        # supérieur dans le Nasdaq-100
+        *[Underlying(k, k, k, family="ND", role="constituent",
+                     links=("NDX", "SPX"))
+          for k in ("AAPL", "MSFT", "AMZN", "META", "GOOGL", "TSLA")],
+        # Secteurs absents du Nasdaq-100 : ils n'informent que le S&P
+        *[Underlying(k, k, k, family="SP", role="constituent", links=("SPX",))
+          for k in ("XLF", "XLE")],
     ]
 }
+
+
+def targets() -> list[Underlying]:
+    """Sous-jacents analysés — ceux que l'interface propose."""
+    return [u for u in UNDERLYINGS.values() if u.enabled and u.role == "target"]
+
+
+def constituents(for_target: str | None = None) -> list[Underlying]:
+    """Constituants collectés pour les niveaux de confluence.
+
+    `for_target` restreint à ceux qui informent une cible donnée.
+    """
+    out = [u for u in UNDERLYINGS.values()
+           if u.enabled and u.role == "constituent"]
+    if for_target:
+        out = [u for u in out if for_target in u.links]
+    return out
 
 
 @dataclass
@@ -59,6 +103,15 @@ class Settings:
     flow_interval_s: int = 60
     # Intervalle de persistance d'un snapshot complet de chaîne (secondes).
     snapshot_interval_s: int = 600
+    # Cadence de pull des constituants. Bien plus lente que les cibles : leurs
+    # murs reposent sur l'open interest, publié une fois par jour. Les puller
+    # toutes les 60 s n'apporterait rien et multiplierait par quatre la charge
+    # sur le CDN gratuit de CBOE comme le volume d'écriture Parquet.
+    constituent_interval_s: int = 600
+    # Persistance des snapshots de constituants. Très espacée : leurs murs
+    # dépendent de l'open interest, publié une fois par jour — en garder une
+    # photo toutes les 10 min ferait ~270 Mo/jour de doublons pour rien.
+    constituent_snapshot_interval_s: int = 7200
     # Fenêtre de strikes affichée autour du spot (fraction).
     strike_window: float = 0.10
     # Grille de recherche du zero gamma autour du spot (fraction, pas).

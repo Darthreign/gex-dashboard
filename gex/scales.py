@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .config import UNDERLYINGS
+from .config import UNDERLYINGS, targets
 
 
 @dataclass(frozen=True)
@@ -36,11 +36,13 @@ class Scale:
 
 
 def available_scales() -> list[Scale]:
-    """Échelles proposées : chaque sous-jacent actif, plus son future."""
+    """Échelles proposées : chaque sous-jacent analysé, plus son future.
+
+    Les constituants (NVDA, SMH…) en sont exclus : ils alimentent les niveaux
+    de confluence, ils ne sont pas des échelles d'affichage.
+    """
     out: list[Scale] = []
-    for u in UNDERLYINGS.values():
-        if not u.enabled:
-            continue
+    for u in targets():
         out.append(Scale(u.key, u.key, u.family, u.key))
         if u.future:
             out.append(Scale(u.future, u.future, u.family, u.key, is_future=True))

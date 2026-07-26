@@ -66,9 +66,11 @@ def pull_symbol(symbol: str, persist_snapshot: bool) -> None:
         prev = st.enriched
         prev_feed_ts = st.last_feed_ts
 
-    # Flux delta : uniquement si le feed a réellement avancé depuis le
-    # dernier pull (sinon Δvolume = bruit nul).
-    if prev is not None and prev_feed_ts != snap.feed_timestamp:
+    # Flux delta : uniquement sur les cibles analysées, et seulement si le feed
+    # a réellement avancé depuis le dernier pull (sinon Δvolume = bruit nul).
+    # Sur un constituant, seuls comptent ses murs et son spot.
+    if (u.role == "target" and prev is not None
+            and prev_feed_ts != snap.feed_timestamp):
         flow = metrics.flow_delta(prev, enriched, snap.spot)
         flow["timestamp"] = snap.feed_timestamp
         store.append_daily("flows", symbol, flow, now)
@@ -92,30 +94,46 @@ def pull_symbol(symbol: str, persist_snapshot: bool) -> None:
 
 
 class _Cadence:
-    """Compte les pulls pour déclencher le snapshot complet toutes les M itérations."""
+    """Déclenche une action toutes les N itérations de la boucle de pull.
 
-    def __init__(self) -> None:
+    `interval_s` est ramené au nombre d'itérations correspondant : la boucle
+    tourne à `flow_interval_s`, tout le reste s'exprime en multiples.
+    """
+
+    def __init__(self, interval_s: int | None = None) -> None:
         self.count = 0
-        self.every = max(1, SETTINGS.snapshot_interval_s // SETTINGS.flow_interval_s)
+        interval_s = SETTINGS.snapshot_interval_s if interval_s is None else interval_s
+        self.every = max(1, interval_s // SETTINGS.flow_interval_s)
 
     def tick(self) -> bool:
-        persist = self.count % self.every == 0
+        due = self.count % self.every == 0
         self.count += 1
-        return persist
+        return due
 
 
 _CADENCE = _Cadence()
+# Les constituants suivent leur propre horloge : leurs murs reposent sur l'open
+# interest, publié une fois par jour, donc les puller au rythme des cibles
+# n'apporterait rien et quadruplerait la charge.
+_CONSTITUENT_CADENCE = _Cadence(SETTINGS.constituent_interval_s)
+_CONSTITUENT_SNAPSHOT = _Cadence(SETTINGS.constituent_snapshot_interval_s)
 
 
 def pull_all(force: bool = False) -> None:
     if SETTINGS.market_hours_only and not market_is_open() and not force:
         return
     persist = _CADENCE.tick()
+    due = _CONSTITUENT_CADENCE.tick()
+    persist_constituent = _CONSTITUENT_SNAPSHOT.tick()
     for key, u in UNDERLYINGS.items():
         if not u.enabled:
             continue
+        is_constituent = u.role == "constituent"
+        if is_constituent and not (due or force):
+            continue
         try:
-            pull_symbol(key, persist_snapshot=persist)
+            pull_symbol(key, persist_snapshot=(persist_constituent if is_constituent
+                                               else persist))
         except Exception as e:  # noqa: BLE001 — la boucle doit survivre
             log.exception("Échec pull %s", key)
             with STATE.lock:

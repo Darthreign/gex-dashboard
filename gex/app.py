@@ -17,7 +17,7 @@ from dash.dependencies import Input, Output, State
 from dash.exceptions import PreventUpdate
 
 from . import metrics, scales, store
-from .config import SETTINGS, UNDERLYINGS
+from .config import SETTINGS, UNDERLYINGS, targets
 from .i18n import LANGS, t, wall_labels
 from .metrics import ET, EXPIRY_BUCKETS
 from .rtquote import QUOTES
@@ -676,7 +676,7 @@ def create_app() -> Dash:
     # Dash les sert dans tous les cas sous /assets.
     app = Dash(__name__, title="GEX Dashboard",
                assets_folder=str(Path(__file__).resolve().parent / "assets"))
-    enabled = [u for u in UNDERLYINGS.values() if u.enabled]
+    enabled = targets()
 
     def ctl(label_id, control):
         """Contrôle étiqueté : la légende dit ce que le segment pilote."""
