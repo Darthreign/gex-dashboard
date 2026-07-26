@@ -64,6 +64,28 @@ def append_history(row: dict) -> Path:
     return path
 
 
+def append_prices(symbol: str, rows: list[dict], ts: datetime) -> Path:
+    """Ajoute des bougies 1 min au fichier du jour.
+
+    ⚠️ Provenance marquée à l'ÉCRITURE (`source="dxfeed"`), pas devinée après
+    coup : ces cotations viennent du courtier et ne sont pas redistribuables.
+    Le filtre d'export ne laisse passer que `source == "cboe"`, donc les
+    oublier ici les rendrait partageables par défaut.
+    """
+    path = _ensure(SETTINGS.data_dir / "prices" / symbol / f"{ts:%Y-%m-%d}.parquet")
+    new = pd.DataFrame(rows)
+    if path.exists():
+        new = pd.concat([pd.read_parquet(path), new], ignore_index=True)
+    new = new.drop_duplicates(subset="timestamp", keep="last").sort_values("timestamp")
+    _write_atomic(new, path)
+    return path
+
+
+def load_prices(symbol: str, day: str) -> pd.DataFrame:
+    path = SETTINGS.data_dir / "prices" / symbol / f"{day}.parquet"
+    return pd.read_parquet(path) if path.exists() else pd.DataFrame()
+
+
 def load_flows(symbol: str, day: str) -> pd.DataFrame:
     path = SETTINGS.data_dir / "flows" / symbol / f"{day}.parquet"
     return pd.read_parquet(path) if path.exists() else pd.DataFrame()

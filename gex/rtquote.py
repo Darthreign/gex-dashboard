@@ -82,6 +82,23 @@ class Tick:
 
 
 @dataclass
+class Bar:
+    """Bougie en cours de construction pour une minute donnée."""
+    minute: int          # epoch de la minute (secondes, tronquées)
+    open: float
+    high: float
+    low: float
+    close: float
+    ticks: int = 1
+
+    def update(self, px: float) -> None:
+        self.high = max(self.high, px)
+        self.low = min(self.low, px)
+        self.close = px
+        self.ticks += 1
+
+
+@dataclass
 class RealtimeQuotes:
     """Client dxLink : maintient le dernier prix connu de chaque sous-jacent.
 
@@ -96,6 +113,12 @@ class RealtimeQuotes:
     _started: bool = False
     # symbole dxFeed -> clé interne ("SPX", "ES"…)
     _by_stream: dict[str, str] = field(default_factory=dict)
+    # Bougies 1 min construites à la volée. Agréger ici plutôt que d'échantillonner
+    # le dernier prix donne des extrêmes exacts : on voit passer chaque tick,
+    # donc les mèches ne sont pas perdues — ce qui est précisément ce qui
+    # manquait au backtest de niveaux.
+    _bar: dict[str, Bar] = field(default_factory=dict)
+    _done: list[tuple[str, Bar]] = field(default_factory=list)
 
     # ------------------------------------------------------------- démarrage
     def start(self) -> None:
@@ -241,6 +264,7 @@ class RealtimeQuotes:
 
     def _ingest(self, data: list) -> None:
         now = time.time()
+        minute = int(now // 60) * 60
         with self.lock:
             for item in data:
                 if not isinstance(item, dict):
@@ -262,6 +286,36 @@ class RealtimeQuotes:
                     if isinstance(px, (int, float)) and px == px:
                         t.last = float(px)
                 t.ts = now
+                self._accumulate(key, t.price, minute)
+
+    def _accumulate(self, key: str, px: float | None, minute: int) -> None:
+        """Alimente la bougie de la minute courante ; clôture la précédente.
+
+        Appelé sous `self.lock` depuis `_ingest`.
+        """
+        if px is None:
+            return
+        cur = self._bar.get(key)
+        if cur is None:
+            self._bar[key] = Bar(minute, px, px, px, px)
+        elif cur.minute == minute:
+            cur.update(px)
+        else:
+            self._done.append((key, cur))
+            self._bar[key] = Bar(minute, px, px, px, px)
+
+    def drain_bars(self, flush: bool = False) -> list[tuple[str, Bar]]:
+        """Retire et renvoie les bougies achevées.
+
+        `flush` clôture aussi les bougies en cours — utile à l'arrêt ou en fin
+        de séance, pour ne pas perdre la dernière minute.
+        """
+        with self.lock:
+            out, self._done = self._done, []
+            if flush:
+                out += list(self._bar.items())
+                self._bar.clear()
+        return out
 
 
 QUOTES = RealtimeQuotes()

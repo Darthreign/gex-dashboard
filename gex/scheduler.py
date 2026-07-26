@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, time
+from datetime import UTC, datetime, time
 
 import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -19,6 +19,7 @@ from . import metrics, store
 from .config import SETTINGS, UNDERLYINGS
 from .ingest import ChainSnapshot, fetch_chain
 from .metrics import ET, SummaryMetrics
+from .rtquote import QUOTES
 
 log = logging.getLogger(__name__)
 
@@ -168,6 +169,32 @@ def push_data_repo() -> None:
         log.exception("Échec du push du repo data — données locales intactes")
 
 
+def flush_prices() -> None:
+    """Écrit sur disque les bougies 1 min achevées par le flux temps réel.
+
+    Sans identifiants courtier, `drain_bars` renvoie une liste vide et la
+    fonction ne fait rien : la collecte de prix est optionnelle comme le reste
+    de la couche temps réel.
+    """
+    bars = QUOTES.drain_bars()
+    if not bars:
+        return
+    by_symbol: dict[str, list[dict]] = {}
+    for symbol, bar in bars:
+        ts = datetime.fromtimestamp(bar.minute, tz=UTC).astimezone(ET).replace(tzinfo=None)
+        by_symbol.setdefault(symbol, []).append({
+            "timestamp": ts, "open": bar.open, "high": bar.high,
+            "low": bar.low, "close": bar.close, "ticks": bar.ticks,
+            # provenance courtier : non redistribuable (cf. gex/export.py)
+            "source": "dxfeed",
+        })
+    for symbol, rows in by_symbol.items():
+        try:
+            store.append_prices(symbol, rows, rows[0]["timestamp"])
+        except Exception:  # noqa: BLE001 — une écriture ratée ne doit rien casser
+            log.exception("Échec écriture des prix %s", symbol)
+
+
 def start_scheduler() -> BackgroundScheduler:
     sched = BackgroundScheduler(timezone="America/New_York")
     sched.add_job(
@@ -177,6 +204,9 @@ def start_scheduler() -> BackgroundScheduler:
         max_instances=1,
         coalesce=True,
     )
+    # Vidange plus fréquente que la minute : une bougie n'est écrite qu'une
+    # fois close, ce décalage borne simplement la perte en cas d'arrêt brutal.
+    sched.add_job(flush_prices, "interval", seconds=30, max_instances=1, coalesce=True)
     sched.add_job(push_data_repo, "cron", day_of_week="mon-fri", hour=16, minute=20)
     sched.start()
     # Premier pull immédiat (même hors marché : affiche le dernier état connu).

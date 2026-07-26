@@ -111,3 +111,31 @@ def test_migrate_is_idempotent(data_dir):
     assert (s["history_cboe"], s["history_databento"]) == (1, 0)
     h = pd.read_parquet(data_dir / "history" / "metrics.parquet")
     assert h["source"].tolist() == ["cboe"]
+
+
+def test_prix_courtier_jamais_exportes(tmp_path, monkeypatch):
+    """Les bougies dxFeed viennent du courtier : non redistribuables.
+
+    Deux garde-fous doivent tenir — le répertoire prices/ n'est pas parcouru,
+    et le filtre de partage n'accepte que source == "cboe". Ce test vérifie le
+    résultat final : rien de dxfeed ne sort.
+    """
+    from datetime import datetime
+
+    from gex import export, store
+    from gex.config import SETTINGS
+
+    monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
+    store.append_prices("SPX", [{
+        "timestamp": datetime(2026, 7, 27, 10, 0), "open": 1.0, "high": 2.0,
+        "low": 0.5, "close": 1.5, "ticks": 10, "source": "dxfeed",
+    }], datetime(2026, 7, 27, 10, 0))
+
+    out = tmp_path / "export"
+    export.export(out)
+    exported = list(out.rglob("*.parquet")) if out.exists() else []
+    assert not any("prices" in p.parts for p in exported)
+    for p in exported:
+        df = pd.read_parquet(p)
+        if "source" in df.columns:
+            assert set(df["source"].unique()) <= {"cboe"}

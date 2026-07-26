@@ -159,12 +159,26 @@ def session_levels(symbol: str, day: str, spot: float | None = None) -> dict[str
 
 
 def session_path(symbol: str, day: str) -> np.ndarray:
-    """Parcours du spot sur une séance, depuis l'historique des métriques.
+    """Parcours du prix sur une séance.
 
-    Résolution = celle des snapshots persistés. Grossière, mais suffisante
-    pour dire si un niveau a été atteint ; elle sous-estime en revanche les
-    mèches, donc les taux de cassure obtenus sont un plancher.
+    Deux sources, par ordre de préférence :
+
+    1. **Bougies 1 min** du flux temps réel — les extrêmes y sont exacts, donc
+       une mèche qui touche un niveau est vue. C'est la seule résolution qui
+       permet de mesurer honnêtement un taux de cassure.
+    2. **Historique des métriques** (un point par snapshot, soit 10 min) —
+       repli quand les bougies manquent. Les mèches y disparaissent : les taux
+       obtenus sont alors un plancher, jamais une mesure.
+
+    Les bougies sont dépliées en open/high/low/close afin que `evaluate_level`
+    voie les extrêmes ; l'ordre high-puis-low à l'intérieur d'une minute est
+    une convention (on ne sait pas lequel est venu en premier), sans effet sur
+    les indicateurs calculés.
     """
+    px = store.load_prices(symbol, day)
+    if not px.empty:
+        px = px.sort_values("timestamp")
+        return px[["open", "high", "low", "close"]].to_numpy(dtype=float).ravel()
     h = store.load_history(symbol)
     if h.empty:
         return np.array([])
@@ -173,10 +187,17 @@ def session_path(symbol: str, day: str) -> np.ndarray:
     return sel["spot"].to_numpy(dtype=float)
 
 
+def path_resolution(symbol: str, day: str) -> str:
+    """Source réellement utilisée pour la séance — à afficher avec tout
+    résultat, un taux calculé sur du 10 min ne valant pas un taux calculé sur
+    des bougies."""
+    return "1min" if not store.load_prices(symbol, day).empty else "snapshot"
+
+
 def run(symbol: str, days: list[str] | None = None) -> pd.DataFrame:
     """Backtest sur toutes les séances disposant à la fois de niveaux et de prix."""
     days = days or store.snapshot_days(symbol)
-    outcomes: list[LevelOutcome] = []
+    outcomes: list[dict] = []
     for day in days:
         path = session_path(symbol, day)
         if len(path) < 2:
@@ -184,5 +205,7 @@ def run(symbol: str, days: list[str] | None = None) -> pd.DataFrame:
         levels = session_levels(symbol, day, spot=float(path[0]))
         if not levels:
             continue
-        outcomes.extend(evaluate_session(levels, path, day, symbol))
-    return pd.DataFrame([asdict(o) for o in outcomes])
+        res = path_resolution(symbol, day)
+        for o in evaluate_session(levels, path, day, symbol):
+            outcomes.append({**asdict(o), "resolution": res})
+    return pd.DataFrame(outcomes)
