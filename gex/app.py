@@ -346,14 +346,18 @@ def heatmap_fig(symbol: str, lang: str, day: str | None = None,
         if serie.empty:
             continue
         v = serie.to_numpy()
+        # Toutes les barres partent de zéro vers la droite : la longueur est la
+        # magnitude, directement comparable d'un strike à l'autre, et la couleur
+        # porte le signe. Les tracer de part et d'autre de zéro obligerait à
+        # comparer deux demi-échelles opposées.
         fig.add_bar(
-            y=xf(serie.index.to_numpy()), x=v, orientation="h", name=name,
+            y=xf(serie.index.to_numpy()), x=np.abs(v), orientation="h", name=name,
             width=_bar_width(xf(serie.index.to_numpy())) * width,
             marker=dict(color=np.where(v >= 0, colors[0], colors[1]),
                         line=dict(width=0)),
-            xaxis="x2",
+            xaxis="x2", customdata=v,
             hovertemplate=(f"{t(lang, 'hover_strike')} %{{y}}<br>{name}"
-                           " %{x:+.2f} $Bn<extra></extra>"),
+                           " %{customdata:+.2f} $Bn<extra></extra>"),
         )
 
     if path is not None and not path.empty:
@@ -394,6 +398,7 @@ def heatmap_fig(symbol: str, lang: str, day: str | None = None,
     # axe des barres en haut, superposé à l'axe temps
     lay["xaxis2"] = dict(overlaying="x", side="top", showgrid=False,
                          zeroline=True, zerolinecolor=C["axis"],
+                         rangemode="tozero",   # ancrage à gauche
                          tickfont=dict(color=C["muted"]),
                          title=dict(text=t(lang, "heat_axis_bn"),
                                     font=dict(color=C["muted"])))
