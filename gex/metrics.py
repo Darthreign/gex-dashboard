@@ -435,11 +435,24 @@ def flow_delta(prev: pd.DataFrame, cur: pd.DataFrame, spot: float) -> dict[str, 
     signed = dvol * m["delta_bs"] * CONTRACT_MULTIPLIER * spot
     is_call = m["type"] == "C"
     today = datetime.now(ET).date()
+
+    # Gamma échangé sur l'intervalle : même formule que le GEX, mais pondérée
+    # par le volume du pas de temps au lieu de l'open interest. Cumulé sur la
+    # séance, cela montre si ce qui se traite ajoute du gamma stabilisant
+    # (calls) ou déstabilisant (puts) — un « CVD » du gamma.
+    gsign = np.where(is_call, 1.0, -1.0)
+    gsigned = (dvol * m["gamma_bs"] * gsign
+               * CONTRACT_MULTIPLIER * spot ** 2 * 0.01)
     return {
         "flow_total": float(signed.sum()),
         "flow_calls": float(signed[is_call].sum()),
         "flow_puts": float(signed[~is_call].sum()),
         "flow_0dte": float(signed[m["expiry"] == today].sum()),
+        # gflow_calls est positif, gflow_puts négatif : leur somme est le net
+        "gflow_total": float(gsigned.sum()),
+        "gflow_calls": float(gsigned[is_call].sum()),
+        "gflow_puts": float(gsigned[~is_call].sum()),
+        "gflow_0dte": float(gsigned[m["expiry"] == today].sum()),
         "contracts_traded": float(dvol.sum()),
         "source": "cboe",   # collecté en direct sur la source publique
     }

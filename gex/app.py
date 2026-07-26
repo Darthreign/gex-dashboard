@@ -304,6 +304,46 @@ def available_flow_days(symbol: str) -> list[str]:
     return sorted(p.stem for p in root.glob("*.parquet"))
 
 
+def gamma_flow_fig(symbol: str, lang: str, day: str | None = None) -> go.Figure:
+    """Gamma échangé cumulé sur la séance, calls contre puts.
+
+    L'équivalent d'un CVD appliqué au gamma : chaque pas de temps ajoute le
+    gamma des contrats qui se sont traités, compté positif sur les calls et
+    négatif sur les puts. La divergence entre les deux courbes montre de quel
+    côté afflue le flux — un décrochage des puts signale un marché qui se
+    charge en gamma déstabilisant, terrain d'un retournement.
+
+    Même limite que le flux delta : le sens taker n'est pas observable dans ce
+    feed. On mesure l'activité pondérée par le gamma, pas un flux signé.
+    """
+    day = day or datetime.now(ET).strftime("%Y-%m-%d")
+    flows = store.load_flows(symbol, day)
+    title = t(lang, "gflow_title")
+    if flows.empty or "gflow_calls" not in flows.columns:
+        # colonnes absentes = journée collectée avant l'ajout de cette mesure
+        return empty_fig(t(lang, "no_flow_day", day=day), title)
+    ts = to_local(flows["timestamp"])
+    calls = np.cumsum(flows["gflow_calls"].fillna(0.0).to_numpy()) / 1e9
+    puts = np.cumsum(flows["gflow_puts"].fillna(0.0).to_numpy()) / 1e9
+    net = calls + puts
+
+    fig = go.Figure()
+    for y, name, color in ((calls, t(lang, "legend_gcalls"), C["pos"]),
+                           (puts, t(lang, "legend_gputs"), C["neg"])):
+        fig.add_scatter(x=ts, y=y, mode="lines", name=name,
+                        line=dict(color=color, width=1.5),
+                        hovertemplate=f"%{{x|%H:%M}}<br>{name}: %{{y:+.2f}} $Bn<extra></extra>")
+    fig.add_scatter(x=ts, y=net, mode="lines", name=t(lang, "legend_gnet"),
+                    line=dict(color=C["ink"], width=2),
+                    hovertemplate=f"%{{x|%H:%M}}<br>{t(lang, 'legend_gnet')}: %{{y:+.2f}} $Bn<extra></extra>")
+    lay = with_legend(base_layout(title, height=320))
+    lay["yaxis"]["title"] = dict(text=t(lang, "axis_gflow_bn"),
+                                 font=dict(color=C["muted"]))
+    fig.update_layout(**lay)
+    fig.add_hline(y=0, line_color=C["axis"], line_width=1)
+    return fig
+
+
 def flow_fig(symbol: str, lang: str, day: str | None = None) -> go.Figure:
     day = day or datetime.now(ET).strftime("%Y-%m-%d")
     flows = store.load_flows(symbol, day)
@@ -714,6 +754,7 @@ def create_app() -> Dash:
                     html.Button(id="flow-today", n_clicks=0, className="btn"),
                 ], className="daybar"),
                 dcc.Graph(config=GRAPH_CONFIG, id="flow", style={"marginBottom": "12px"}),
+                dcc.Graph(config=GRAPH_CONFIG, id="gflow", style={"marginBottom": "12px"}),
                 html.Div([
                     dcc.Graph(config=GRAPH_CONFIG, id="gex-history"),
                     dcc.Graph(config=GRAPH_CONFIG, id="spot-zg"),
@@ -881,6 +922,7 @@ def create_app() -> Dash:
     @app.callback(
         [Output("levels", "children"), Output("gex-strike", "figure"),
          Output("dex-strike", "figure"), Output("flow", "figure"),
+         Output("gflow", "figure"),
          Output("gex-history", "figure"), Output("spot-zg", "figure"),
          Output("smile", "figure"), Output("tv-copy", "content"),
          Output("tv-copy", "title")],
@@ -904,6 +946,7 @@ def create_app() -> Dash:
                 empty_fig(wait, t(lang, "gex_title", bucket=bucket_label)),
                 empty_fig(wait, t(lang, "dex_title", bucket=bucket_label)),
                 empty_fig(wait, t(lang, "flow_title")),
+                empty_fig(wait, t(lang, "gflow_title")),
                 empty_fig(wait, t(lang, "hist_title")),
                 empty_fig(wait, t(lang, "spotzg_title")),
                 empty_fig(wait, t(lang, "smile_title")),
@@ -940,6 +983,7 @@ def create_app() -> Dash:
                               hvl=hvl, window=window, xf=xf, keys=keys,
                               level_set="regime"), rev),
             _pin(flow_fig(symbol, lang, flow_day), f"{symbol}-{flow_day}"),
+            _pin(gamma_flow_fig(symbol, lang, flow_day), f"g{symbol}-{flow_day}"),
             _pin(history_fig(symbol, lang), symbol),
             _pin(spot_zg_fig(symbol, lang), symbol),
             _pin(smile_fig(sel, snap.spot, lang), rev),
