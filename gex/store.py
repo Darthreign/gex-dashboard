@@ -118,6 +118,35 @@ def load_first_snapshot(symbol: str, day: str) -> pd.DataFrame | None:
     return pd.read_parquet(files[0]) if files else None
 
 
+def load_day_snapshots(symbol: str, day: str,
+                       columns: list[str] | None = None) -> list[tuple[datetime, pd.DataFrame]]:
+    """Tous les snapshots d'une séance, horodatés depuis le nom de fichier.
+
+    `columns` restreint les colonnes lues : une chaîne SPX pèse ~30 000 lignes
+    et une séance en compte une quarantaine, donc lire les 17 colonnes quand
+    trois suffisent multiplie le temps de chargement par cinq.
+    """
+    root = SETTINGS.data_dir / "snapshots" / symbol / day
+    if not root.exists():
+        return []
+    out = []
+    for f in sorted(root.glob("*.parquet")):
+        try:
+            ts = datetime.strptime(f"{day} {f.stem}", "%Y-%m-%d %H%M%S")
+        except ValueError:
+            continue          # fichier au nom inattendu : ignoré, pas fatal
+        cols = columns
+        if cols is not None:
+            # Les snapshots antérieurs à l'ajout d'une colonne ne la portent
+            # pas ; réclamer une colonne absente fait échouer la lecture, donc
+            # on n'en demande que l'intersection avec ce que le fichier a.
+            import pyarrow.parquet as pq
+            have = set(pq.ParquetFile(f).schema_arrow.names)
+            cols = [c for c in columns if c in have]
+        out.append((ts, pd.read_parquet(f, columns=cols)))
+    return out
+
+
 def load_previous_snapshot(symbol: str, before_day: str) -> tuple[str, pd.DataFrame] | None:
     """Dernier snapshot de la séance précédant `before_day` (jour + données)."""
     days = [d for d in snapshot_days(symbol) if d < before_day]

@@ -304,17 +304,23 @@ class RealtimeQuotes:
             self._done.append((key, cur))
             self._bar[key] = Bar(minute, px, px, px, px)
 
-    def drain_bars(self, flush: bool = False) -> list[tuple[str, Bar]]:
+    def drain_bars(self, flush: bool = False, now: float | None = None
+                   ) -> list[tuple[str, Bar]]:
         """Retire et renvoie les bougies achevées.
 
-        `flush` clôture aussi les bougies en cours — utile à l'arrêt ou en fin
-        de séance, pour ne pas perdre la dernière minute.
+        Une bougie dont la minute est passée est close même si aucun tick n'est
+        arrivé depuis : sans cela, un symbole qui cesse de coter — marché fermé,
+        titre peu liquide, dernière minute de la séance — ne livrerait jamais sa
+        dernière bougie, puisque la clôture n'interviendrait qu'au tick suivant.
+
+        `flush` force en plus la clôture de la minute en cours, pour l'arrêt.
         """
+        current = int((now if now is not None else time.time()) // 60) * 60
         with self.lock:
             out, self._done = self._done, []
-            if flush:
-                out += list(self._bar.items())
-                self._bar.clear()
+            for key in list(self._bar):
+                if flush or self._bar[key].minute < current:
+                    out.append((key, self._bar.pop(key)))
         return out
 
 

@@ -153,6 +153,23 @@ def gamma_profile(df: pd.DataFrame, spot: float, weight_col: str = "open_interes
     return grid, profile
 
 
+def gex_by_strike_weighted(df: pd.DataFrame, spot: float,
+                           weight_col: str = "open_interest") -> pd.Series:
+    """GEX par strike, pondéré par l'open interest ou par le volume du jour.
+
+    Les deux racontent des choses différentes : l'open interest décrit le
+    positionnement installé, le volume ce qui se traite aujourd'hui et donc se
+    couvre maintenant. Superposés, l'écart entre les deux signale un strike qui
+    prend de l'importance en séance sans figurer dans la structure de la veille.
+    """
+    if df.empty or weight_col not in df.columns:
+        return pd.Series(dtype=float)
+    sign = np.where((df["type"] == "C").to_numpy(), 1.0, -1.0)
+    gex = (sign * df["gamma_bs"].to_numpy() * df[weight_col].to_numpy()
+           * CONTRACT_MULTIPLIER * spot ** 2 * 0.01)
+    return pd.Series(gex, index=df["strike"].to_numpy()).groupby(level=0).sum()
+
+
 def net_gex_at(df: pd.DataFrame, spot: float,
                weight_col: str = "open_interest") -> float | None:
     """GEX net recalculé à un spot donné, IV et maturités figées.

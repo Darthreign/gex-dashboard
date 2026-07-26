@@ -59,7 +59,7 @@ TAB_SELECTED = {"backgroundColor": "#1a1a19", "color": "#ffffff",
                 "border": "1px solid #2c2c2a", "borderTop": "2px solid #3987e5",
                 "padding": "8px 14px", "fontSize": "13px", "fontWeight": "600"}
 HINT_STYLE = {"color": "#898781", "fontSize": "11px", "marginBottom": "8px"}
-TABS = ("main", "profile", "greeks2", "pos")
+TABS = ("main", "profile", "greeks2", "heat", "pos")
 
 
 def to_local(ts: pd.Series) -> pd.Series:
@@ -302,6 +302,144 @@ def available_flow_days(symbol: str) -> list[str]:
     if not root.exists():
         return []
     return sorted(p.stem for p in root.glob("*.parquet"))
+
+
+def heatmap_fig(symbol: str, lang: str, day: str | None = None,
+                window: float = 0.04, xf=None) -> go.Figure:
+    """Profil de gamma en barres + parcours du prix, sur un axe de prix commun.
+
+    Deux échelles horizontales partagent l'axe vertical des prix : les barres
+    se lisent en $Bn sur l'axe du haut, le prix en heures sur celui du bas.
+    C'est ce partage qui fait tout l'intérêt — on voit immédiatement si le
+    marché évolue au contact d'une concentration de gamma ou à distance.
+
+    Deux pondérations sont tracées. L'open interest décrit le positionnement
+    installé ; le volume du jour, ce qui se traite et donc se couvre
+    maintenant. Un strike lourd en volume mais absent en open interest est un
+    niveau qui prend de l'importance en séance.
+    """
+    day = day or datetime.now(ET).strftime("%Y-%m-%d")
+    title = t(lang, "heat_title", day=day)
+    xf = xf or (lambda v: v)
+
+    df, spot = _chain_for_day(symbol, day)
+    path = _price_overlay(symbol, day)
+    if df is None or df.empty or not spot:
+        return empty_fig(t(lang, "heat_none", day=day), title)
+
+    lo, hi = spot * (1 - window), spot * (1 + window)
+    sel = df[df["strike"].between(lo, hi)]
+    if sel.empty:
+        return empty_fig(t(lang, "no_data_window"), title)
+
+    oi = metrics.gex_by_strike_weighted(sel, spot, "open_interest") / 1e9
+    vol = metrics.gex_by_strike_weighted(sel, spot, "volume") / 1e9
+
+    fig = go.Figure()
+    # Barres épaisses (open interest) en fond, barres fines (volume) devant :
+    # superposées plutôt que côte à côte, l'écart entre les deux se lit d'un
+    # coup d'œil sur un même strike.
+    for serie, name, width, colors in (
+        (oi, t(lang, "legend_gex_oi"), 0.75, (C["pos"], C["neg"])),
+        (vol, t(lang, "legend_gex_vol"), 0.38, ("#7fb2ee", "#f0a1a1")),
+    ):
+        if serie.empty:
+            continue
+        v = serie.to_numpy()
+        fig.add_bar(
+            y=xf(serie.index.to_numpy()), x=v, orientation="h", name=name,
+            width=_bar_width(xf(serie.index.to_numpy())) * width,
+            marker=dict(color=np.where(v >= 0, colors[0], colors[1]),
+                        line=dict(width=0)),
+            xaxis="x2",
+            hovertemplate=(f"{t(lang, 'hover_strike')} %{{y}}<br>{name}"
+                           " %{x:+.2f} $Bn<extra></extra>"),
+        )
+
+    if path is not None and not path.empty:
+        fig.add_scatter(x=to_local(path["timestamp"]), y=xf(path["close"].to_numpy()),
+                        mode="lines", name=t(lang, "legend_spot"),
+                        line=dict(color="#22d3ee", width=1.3),
+                        hovertemplate=(f"%{{x|%H:%M}}<br>{t(lang, 'legend_spot')}"
+                                       " %{y:.0f}<extra></extra>"))
+
+    # repères horizontaux : le spot, la bascule de régime, et les deux murs les
+    # plus lourds de chaque côté — de quoi situer le prix sans quitter l'onglet
+    keys = metrics.key_levels(sel, spot)
+    items = [dict(y=xf(spot), label=t(lang, "legend_spot"), color=C["spot"], dash="dot")]
+    zg = metrics.zero_gamma(df, spot)
+    if zg is not None:
+        items.append(dict(y=xf(zg), label="Gamma Flip", color=C["zg"], dash="dash"))
+    for key, color, label in (("call_wall", C["cw"], "Call Wall"),
+                              ("put_support", C["ps"], "Put Support")):
+        v = keys.get(key)
+        if v is not None:
+            items.append(dict(y=xf(v), label=label, color=color, dash="dash"))
+    _draw_levels(fig, items, xf(lo), xf(hi))
+
+    lay = with_legend(base_layout(title, height=560))
+    lay["barmode"] = "overlay"
+    lay["yaxis"]["title"] = dict(text=t(lang, "heat_axis_strike"),
+                                 font=dict(color=C["muted"]))
+    lay["xaxis"]["title"] = dict(text=t(lang, "heat_axis_time"),
+                                 font=dict(color=C["muted"]))
+    # Type déclaré explicitement : les seules traces portant des données sont
+    # les barres, qui vivent sur le second axe. Sans cela Plotly ne peut pas
+    # deviner que l'axe du bas est temporel et l'affiche en nanosecondes.
+    lay["xaxis"]["type"] = "date"
+    lay["xaxis"]["tickformat"] = "%H:%M"
+    # Fenêtre fixée sur la séance : sans cela, une journée peu fournie écrase
+    # l'échelle sur quelques minutes et le graphique devient illisible.
+    lay["xaxis"]["range"] = _session_range(day)
+    # axe des barres en haut, superposé à l'axe temps
+    lay["xaxis2"] = dict(overlaying="x", side="top", showgrid=False,
+                         zeroline=True, zerolinecolor=C["axis"],
+                         tickfont=dict(color=C["muted"]),
+                         title=dict(text=t(lang, "heat_axis_bn"),
+                                    font=dict(color=C["muted"])))
+    fig.update_layout(**lay)
+    return fig
+
+
+def _session_range(day: str) -> list:
+    """Bornes de la séance américaine (9h30-16h15 ET), en heure locale."""
+    bounds = pd.Series([pd.Timestamp(f"{day} 09:30"), pd.Timestamp(f"{day} 16:15")])
+    return list(to_local(bounds))
+
+
+def _chain_for_day(symbol: str, day: str) -> tuple[pd.DataFrame | None, float | None]:
+    """Chaîne de référence d'une séance et son spot.
+
+    Pour la journée en cours on prend l'état vivant, plus frais que le dernier
+    snapshot persisté ; pour une séance passée, le dernier snapshot du jour.
+    """
+    if day == datetime.now(ET).strftime("%Y-%m-%d"):
+        st = STATE.get(symbol)
+        with STATE.lock:
+            df, snap = st.enriched, st.snapshot
+        if df is not None and snap is not None:
+            return df, snap.spot
+    df = store.load_last_snapshot(symbol, day)
+    if df is None or df.empty:
+        return None, None
+    spot = float(df["spot"].iloc[0]) if "spot" in df.columns else None
+    return df, spot
+
+
+def _price_overlay(symbol: str, day: str) -> pd.DataFrame | None:
+    """Parcours du prix pour le heatmap : bougies 1 min, à défaut les spots
+    des snapshots (plus grossiers mais toujours parlants)."""
+    px = store.load_prices(symbol, day)
+    if not px.empty:
+        return px.sort_values("timestamp")[["timestamp", "close"]]
+    h = store.load_history(symbol)
+    if h.empty:
+        return None
+    hts = pd.to_datetime(h["timestamp"])
+    sel = h[hts.dt.strftime("%Y-%m-%d") == day].sort_values("timestamp")
+    if sel.empty:
+        return None
+    return sel[["timestamp", "spot"]].rename(columns={"spot": "close"})
 
 
 def gamma_flow_fig(symbol: str, lang: str, day: str | None = None) -> go.Figure:
@@ -792,6 +930,17 @@ def create_app() -> Dash:
                 ], className="row"),
             ]),
 
+            html.Div(id="pane-heat", children=[
+                html.Div(id="heat-hint", className="hint"),
+                # sélecteur propre : les jours disponibles sont ceux des
+                # snapshots de chaîne, pas ceux des fichiers de flux
+                html.Div([html.Span(id="heat-day-label", className="ctl-label"),
+                          dcc.Dropdown(id="heat-day", className="dash-dropdown",
+                                       clearable=False, style={"width": "180px"})],
+                         className="ctl"),
+                dcc.Graph(config=GRAPH_CONFIG, id="heatmap"),
+            ]),
+
             html.Div(id="pane-pos", children=[
                 html.Div(id="pos-hint", className="hint"),
                 dcc.Graph(config=GRAPH_CONFIG, id="oi-change"),
@@ -1067,6 +1216,33 @@ def create_app() -> Dash:
         return (second_order_fig(sel, snap.spot, "vex", t(lang, "vex_title"), window, xf),
                 second_order_fig(sel, snap.spot, "cex", t(lang, "cex_title"), window, xf),
                 cards, t(lang, "vex_hint"))
+
+    @app.callback(
+        [Output("heat-day", "options"), Output("heat-day", "value"),
+         Output("heat-day-label", "children")],
+        [Input("symbol", "value"), Input("lang", "value"), Input("tab", "value")],
+        State("heat-day", "value"),
+    )
+    def heat_days(symbol, lang, tab, current):
+        days = store.snapshot_days(symbol)
+        opts = [{"label": d, "value": d} for d in reversed(days)]
+        # conserve le choix de l'utilisateur s'il reste valide après un
+        # changement de sous-jacent, sinon bascule sur la séance la plus récente
+        value = current if current in days else (days[-1] if days else None)
+        return opts, value, t(lang, "heat_day_label")
+
+    @app.callback(
+        [Output("heatmap", "figure"), Output("heat-hint", "children")],
+        [Input("tick", "n_intervals"), Input("tab", "value"), Input("symbol", "value"),
+         Input("window", "value"), Input("lang", "value"), Input("unit", "value"),
+         Input("heat-day", "value")],
+    )
+    def refresh_heatmap(_, tab, symbol, window, lang, unit, day):
+        # onglet masqué : ne pas relire une quarantaine de fichiers pour rien
+        if tab != "heat":
+            raise PreventUpdate
+        xf, _, _ = _transform_for(symbol, unit)
+        return heatmap_fig(symbol, lang, day, window, xf), t(lang, "heat_hint")
 
     @app.callback(
         [Output("oi-change", "figure"), Output("pos-hint", "children")],

@@ -44,13 +44,34 @@ def test_changement_de_minute_cloture_la_bougie():
     _feed(q, [100.0, 102.0], minute=60)
     # tick de la minute suivante
     q._accumulate("ES", 105.0, minute=120)
-    done = q.drain_bars()
+    done = q.drain_bars(now=125)
     assert len(done) == 1
     sym, bar = done[0]
     assert sym == "ES" and bar.minute == 60 and bar.high == 102.0
     # la bougie en cours n'est pas encore livrée
     assert q._bar["ES"].minute == 120
-    assert q.drain_bars() == []
+    assert q.drain_bars(now=125) == []
+
+
+def test_minute_ecoulee_cloture_sans_nouveau_tick():
+    """Sans cette clôture par le temps, un symbole qui cesse de coter garderait
+    sa dernière bougie indéfiniment — rien ne serait écrit un jour férié, ni à
+    la dernière minute d'une séance."""
+    q = RealtimeQuotes()
+    q._by_stream = {"ES": "ES"}
+    _feed(q, [100.0, 101.0], minute=60)
+    # aucun tick depuis, mais la minute est passée
+    done = q.drain_bars(now=180)
+    assert len(done) == 1 and done[0][1].minute == 60
+    assert "ES" not in q._bar
+
+
+def test_minute_en_cours_conservee():
+    q = RealtimeQuotes()
+    q._by_stream = {"ES": "ES"}
+    _feed(q, [100.0], minute=120)
+    assert q.drain_bars(now=150) == []   # on est encore dans la minute 120
+    assert q._bar["ES"].minute == 120
 
 
 def test_flush_livre_la_bougie_en_cours():
@@ -59,8 +80,8 @@ def test_flush_livre_la_bougie_en_cours():
     q = RealtimeQuotes()
     q._by_stream = {"ES": "ES"}
     _feed(q, [100.0], minute=60)
-    assert q.drain_bars() == []
-    done = q.drain_bars(flush=True)
+    assert q.drain_bars(now=90) == []      # minute encore en cours
+    done = q.drain_bars(flush=True, now=90)
     assert len(done) == 1 and done[0][1].open == 100.0
 
 
