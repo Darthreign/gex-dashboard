@@ -579,6 +579,21 @@ def _transform_for(symbol: str, scale_key: str | None):
         if summ is not None:
             spots[key] = summ.spot
             bases[key] = summ.basis
+
+    # Basis mesuré sur les deux prix réels plutôt que dérivé par parité
+    # call-put d'une chaîne délayée. La différence n'est pas cosmétique : hors
+    # séance l'indice est figé à la clôture pendant que le future continue de
+    # coter, et le basis calculé le matin devient faux de plusieurs dizaines de
+    # points. Mesuré ainsi, le spot transposé retombe exactement sur le prix du
+    # future affiché par n'importe quelle plateforme.
+    for u in UNDERLYINGS.values():
+        if not u.future:
+            continue
+        idx, fut = QUOTES.price(u.key), QUOTES.price(u.future)
+        if idx and fut:
+            spots[u.key] = idx
+            bases[u.key] = fut - idx
+
     target = scales.scale_by_key(scale_key) if scale_key else None
     return scales.transform(symbol, target, spots, bases)
 

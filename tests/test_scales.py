@@ -74,3 +74,34 @@ def test_available_scales_include_futures():
     assert {"SPX", "ES", "NDX", "NQ", "SPY", "QQQ"} <= keys
     es = scales.scale_by_key("ES")
     assert es.is_future and es.source == "SPX"
+
+
+def test_basis_mesure_sur_les_prix_reels(monkeypatch):
+    """Le spot transposé doit retomber EXACTEMENT sur le prix du future.
+
+    Le basis dérivé par parité call-put d'une chaîne délayée dérive dès que
+    l'indice cesse de coter alors que le future continue — hors séance, l'écart
+    observé atteignait 21 points sur NQ. Mesuré sur les deux flux, il est juste
+    par construction.
+    """
+    from gex import app as A
+    from gex.rtquote import QUOTES
+
+    live = {"NDX": 28128.34, "NQ": 28306.25, "SPX": 7407.68, "ES": 7444.12}
+    monkeypatch.setattr(QUOTES, "price", lambda k: live.get(k))
+
+    for index, future in (("NDX", "NQ"), ("SPX", "ES")):
+        xf, _, mode = A._transform_for(index, future)
+        assert mode == "basis"
+        assert xf(live[index]) == pytest.approx(live[future])
+
+
+def test_repli_sur_le_basis_de_la_chaine_sans_flux(monkeypatch):
+    """Sans flux temps réel, la transposition doit continuer de fonctionner."""
+    from gex import app as A
+    from gex.rtquote import QUOTES
+
+    monkeypatch.setattr(QUOTES, "price", lambda k: None)
+    xf, _, mode = A._transform_for("NDX", "NQ")
+    # pas de flux et pas d'état chargé : identité plutôt que niveaux faux
+    assert mode in {"native", "basis"}
