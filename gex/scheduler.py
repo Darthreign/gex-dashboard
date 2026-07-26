@@ -15,7 +15,7 @@ from datetime import UTC, datetime, time
 import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from . import metrics, store
+from . import backup, metrics, store
 from .config import SETTINGS, UNDERLYINGS
 from .ingest import ChainSnapshot, fetch_chain
 from .metrics import ET, SummaryMetrics
@@ -208,6 +208,10 @@ def start_scheduler() -> BackgroundScheduler:
     # fois close, ce décalage borne simplement la perte en cas d'arrêt brutal.
     sched.add_job(flush_prices, "interval", seconds=30, max_instances=1, coalesce=True)
     sched.add_job(push_data_repo, "cron", day_of_week="mon-fri", hour=16, minute=20)
+    # Sauvegarde distante après le push git : elle porte ce que GitHub refuse
+    # (archives Databento de plus de 100 Mo). Sans rclone configuré, l'appel
+    # journalise et se retire.
+    sched.add_job(backup.run, "cron", day_of_week="mon-fri", hour=16, minute=30)
     sched.start()
     # Premier pull immédiat (même hors marché : affiche le dernier état connu).
     threading.Thread(target=pull_all, kwargs={"force": True}, daemon=True).start()
