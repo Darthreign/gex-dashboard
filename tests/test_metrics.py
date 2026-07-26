@@ -375,11 +375,21 @@ def test_gap_de_futures_ninvalide_pas_les_murs():
     Support d'origine au profit d'un strike plus haut — le plan bâti la veille
     est invalidé avant même que le cash n'ouvre.
     """
-    df = _chain_pour_murs()
+    # un strike lourdement chargé en puts JUSTE AU-DESSUS de la clôture : il
+    # devient éligible dès que le prix passe dessus, et rafle le support
+    rows = []
+    for k, oi_c, oi_p in [(7350, 500, 4000), (7400, 800, 6000),
+                          (7450, 900, 9000), (7500, 3000, 400)]:
+        for typ, oi in (("C", oi_c), ("P", oi_p)):
+            rows.append({"strike": float(k), "type": typ, "iv": 0.15,
+                         "t_years": 0.02, "open_interest": float(oi),
+                         "volume": 100.0,
+                         "expiry": pd.Timestamp("2026-07-27").date(), "gex": 0.0})
+    df = pd.DataFrame(rows)
     ref = 7400.0
-    a_la_cloture = metrics.key_levels(df, ref, ref_spot=ref)
-    apres_gap = metrics.key_levels(df, ref * 1.012, ref_spot=ref)
-    assert a_la_cloture["put_support"] != apres_gap["put_support"]
-    # c'est bien le spot passé qui décide : en le figeant à la clôture,
-    # les niveaux de la veille survivent au gap
-    assert metrics.key_levels(df, ref, ref_spot=ref) == a_la_cloture
+
+    fige = metrics.key_levels(df, ref, ref_spot=ref)
+    suit_le_gap = metrics.key_levels(df, ref * 1.012, ref_spot=ref)
+    assert fige["put_support"] == 7400.0
+    assert suit_le_gap["put_support"] == 7450.0, (
+        "le gap déplace bien le support quand on lui passe le prix du future")
