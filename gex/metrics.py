@@ -65,6 +65,10 @@ def enrich(snapshot: ChainSnapshot, now_et: datetime | None = None) -> pd.DataFr
     sign = np.where(is_call, 1.0, -1.0)
     df["gex"] = sign * g * oi * CONTRACT_MULTIPLIER * s**2 * 0.01
     df["dex"] = d * oi * CONTRACT_MULTIPLIER * s
+    # Spot répété sur chaque ligne : un snapshot persisté devient ainsi
+    # auto-suffisant, et le backtest peut en recalculer les niveaux sans aller
+    # chercher le prix ailleurs. Une constante ne coûte rien en Parquet.
+    df["spot"] = float(s)
     return df
 
 
