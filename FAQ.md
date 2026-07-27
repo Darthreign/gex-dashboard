@@ -21,8 +21,10 @@ directement l'endpoint public, gratuitement.
 
 ### Pourquoi un délai de 15 minutes ?
 
-C'est le délai de la source gratuite CBOE. Le temps réel exige une licence
-professionnelle facturée plusieurs centaines de dollars par mois.
+C'est le délai de la source gratuite et publique de CBOE. *Rediffuser* du
+temps réel exigerait une licence professionnelle coûteuse — mais pour un usage
+personnel, un compte courtier suffit (voir
+[Temps réel via un compte courtier](#temps-réel-via-un-compte-courtier-gratuit-avec-le-compte)).
 
 **En pratique, ça compte beaucoup moins qu'on l'imagine** : la métrique
 centrale de tout l'outil — l'open interest — n'est publiée **qu'une fois par
@@ -228,13 +230,33 @@ Nécessite un compte Databento et la variable d'environnement
 « temps réel » pendant environ un jour ouvré. Une erreur de licence sur la
 veille est normale — il suffit d'attendre.
 
-### Temps réel via un compte courtier
+### Temps réel via un compte courtier (gratuit avec le compte)
 
-Un compte courtier donnant accès à un flux de données options en temps réel
-permettrait un flux delta réellement signé (classification achat/vente).
+Un compte courtier donnant accès à dxFeed — le dashboard est écrit pour
+tastytrade, qui inclut ces données sans supplément — fait passer en direct :
+
+- le **spot** des sous-jacents et des futures ;
+- le **GEX net recalculé à ce spot**, donc la distance au Gamma Flip et la
+  lecture du régime, qui se périment en quelques minutes ;
+- l'enregistrement de **bougies à la minute**, et la récupération de plusieurs
+  semaines d'**historique** en une passe.
+
+**Les chaînes d'options restent délayées** : elles continuent de venir de CBOE.
+Les murs de gamma et le Gamma Flip ne bougent pas davantage pour autant,
+puisqu'ils reposent sur l'open interest publié une fois par jour.
+
+Mise en place : créer une application OAuth depuis les paramètres du compte,
+lancer `python -m gex.tt_auth` pour obtenir un jeton, puis renseigner
+`TASTYTRADE_CLIENT_ID`, `TASTYTRADE_CLIENT_SECRET` et `TT_REFRESH` en variables
+d'environnement — jamais dans un fichier du dépôt. Sans ces variables, le
+module reste inerte et rien ne change.
+
+Ouvrir un compte de courtage est une démarche personnelle et engageante ; le
+dashboard fonctionne parfaitement sans, et ceci n'est pas une recommandation.
 
 **Ces données ne sont jamais redistribuables** : elles restent sur l'instance
-locale de leur titulaire et ne peuvent pas être partagées.
+locale de leur titulaire. Le programme applique la règle par construction —
+provenance marquée à l'écriture, et export limité aux seules données CBOE.
 
 ---
 

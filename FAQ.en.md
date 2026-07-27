@@ -19,8 +19,9 @@ endpoint directly, for free.
 
 ### Why a 15-minute delay?
 
-That's the delay on CBOE's free tier. Real-time access requires a professional
-licence costing several hundred dollars a month.
+That's the delay on CBOE's free public feed. *Redistributing* real-time data
+would require an expensive professional licence — but for personal use, a broker
+account is enough (see [Real time via a broker account](#real-time-via-a-broker-account-included-with-the-account)).
 
 **In practice it matters far less than you'd think**: the metric everything is
 built on — open interest — is published **only once a day**, in the morning, by
@@ -220,13 +221,32 @@ Worth knowing: the most recent session's data stays under a "live" licence for
 about one business day. A licence error on yesterday's data is normal — just
 wait.
 
-### Real time via a broker account
+### Real time via a broker account (included with the account)
 
-A broker account providing a real-time options data feed would enable a
-genuinely signed delta flow (buy/sell classification).
+A broker account with dxFeed access — the dashboard is written for tastytrade,
+which includes this data at no extra cost — makes the following live:
 
-**That data is never redistributable**: it stays on its holder's local instance
-and cannot be shared.
+- the **spot** of underlyings and futures;
+- **net GEX recomputed at that spot**, hence the distance to the Gamma Flip and
+  the regime read, which go stale within minutes;
+- **1-minute bar** recording, and several weeks of **history** retrievable in
+  one pass.
+
+**Option chains stay delayed**: they still come from CBOE. Gamma walls and the
+Gamma Flip do not move any more for it, since they rest on open interest
+published once a day.
+
+Setup: create an OAuth application from the account settings, run
+`python -m gex.tt_auth` to obtain a token, then set `TASTYTRADE_CLIENT_ID`,
+`TASTYTRADE_CLIENT_SECRET` and `TT_REFRESH` as environment variables — never in
+a repository file. Without them the module stays inert and nothing changes.
+
+Opening a brokerage account is a personal and consequential step; the dashboard
+works perfectly without one, and this is not a recommendation.
+
+**That data is never redistributable**: it stays on its holder's local instance.
+The program enforces this by construction — provenance stamped at write time,
+and export restricted to CBOE-sourced data only.
 
 ---
 

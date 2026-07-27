@@ -192,10 +192,12 @@ python -m venv .venv</pre>
 
 <details><summary><span data-lang="fr">Pourquoi un délai de 15 minutes ?</span><span data-lang="en">Why a 15-minute delay?</span></summary>
 <div class="body">
-<p><span data-lang="fr">C'est le délai de la source gratuite. Le temps réel exige une licence
-  professionnelle à plusieurs centaines de dollars par mois.</span>
-  <span data-lang="en">That's the delay on the free tier. Real time requires a professional
-  licence costing several hundred dollars a month.</span></p>
+<p><span data-lang="fr">C'est le délai de la source gratuite et publique. Le <em>rediffuser</em>
+  en temps réel exigerait une licence professionnelle coûteuse — mais pour un usage personnel, un
+  compte courtier suffit (voir <a href="#realtime">plus bas</a>).</span>
+  <span data-lang="en">That's the delay on the free public feed. <em>Redistributing</em> real-time
+  data would require an expensive professional licence — but for personal use, a broker account is
+  enough (see <a href="#realtime">below</a>).</span></p>
 <p><span data-lang="fr">Mais <strong>ça compte beaucoup moins qu'on l'imagine</strong> : la métrique
   centrale de l'outil — l'open interest — n'est publiée <strong>qu'une fois par jour</strong> par
   l'OCC. Les murs de gamma et le Gamma Flip en découlent et bougent donc très peu en séance.
@@ -301,6 +303,93 @@ python -m venv .venv</pre>
   walls and the flip rest on open interest, published once a day, pasting at the open holds for the
   session — re-copy after a sharp move if you want it fresh. The same string is the workaround on any
   platform that blocks outbound network calls (Tradovate, for one).</span></p>
+</div></details>
+
+<h2 id="realtime"><span data-lang="fr">Passer en temps réel (optionnel)</span><span data-lang="en">Going real-time (optional)</span></h2>
+
+<details><summary><span data-lang="fr">Qu'est-ce qui devient temps réel, et qu'est-ce qui reste délayé ?</span><span data-lang="en">What becomes real-time, and what stays delayed?</span></summary>
+<div class="body">
+<p><span data-lang="fr">La distinction est essentielle : <strong>seuls les prix passent en direct, pas
+  les chaînes d'options</strong>. Celles-ci continuent de venir de CBOE avec 15 minutes de retard.</span>
+  <span data-lang="en">The distinction matters: <strong>only prices go live, not the option chains</strong>.
+  Those still come from CBOE with a 15-minute delay.</span></p>
+<p><span data-lang="fr">Ce que le temps réel apporte concrètement : le <strong>spot</strong> des
+  sous-jacents et des futures, le <strong>GEX net recalculé à ce spot</strong> — donc la distance au
+  Gamma Flip et la lecture du régime, qui se périment en quelques minutes — un enregistrement de
+  <strong>bougies à la minute</strong>, et un <strong>historique</strong> de plusieurs semaines
+  récupérable d'un coup.</span>
+  <span data-lang="en">What real time actually buys you: the <strong>spot</strong> of underlyings and
+  futures, <strong>net GEX recomputed at that spot</strong> — hence the distance to the Gamma Flip and
+  the regime read, which go stale within minutes — a <strong>1-minute bar</strong> recording, and
+  several weeks of <strong>history</strong> retrievable in one pass.</span></p>
+<p><span data-lang="fr">Ce que ça n'apporte pas : les murs de gamma et le Gamma Flip ne bougent pas
+  davantage pour autant. Ils reposent sur l'open interest, publié une fois par jour — les rafraîchir
+  plus vite n'aurait aucun sens.</span>
+  <span data-lang="en">What it does not buy you: gamma walls and the Gamma Flip do not move any more
+  for it. They rest on open interest, published once a day — refreshing them faster would be
+  meaningless.</span></p>
+</div></details>
+
+<details><summary><span data-lang="fr">Comment l'activer ?</span><span data-lang="en">How do I enable it?</span></summary>
+<div class="body">
+<p><span data-lang="fr">Le flux temps réel vient de <strong>dxFeed</strong>, auquel on accède par un
+  compte courtier — le dashboard est écrit pour <a href="https://tastytrade.com" target="_blank" rel="noopener">tastytrade</a>,
+  qui inclut ces données sans supplément. Ouvrir un compte de courtage est une démarche personnelle
+  et engageante ; le dashboard fonctionne parfaitement sans, et rien ici n'est une recommandation
+  d'en ouvrir un.</span>
+  <span data-lang="en">The real-time feed comes from <strong>dxFeed</strong>, reached through a broker
+  account — the dashboard is written for <a href="https://tastytrade.com" target="_blank" rel="noopener">tastytrade</a>,
+  which includes this data at no extra cost. Opening a brokerage account is a personal and consequential
+  step; the dashboard works perfectly without one, and nothing here is a recommendation to open one.</span></p>
+<p><span data-lang="fr">Une fois le compte ouvert, la mise en place tient en trois étapes :</span>
+  <span data-lang="en">Once the account exists, setup is three steps:</span></p>
+<ol>
+  <li><span data-lang="fr">Créer une application OAuth depuis les paramètres du compte, ce qui donne un
+    identifiant et un secret.</span>
+    <span data-lang="en">Create an OAuth application from the account settings, which yields a client id
+    and secret.</span></li>
+  <li><span data-lang="fr">Lancer <code>python -m gex.tt_auth</code> : le script affiche une URL à
+    ouvrir, tu approuves dans ton navigateur, et il en tire un jeton de rafraîchissement.</span>
+    <span data-lang="en">Run <code>python -m gex.tt_auth</code>: it prints a URL to open, you approve in
+    your browser, and it derives a refresh token.</span></li>
+  <li><span data-lang="fr">Placer <code>TASTYTRADE_CLIENT_ID</code>, <code>TASTYTRADE_CLIENT_SECRET</code>
+    et <code>TT_REFRESH</code> en variables d'environnement.</span>
+    <span data-lang="en">Put <code>TASTYTRADE_CLIENT_ID</code>, <code>TASTYTRADE_CLIENT_SECRET</code> and
+    <code>TT_REFRESH</code> into environment variables.</span></li>
+</ol>
+<p class="note"><span data-lang="fr">Ces trois valeurs sont des <strong>identifiants d'accès à un compte
+  de courtage</strong> : elles n'ont rien à faire dans un fichier du dépôt, ni dans une capture d'écran,
+  ni dans une conversation. En variables d'environnement, et nulle part ailleurs.</span>
+  <span data-lang="en">Those three values are <strong>credentials to a brokerage account</strong>: they do
+  not belong in a repository file, a screenshot, or a conversation. Environment variables, nowhere
+  else.</span></p>
+<p><span data-lang="fr">Au démarrage suivant, une pastille <strong>dxFeed</strong> apparaît en haut à
+  droite — verte si le flux tient, orange s'il décroche, rouge s'il est coupé. Sans identifiants, elle
+  reste masquée et rien ne change.</span>
+  <span data-lang="en">On the next start, a <strong>dxFeed</strong> badge appears at the top right — green
+  while the feed holds, amber if it lags, red if it drops. Without credentials it stays hidden and
+  nothing changes.</span></p>
+</div></details>
+
+<details><summary><span data-lang="fr">Puis-je partager ces données ?</span><span data-lang="en">Can I share that data?</span></summary>
+<div class="body">
+<p><span data-lang="fr"><strong>Non.</strong> Les cotations courtier sont sous licence d'usage personnel :
+  tu peux les afficher et les enregistrer chez toi, pas les rediffuser. C'est aussi vrai d'un dépôt privé
+  destiné à d'autres personnes que toi.</span>
+  <span data-lang="en"><strong>No.</strong> Broker quotes are licensed for personal use: you may display and
+  store them locally, not redistribute them. That includes a private repository shared with anyone but
+  yourself.</span></p>
+<p><span data-lang="fr">Le programme applique cette règle par construction. Les bougies sont écrites dans
+  <code>data/prices/</code> avec une provenance marquée à l'écriture, et la fonction d'export ne laisse
+  passer que les données issues de CBOE — tout le reste est écarté par défaut, y compris si une source
+  nouvelle apparaissait demain.</span>
+  <span data-lang="en">The program enforces this by construction. Bars land in <code>data/prices/</code> with
+  provenance stamped at write time, and the export function only lets CBOE-sourced data through — everything
+  else is excluded by default, including any source added later.</span></p>
+<p class="note"><span data-lang="fr">Conséquence à assumer : si tu partages ton instance avec des amis, la
+  leur restera en délayé. Le <strong>code</strong> se partage, pas les données.</span>
+  <span data-lang="en">A consequence to accept: if you share your instance with friends, theirs stays delayed.
+  The <strong>code</strong> is shareable, the data is not.</span></p>
 </div></details>
 
 <h2 id="levels"><span data-lang="fr">Les niveaux</span><span data-lang="en">The levels</span></h2>
