@@ -131,6 +131,32 @@ def load_last_snapshot(symbol: str, day: str) -> pd.DataFrame | None:
     return pd.read_parquet(files[-1]) if files else None
 
 
+def load_latest_snapshot(symbol: str) -> tuple[pd.DataFrame, datetime] | None:
+    """Dernier snapshot toutes séances confondues, avec son horodatage (naïf
+    en ET, comme le reste du feed — cf. gex.metrics.ET).
+
+    Sert à réamorcer STATE au démarrage sans redéclencher une collecte
+    complète si la donnée persistée est encore fraîche (cf.
+    scheduler.pull_native_options) : un redémarrage du process perd STATE
+    (mémoire pure) même quand le disque a une donnée vieille de quelques
+    minutes seulement.
+    """
+    days = snapshot_days(symbol)
+    if not days:
+        return None
+    day = days[-1]
+    root = SETTINGS.data_dir / "snapshots" / symbol / day
+    files = sorted(root.glob("*.parquet")) if root.exists() else []
+    if not files:
+        return None
+    f = files[-1]
+    try:
+        ts = datetime.strptime(f"{day} {f.stem}", "%Y-%m-%d %H%M%S")
+    except ValueError:
+        return None
+    return pd.read_parquet(f), ts
+
+
 def load_first_snapshot(symbol: str, day: str) -> pd.DataFrame | None:
     """Premier snapshot de la séance — celui sur lequel un plan se construit.
 

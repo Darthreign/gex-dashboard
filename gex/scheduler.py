@@ -211,13 +211,39 @@ def build_native_summary(code: str, df: pd.DataFrame,
     return snap, summary
 
 
+NATIVE_CACHE_FRESH_S = 300  # cf. pull_native_options : redémarrer perd STATE,
+# pas le disque — inutile de rejouer ~90-280 s de collecte dxFeed pour une
+# donnée qui a moins de 5 min.
+
+
+def _seed_native_state(code: str, df: pd.DataFrame, ts: datetime) -> SummaryMetrics:
+    """Construit (ChainSnapshot, SummaryMetrics) depuis `df`/`ts` et peuple
+    STATE — factorisé entre le chemin cache et le chemin collecte live."""
+    snap, summary = build_native_summary(code, df, ts)
+    st = STATE.get(code)
+    with STATE.lock:
+        st.snapshot = snap
+        st.enriched = df
+        st.summary = summary
+        st.last_feed_ts = snap.feed_timestamp
+    return summary
+
+
 def pull_native_options() -> None:
     """Chaînes d'options natives NQ et ES : construit, met à jour STATE, et
     persiste — sans identifiants courtier, ne fait rien.
 
-    Coûte du temps (~90 s par sous-jacent, dominé par le rythme de livraison
-    du serveur, pas par notre code) : APScheduler l'exécute dans son propre
-    thread, ce qui ne retarde pas les pulls CBOE de 60 s.
+    Coûte du temps (~90-280 s par sous-jacent, dominé par le rythme de
+    livraison du serveur, pas par notre code) : APScheduler l'exécute dans
+    son propre thread, ce qui ne retarde pas les pulls CBOE de 60 s.
+
+    Avant de payer ce coût, on regarde si un snapshot persisté a moins de
+    `NATIVE_CACHE_FRESH_S` : un redémarrage du process perd STATE (mémoire
+    pure) mais pas le disque — sans ce court-circuit, chaque redémarrage
+    (déploiement, crash) rejouait une collecte complète même si la dernière
+    date d'il y a deux minutes. La cadence normale (15 min) dépasse toujours
+    ce seuil, donc ce court-circuit ne saute jamais un vrai cycle de
+    rafraîchissement, seulement les redémarrages rapprochés.
 
     Limite connue : ne calcule pas de flux delta (`flow_delta` suppose une
     colonne `contract` façon CBOE, absente ici) — les onglets Flux et Gamma
@@ -228,20 +254,23 @@ def pull_native_options() -> None:
     if not credentials_present():
         return
     for code in ("NQ", "ES"):
+        cached = store.load_latest_snapshot(code)
+        if cached is not None:
+            df_cached, ts = cached
+            age_s = (datetime.now(ET) - ts.replace(tzinfo=ET)).total_seconds()
+            if 0 <= age_s < NATIVE_CACHE_FRESH_S:
+                _seed_native_state(code, df_cached, ts.replace(tzinfo=ET))
+                log.info("%s (natif) : cache de %.0f s, collecte live sautée",
+                         code, age_s)
+                continue
         try:
             df = futopt.build_native_chain(code)
             if df is None or df.empty:
                 continue
             now = datetime.now(ET)
-            snap, summary = build_native_summary(code, df, now)
             store.save_snapshot(code, df, now)
+            summary = _seed_native_state(code, df, now)
             store.append_history(summary.as_row())
-            st = STATE.get(code)
-            with STATE.lock:
-                st.snapshot = snap
-                st.enriched = df
-                st.summary = summary
-                st.last_feed_ts = snap.feed_timestamp
             log.info("%s (natif) pull ok — spot=%.2f netGEX=%.2f Bn zeroG=%s",
                      code, summary.spot, summary.net_gex / 1e9,
                      f"{summary.zero_gamma:.0f}" if summary.zero_gamma else "n/a")

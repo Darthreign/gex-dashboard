@@ -7,12 +7,12 @@ dashboard sans transformation supplémentaire.
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import pytest
 
-from gex import scheduler
+from gex import scheduler, store
 from gex.metrics import ET
 
 
@@ -79,3 +79,53 @@ def test_summary_source_dxfeed_exclue_de_lexport(tmp_path, monkeypatch):
     if hist_path.exists():
         exported = pd.read_parquet(hist_path)
         assert "NQ" not in set(exported["symbol"])
+
+
+def test_pull_native_options_cache_frais_evite_la_collecte_live(tmp_path, monkeypatch):
+    """Un redémarrage perd STATE (mémoire) mais pas le disque : si le dernier
+    snapshot persisté a moins de NATIVE_CACHE_FRESH_S, pull_native_options ne
+    doit PAS relancer une collecte dxFeed (~90-280 s) — juste réamorcer STATE
+    depuis ce qui est déjà sur disque."""
+    from gex.config import SETTINGS
+
+    monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
+    monkeypatch.setattr(scheduler, "credentials_present", lambda: True)
+    called = []
+    monkeypatch.setattr(scheduler.futopt, "build_native_chain",
+                        lambda code, **kw: called.append(code) or _native_chain())
+
+    now = datetime.now(ET)
+    fresh_ts = now - timedelta(seconds=60)
+    store.save_snapshot("NQ", _native_chain(), fresh_ts)
+    store.save_snapshot("ES", _native_chain(), fresh_ts)
+
+    scheduler.pull_native_options()
+
+    assert called == []  # aucune collecte live déclenchée pour l'un ou l'autre
+    assert scheduler.STATE.get("NQ").summary is not None
+    assert scheduler.STATE.get("ES").summary is not None
+
+
+def test_pull_native_options_cache_perime_relance_la_collecte(tmp_path, monkeypatch):
+    """Symétrique : passé le seuil de fraîcheur, la collecte live doit bien
+    repartir — le court-circuit ne doit jamais masquer une vraie donnée
+    périmée."""
+    from gex.config import SETTINGS
+
+    monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
+    monkeypatch.setattr(scheduler, "credentials_present", lambda: True)
+    called = []
+
+    def _fake_build(code, **kw):
+        called.append(code)
+        return _native_chain()
+
+    monkeypatch.setattr(scheduler.futopt, "build_native_chain", _fake_build)
+
+    stale_ts = datetime.now(ET) - timedelta(seconds=scheduler.NATIVE_CACHE_FRESH_S + 60)
+    store.save_snapshot("NQ", _native_chain(), stale_ts)
+    store.save_snapshot("ES", _native_chain(), stale_ts)
+
+    scheduler.pull_native_options()
+
+    assert called == ["NQ", "ES"]
