@@ -125,12 +125,11 @@ TR: dict[str, dict[str, str]] = {
         "regime_accel_modere": "Régime accélérateur (gamma négatif) : un mouvement s'auto-"
                         "entretient une fois lancé. Delta dealers {sens_delta} (pression de "
                         "couverture {pression}) : biais {biais} si un mouvement démarre. "
-                        "Rester prudent, une approche contrarian est exposée à ce régime.",
+                        "Rester prudent, le fading est risqué dans ce régime.",
         "regime_accel_fort": "Régime accélérateur (gamma négatif) ET forte pression de "
                         "couverture {pression} des dealers (delta {sens_delta}) : les deux "
                         "mécaniques s'additionnent. Risque élevé de mouvement {biais} "
-                        "auto-entretenu — une approche contrarian y est particulièrement "
-                        "exposée.",
+                        "auto-entretenu — le fading y est particulièrement risqué.",
         "regime_disclaimer": "Lecture mécanique de la couverture dealers, pas un signal "
                         "d'entrée ni une direction garantie.",
     },
@@ -248,12 +247,12 @@ TR: dict[str, dict[str, str]] = {
                         "in the background, mild {biais} bias if the range breaks.",
         "regime_accel_modere": "Accelerating regime (negative gamma): a move feeds on itself "
                         "once started. Dealer delta {sens_delta} (latent {pression} pressure): "
-                        "{biais} bias if a move starts. Stay cautious, fading this regime is "
-                        "exposed.",
+                        "{biais} bias if a move starts. Stay cautious, fading is risky in this "
+                        "regime.",
         "regime_accel_fort": "Accelerating regime (negative gamma) AND strong latent {pression} "
                         "pressure from dealers (delta {sens_delta}): both mechanics add up. High "
-                        "risk of a self-reinforcing {biais} move — a contrarian approach is "
-                        "particularly exposed here.",
+                        "risk of a self-reinforcing {biais} move — fading is particularly risky "
+                        "here.",
         "regime_disclaimer": "A mechanical read of dealer hedging, not an entry signal or a "
                         "guaranteed direction.",
     },
