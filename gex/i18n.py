@@ -111,6 +111,7 @@ TR: dict[str, dict[str, str]] = {
         "scale_cross": "⚠ transposition croisée en {scale} (ratio ×{ratio}) — "
                        "repère instantané, le ratio dérive dans le temps",
         "flow_day_label": "Jour de flux :",
+        "gflow_series_label": "Séries :",
         "last_session": "Dernière séance",
         "footer": "Données CBOE delayed (~15 min) — outil d'analyse, pas d'exécution.",
         "hover_strike": "Strike",
@@ -235,6 +236,7 @@ TR: dict[str, dict[str, str]] = {
         "scale_cross": "⚠ cross-family transposition to {scale} (ratio ×{ratio}) — "
                        "instantaneous reference, the ratio drifts over time",
         "flow_day_label": "Flow day:",
+        "gflow_series_label": "Series:",
         "last_session": "Last session",
         "footer": "CBOE delayed data (~15 min) — analysis tool, not for execution.",
         "hover_strike": "Strike",

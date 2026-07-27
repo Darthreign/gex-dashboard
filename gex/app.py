@@ -447,7 +447,8 @@ def _price_overlay(symbol: str, day: str) -> pd.DataFrame | None:
     return sel[["timestamp", "spot"]].rename(columns={"spot": "close"})
 
 
-def gamma_flow_fig(symbol: str, lang: str, day: str | None = None) -> go.Figure:
+def gamma_flow_fig(symbol: str, lang: str, day: str | None = None,
+                   series: list[str] | None = None) -> go.Figure:
     """Gamma échangé cumulé sur la séance, calls contre puts.
 
     L'équivalent d'un CVD appliqué au gamma : chaque pas de temps ajoute le
@@ -465,20 +466,24 @@ def gamma_flow_fig(symbol: str, lang: str, day: str | None = None) -> go.Figure:
     if flows.empty or "gflow_calls" not in flows.columns:
         # colonnes absentes = journée collectée avant l'ajout de cette mesure
         return empty_fig(t(lang, "no_flow_day", day=day), title)
+    series = series if series is not None else ["calls", "puts", "net"]
     ts = to_local(flows["timestamp"])
     calls = np.cumsum(flows["gflow_calls"].fillna(0.0).to_numpy()) / 1e9
     puts = np.cumsum(flows["gflow_puts"].fillna(0.0).to_numpy()) / 1e9
     net = calls + puts
 
     fig = go.Figure()
-    for y, name, color in ((calls, t(lang, "legend_gcalls"), C["pos"]),
-                           (puts, t(lang, "legend_gputs"), C["neg"])):
+    for key, y, name, color in (("calls", calls, t(lang, "legend_gcalls"), C["pos"]),
+                                ("puts", puts, t(lang, "legend_gputs"), C["neg"])):
+        if key not in series:
+            continue
         fig.add_scatter(x=ts, y=y, mode="lines", name=name,
                         line=dict(color=color, width=1.5),
                         hovertemplate=f"%{{x|%H:%M}}<br>{name}: %{{y:+.2f}} $Bn<extra></extra>")
-    fig.add_scatter(x=ts, y=net, mode="lines", name=t(lang, "legend_gnet"),
-                    line=dict(color=C["ink"], width=2),
-                    hovertemplate=f"%{{x|%H:%M}}<br>{t(lang, 'legend_gnet')}: %{{y:+.2f}} $Bn<extra></extra>")
+    if "net" in series:
+        fig.add_scatter(x=ts, y=net, mode="lines", name=t(lang, "legend_gnet"),
+                        line=dict(color=C["ink"], width=2),
+                        hovertemplate=f"%{{x|%H:%M}}<br>{t(lang, 'legend_gnet')}: %{{y:+.2f}} $Bn<extra></extra>")
     lay = with_legend(base_layout(title, height=320))
     lay["yaxis"]["title"] = dict(text=t(lang, "axis_gflow_bn"),
                                  font=dict(color=C["muted"]))
@@ -960,6 +965,11 @@ def create_app() -> Dash:
                     html.Button(id="flow-today", n_clicks=0, className="btn"),
                 ], className="daybar"),
                 dcc.Graph(config=GRAPH_CONFIG, id="flow", style={"marginBottom": "12px"}),
+                html.Div([
+                    html.Span(id="lbl-gflow-series", className="ctl-label"),
+                    dcc.Checklist(id="gflow-series", className="check", inline=True,
+                                 value=["calls", "puts", "net"]),
+                ], className="daybar"),
                 dcc.Graph(config=GRAPH_CONFIG, id="gflow", style={"marginBottom": "12px"}),
                 html.Div([
                     dcc.Graph(config=GRAPH_CONFIG, id="gex-history"),
@@ -1078,12 +1088,16 @@ def create_app() -> Dash:
          Output("footer", "children"), Output("unit", "options"),
          Output("app-title", "children"),
          Output("lbl-bucket", "children"), Output("lbl-window", "children"),
-         Output("unit", "value")],
+         Output("unit", "value"),
+         Output("lbl-gflow-series", "children"), Output("gflow-series", "options")],
         [Input("lang", "value"), Input("symbol", "value")],
     )
     def apply_lang(lang, symbol):
         bucket_opts = [{"label": t(lang, BUCKET_KEYS[b]), "value": b} for b in EXPIRY_BUCKETS]
         majors_opts = [{"label": t(lang, "majors_only"), "value": "on"}]
+        gflow_series_opts = [{"label": t(lang, "legend_gcalls"), "value": "calls"},
+                             {"label": t(lang, "legend_gputs"), "value": "puts"},
+                             {"label": t(lang, "legend_gnet"), "value": "net"}]
         # échelles : le sous-jacent natif, puis les deux futures (la
         # transposition croisée SPX→NQ est le cas d'usage visé). Pour NQ/ES
         # eux-mêmes (chaîne native, pas transposée), la question ne se pose
@@ -1099,7 +1113,8 @@ def create_app() -> Dash:
         return (bucket_opts, majors_opts, t(lang, "flow_day_label"),
                 t(lang, "last_session"), t(lang, "footer"), opts,
                 t(lang, "app_title"),
-                t(lang, "lbl_expiry"), t(lang, "lbl_window"), symbol)
+                t(lang, "lbl_expiry"), t(lang, "lbl_window"), symbol,
+                t(lang, "gflow_series_label"), gflow_series_opts)
 
     @app.callback(
         [Output("brand-sub", "children"), Output("rt-badge", "style"),
@@ -1151,9 +1166,10 @@ def create_app() -> Dash:
         [Input("tick", "n_intervals"), Input("symbol", "value"),
          Input("bucket", "value"), Input("window", "value"),
          Input("majors", "value"), Input("flow-day", "value"),
-         Input("lang", "value"), Input("unit", "value")],
+         Input("lang", "value"), Input("unit", "value"),
+         Input("gflow-series", "value")],
     )
-    def refresh(_, symbol, bucket, window, majors, flow_day, lang, unit):
+    def refresh(_, symbol, bucket, window, majors, flow_day, lang, unit, gflow_series):
         st = STATE.get(symbol)
         with STATE.lock:
             df = st.enriched
@@ -1211,7 +1227,8 @@ def create_app() -> Dash:
                               hvl=hvl, window=window, xf=xf, keys=keys,
                               level_set="regime"), rev),
             _pin(flow_fig(symbol, lang, flow_day), f"{symbol}-{flow_day}"),
-            _pin(gamma_flow_fig(symbol, lang, flow_day), f"g{symbol}-{flow_day}"),
+            _pin(gamma_flow_fig(symbol, lang, flow_day, gflow_series),
+                f"g{symbol}-{flow_day}-{gflow_series}"),
             _pin(history_fig(symbol, lang), symbol),
             _pin(spot_zg_fig(symbol, lang), symbol),
             _pin(smile_fig(sel, snap.spot, lang), rev),
