@@ -19,7 +19,8 @@ from . import backup, metrics, store
 from .config import SETTINGS, UNDERLYINGS
 from .ingest import ChainSnapshot, fetch_chain
 from .metrics import ET, SummaryMetrics
-from .rtquote import QUOTES
+from . import futopt
+from .rtquote import QUOTES, credentials_present
 
 log = logging.getLogger(__name__)
 
@@ -169,6 +170,23 @@ def push_data_repo() -> None:
         log.exception("Échec du push du repo data — données locales intactes")
 
 
+def pull_native_options() -> None:
+    """Chaînes d'options natives NQ et ES, pour les niveaux qui leur sont
+    propres (cf. gex/futopt.py) — sans identifiants, ne fait rien.
+
+    Coûte du temps (~90 s par sous-jacent, dominé par le rythme de livraison
+    du serveur, pas par notre code) : APScheduler l'exécute dans son propre
+    thread, ce qui ne retarde pas les pulls CBOE de 60 s.
+    """
+    if not credentials_present():
+        return
+    for code in ("NQ", "ES"):
+        try:
+            futopt.pull_native(code)
+        except Exception:  # noqa: BLE001 — un échec ne doit rien casser d'autre
+            log.exception("%s : échec de la collecte native", code)
+
+
 def flush_prices() -> None:
     """Écrit sur disque les bougies 1 min achevées par le flux temps réel.
 
@@ -207,6 +225,11 @@ def start_scheduler() -> BackgroundScheduler:
     # Vidange plus fréquente que la minute : une bougie n'est écrite qu'une
     # fois close, ce décalage borne simplement la perte en cas d'arrêt brutal.
     sched.add_job(flush_prices, "interval", seconds=30, max_instances=1, coalesce=True)
+    # Options natives NQ/ES : cadence lâche (chaque cycle prend lui-même
+    # ~90 s x 2), max_instances=1 empêche un cycle en cours d'en chevaucher
+    # un autre si jamais il dépassait l'intervalle.
+    sched.add_job(pull_native_options, "interval", minutes=15,
+                  max_instances=1, coalesce=True)
     sched.add_job(push_data_repo, "cron", day_of_week="mon-fri", hour=16, minute=20)
     # Sauvegarde distante après le push git : elle porte ce que GitHub refuse
     # (archives Databento de plus de 100 Mo). Sans rclone configuré, l'appel
