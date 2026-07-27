@@ -129,6 +129,14 @@ async def fetch(stream_symbols: dict[str, str], days: int,
                 raw = await asyncio.wait_for(ws.recv(), timeout=IDLE_TIMEOUT_S)
             except asyncio.TimeoutError:
                 break            # plus rien n'arrive : historique complet
+            except websockets.exceptions.ConnectionClosed:
+                # dxFeed clôt parfois la connexion une fois l'historique livré,
+                # ou quand une autre session utilise le même jeton. Dans les
+                # deux cas ce qui est déjà arrivé reste valable : on le garde
+                # plutôt que de tout perdre sur une exception.
+                log.info("Connexion fermée par dxFeed — %d symboles reçus",
+                         len(rows))
+                break
             m = json.loads(raw)
             typ = m.get("type")
             if typ == "AUTH_STATE":
