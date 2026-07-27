@@ -42,6 +42,14 @@ class Underlying:
     # Cibles que ce constituant informe. Un titre présent dans deux indices
     # (AAPL, MSFT…) en alimente deux.
     links: tuple[str, ...] = ()
+    # "cboe"    : chaîne pullée depuis l'endpoint CBOE toutes les 60 s
+    #             (gex/ingest.py), boucle pull_all normale.
+    # "futopt"  : chaîne d'options sur future lue nativement via dxFeed
+    #             (gex/futopt.py). Une collecte prend ~90 s par sous-jacent —
+    #             hors de question dans la boucle à 60 s : pull_native_options
+    #             s'en charge séparément, toutes les 15 min, dans son propre
+    #             thread (cf. scheduler.py). pull_all les ignore entièrement.
+    source: str = "cboe"
 
 
 UNDERLYINGS: dict[str, Underlying] = {
@@ -56,6 +64,16 @@ UNDERLYINGS: dict[str, Underlying] = {
         # — voir la note sur l'approximation q=0 dans les limites du README.
         Underlying("SPY", "SPY", "SPY", family="SP"),
         Underlying("QQQ", "QQQ", "QQQ", family="ND"),
+
+        # Options sur future, lues nativement (gex/futopt.py) plutôt que
+        # transposées depuis NDX/SPX : la structure de gamma propre au marché
+        # des futures diverge de celle de l'indice cash — confirmé le
+        # 2026-07-27, écart de 160 pts sur le Zero Gamma NQ en transposé
+        # contre 12 pts en natif face à une source tierce. `cboe_symbol` est
+        # un placeholder ignoré : ces deux cibles ne passent jamais par la
+        # boucle CBOE (source="futopt").
+        Underlying("NQ", "NQ", "NQ", family="ND", source="futopt"),
+        Underlying("ES", "ES", "ES", family="SP", source="futopt"),
 
         # --- Constituants (Blind Spots) -------------------------------------
         # Leurs murs de gamma n'ont d'intérêt que projetés sur l'indice qu'ils

@@ -130,6 +130,10 @@ def pull_all(force: bool = False) -> None:
     for key, u in UNDERLYINGS.items():
         if not u.enabled:
             continue
+        if u.source == "futopt":
+            # collecte native séparée (pull_native_options) : une chaîne
+            # coûte ~90 s, incompatible avec cette boucle à 60 s
+            continue
         is_constituent = u.role == "constituent"
         if is_constituent and not (due or force):
             continue
@@ -170,19 +174,77 @@ def push_data_repo() -> None:
         log.exception("Échec du push du repo data — données locales intactes")
 
 
+def build_native_summary(code: str, df: pd.DataFrame,
+                         now_et: datetime | None = None) -> tuple[ChainSnapshot, SummaryMetrics]:
+    """(ChainSnapshot, SummaryMetrics) à partir d'une chaîne native (futopt).
+
+    Fonction pure : ne touche ni STATE ni le disque, donc testable sans
+    connexion. `df` doit porter les colonnes de sortie de
+    `futopt.enrich_native` (strike, type, expiry, gex, open_interest, volume,
+    spot…) — mêmes colonnes que `metrics.enrich`, d'où la réutilisation directe
+    des fonctions de `metrics` plutôt qu'une resynthèse spécifique.
+
+    `source="dxfeed"` sur la ligne d'historique : ces données viennent du
+    courtier (open interest et IV CME), non redistribuables — même
+    traitement que les bougies de prix (cf. gex/rtquote.py).
+    """
+    now_et = now_et or datetime.now(ET)
+    spot = float(df["spot"].iloc[0])
+    ratios = metrics.put_call_ratios(df)
+    today = now_et.date()
+    snap = ChainSnapshot(
+        symbol=code, spot=spot,
+        # naïf en ET, comme le feed CBOE : build_cards fait un .replace(tzinfo=ET)
+        feed_timestamp=now_et.replace(tzinfo=None),
+        fetched_at=datetime.now(UTC), options=df,
+    )
+    summary = SummaryMetrics(
+        timestamp=snap.feed_timestamp, symbol=code, spot=spot,
+        net_gex=float(df["gex"].sum()),
+        zero_gamma=metrics.zero_gamma(df, spot),
+        pc_oi=ratios["pc_oi"], pc_volume=ratios["pc_volume"],
+        net_gex_0dte=float(df.loc[metrics.bucket_mask(df, "0DTE", today), "gex"].sum()),
+        # pas de "basis" : ce sont déjà des options sur LE future, pas un
+        # indice à convertir vers un contrat qui lui serait associé
+        basis=None, source="dxfeed",
+    )
+    return snap, summary
+
+
 def pull_native_options() -> None:
-    """Chaînes d'options natives NQ et ES, pour les niveaux qui leur sont
-    propres (cf. gex/futopt.py) — sans identifiants, ne fait rien.
+    """Chaînes d'options natives NQ et ES : construit, met à jour STATE, et
+    persiste — sans identifiants courtier, ne fait rien.
 
     Coûte du temps (~90 s par sous-jacent, dominé par le rythme de livraison
     du serveur, pas par notre code) : APScheduler l'exécute dans son propre
     thread, ce qui ne retarde pas les pulls CBOE de 60 s.
+
+    Limite connue : ne calcule pas de flux delta (`flow_delta` suppose une
+    colonne `contract` façon CBOE, absente ici) — les onglets Flux et Gamma
+    échangé restent vides pour NQ/ES natifs. Le reste (niveaux, profil,
+    heatmap, positionnement) fonctionne, ces fonctions ne demandant que les
+    colonnes déjà produites par `futopt.enrich_native`.
     """
     if not credentials_present():
         return
     for code in ("NQ", "ES"):
         try:
-            futopt.pull_native(code)
+            df = futopt.build_native_chain(code)
+            if df is None or df.empty:
+                continue
+            now = datetime.now(ET)
+            snap, summary = build_native_summary(code, df, now)
+            store.save_snapshot(code, df, now)
+            store.append_history(summary.as_row())
+            st = STATE.get(code)
+            with STATE.lock:
+                st.snapshot = snap
+                st.enriched = df
+                st.summary = summary
+                st.last_feed_ts = snap.feed_timestamp
+            log.info("%s (natif) pull ok — spot=%.2f netGEX=%.2f Bn zeroG=%s",
+                     code, summary.spot, summary.net_gex / 1e9,
+                     f"{summary.zero_gamma:.0f}" if summary.zero_gamma else "n/a")
         except Exception:  # noqa: BLE001 — un échec ne doit rien casser d'autre
             log.exception("%s : échec de la collecte native", code)
 
@@ -238,4 +300,7 @@ def start_scheduler() -> BackgroundScheduler:
     sched.start()
     # Premier pull immédiat (même hors marché : affiche le dernier état connu).
     threading.Thread(target=pull_all, kwargs={"force": True}, daemon=True).start()
+    # Idem pour NQ/ES natifs : sans cet appel, ils resteraient invisibles dans
+    # l'interface jusqu'à la première exécution planifiée (jusqu'à 15 min).
+    threading.Thread(target=pull_native_options, daemon=True).start()
     return sched

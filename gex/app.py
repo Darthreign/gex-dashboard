@@ -1058,12 +1058,17 @@ def create_app() -> Dash:
         bucket_opts = [{"label": t(lang, BUCKET_KEYS[b]), "value": b} for b in EXPIRY_BUCKETS]
         majors_opts = [{"label": t(lang, "majors_only"), "value": "on"}]
         # échelles : le sous-jacent natif, puis les deux futures (la
-        # transposition croisée SPX→NQ est le cas d'usage visé)
-        native_label = (t(lang, "unit_index")
-                        if UNDERLYINGS[symbol].future else symbol)
-        opts = [{"label": native_label, "value": symbol},
-                {"label": "ES", "value": "ES"},
-                {"label": "NQ", "value": "NQ"}]
+        # transposition croisée SPX→NQ est le cas d'usage visé). Pour NQ/ES
+        # eux-mêmes (chaîne native, pas transposée), la question ne se pose
+        # pas : ce sont déjà les futures, un seul choix a du sens.
+        if symbol in ("NQ", "ES"):
+            opts = [{"label": t(lang, "unit_futures"), "value": symbol}]
+        else:
+            native_label = (t(lang, "unit_index")
+                            if UNDERLYINGS[symbol].future else symbol)
+            opts = [{"label": native_label, "value": symbol},
+                    {"label": "ES", "value": "ES"},
+                    {"label": "NQ", "value": "NQ"}]
         return (bucket_opts, majors_opts, t(lang, "flow_day_label"),
                 t(lang, "last_session"), t(lang, "footer"), opts,
                 t(lang, "app_title"),

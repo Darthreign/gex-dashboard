@@ -16,7 +16,40 @@ def test_cibles_et_constituants_disjoints():
     t = {u.key for u in targets()}
     c = {u.key for u in constituents()}
     assert t & c == set()
-    assert t == {"SPX", "NDX", "SPY", "QQQ"}
+    # NQ/ES : chaînes natives (gex/futopt.py), ajoutées à la suite des cibles
+    # CBOE — ce sont des cibles à part entière, affichables dans le sélecteur
+    assert t == {"SPX", "NDX", "SPY", "QQQ", "NQ", "ES"}
+
+
+def test_nq_es_natifs_apres_les_cibles_cboe():
+    """L'utilisateur les veut « à la suite de SPX, NDX, SPY, QQQ » dans le
+    sélecteur : l'ordre d'insertion dans UNDERLYINGS pilote l'ordre des
+    boutons radio, donc cet ordre est une exigence produit, pas un détail."""
+    keys = [u.key for u in targets()]
+    assert keys.index("QQQ") < keys.index("NQ") < len(keys)
+    assert keys.index("QQQ") < keys.index("ES") < len(keys)
+
+
+def test_nq_es_source_futopt_pas_cboe():
+    """Pull_all doit les ignorer : une collecte native prend ~90 s, hors de
+    question dans la boucle CBOE à 60 s."""
+    from gex.config import UNDERLYINGS
+    assert UNDERLYINGS["NQ"].source == "futopt"
+    assert UNDERLYINGS["ES"].source == "futopt"
+    for key in ("SPX", "NDX", "SPY", "QQQ"):
+        assert UNDERLYINGS[key].source == "cboe"
+
+
+def test_scale_by_key_nq_reste_lie_a_ndx():
+    """Piège identifié en ajoutant NQ/ES comme cibles : ils deviennent AUSSI
+    leur propre « échelle native » dans available_scales(), dupliquant la clé
+    déjà posée par NDX.future="NQ". scale_by_key doit continuer de résoudre
+    vers l'entrée liée à NDX (transposition SPX/NDX→ES/NQ), pas vers la
+    nouvelle cible native — sans quoi la transposition existante se romprait."""
+    nq = scales.scale_by_key("NQ")
+    es = scales.scale_by_key("ES")
+    assert nq.source == "NDX" and nq.is_future
+    assert es.source == "SPX" and es.is_future
 
 
 def test_constituants_absents_des_echelles():
