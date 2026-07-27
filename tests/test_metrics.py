@@ -60,6 +60,13 @@ def test_gex_sign_convention():
 
 
 def test_dex_signs():
+    """Sous l'hypothèse dealers longs calls / courts puts (même convention que
+    GEX) : être court un put donne une exposition delta POSITIVE — le delta du
+    put est négatif, une position courte en inverse le signe. C'est la
+    mécanique par laquelle les dealers courts puts se retrouvent
+    structurellement longs delta et vendent dans la baisse pour rester
+    couverts. Un DEX put négatif signalerait le bug inverse (delta brut de
+    l'open interest détenu long, pas celui du dealer supposé court)."""
     exp = far_expiry()
     snap = make_chain(100.0, [
         {"expiry": exp, "type": "C", "strike": 100.0},
@@ -67,7 +74,26 @@ def test_dex_signs():
     ])
     df = metrics.enrich(snap)
     assert df.loc[df["type"] == "C", "dex"].iloc[0] > 0
-    assert df.loc[df["type"] == "P", "dex"].iloc[0] < 0
+    assert df.loc[df["type"] == "P", "dex"].iloc[0] > 0
+
+
+def test_dex_meme_convention_que_gex_sur_oi_asymetrique():
+    """Régression du bug corrigé le 2026-07-27 : avec plus de puts que de
+    calls au même strike, GEX et DEX doivent s'accorder sur le signe du
+    déséquilibre — les deux décrivent le MÊME dealer supposé (long calls,
+    court puts), donc plus de puts doit se lire comme "plus de delta long"
+    (DEX positif) en même temps que "plus de gamma négatif" (GEX négatif).
+    Avant le correctif, le DEX ressortait négatif — signe opposé."""
+    exp = far_expiry()
+    snap = make_chain(100.0, [
+        {"expiry": exp, "type": "C", "strike": 100.0, "open_interest": 100.0},
+        {"expiry": exp, "type": "P", "strike": 100.0, "open_interest": 200.0},
+    ])
+    df = metrics.enrich(snap)
+    net_gex = df["gex"].sum()
+    net_dex = df["dex"].sum()
+    assert net_gex < 0    # plus de puts -> gamma net negatif (destabilisant)
+    assert net_dex > 0    # ... et delta net positif (dealers longs, sur ce strike)
 
 
 def test_zero_gamma_crossing():

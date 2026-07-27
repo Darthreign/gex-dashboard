@@ -64,7 +64,19 @@ def enrich(snapshot: ChainSnapshot, now_et: datetime | None = None) -> pd.DataFr
     oi = df["open_interest"].to_numpy()
     sign = np.where(is_call, 1.0, -1.0)
     df["gex"] = sign * g * oi * CONTRACT_MULTIPLIER * s**2 * 0.01
-    df["dex"] = d * oi * CONTRACT_MULTIPLIER * s
+    # Même hypothèse que GEX (dealers longs calls, courts puts) : la gamma est
+    # toujours positive, donc `sign` seul suffisait à distinguer calls/puts.
+    # Le delta, lui, a DÉJÀ un signe naturel opposé entre call et put — sans
+    # cette multiplication par `sign`, le code prenait le delta brut, ce qui
+    # calculait le delta de l'OPEN INTEREST détenu long des deux côtés, pas
+    # celui du dealer supposé COURT les puts.
+    # Être court un put donne une exposition delta POSITIVE (delta du put
+    # négatif × position courte = positif) : c'est la mécanique par laquelle
+    # les dealers courts puts sont structurellement longs delta et vendent
+    # dans la baisse pour rester couverts, à mesure que les puts s'enfoncent
+    # dans la monnaie. Sans le flip, cette exposition ressortait négative —
+    # signe opposé à ce que la même convention que GEX implique.
+    df["dex"] = sign * d * oi * CONTRACT_MULTIPLIER * s
     # Spot répété sur chaque ligne : un snapshot persisté devient ainsi
     # auto-suffisant, et le backtest peut en recalculer les niveaux sans aller
     # chercher le prix ailleurs. Une constante ne coûte rien en Parquet.
