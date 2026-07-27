@@ -303,13 +303,14 @@ def enrich_native(chain: pd.DataFrame, raw: dict[str, dict], spot: float,
     sign = np.where(is_call, 1.0, -1.0)
     oi = df["open_interest"].to_numpy()
     df["gex"] = sign * g * oi * multiplier * spot ** 2 * 0.01
-    # même correctif que metrics.enrich (2026-07-27) : sous l'hypothèse
-    # dealers longs calls / courts puts, être court un put donne une
-    # exposition delta POSITIVE (delta du put négatif × position courte).
-    # Sans le flip par `sign`, ce calcul restait celui du delta de l'open
-    # interest détenu long des deux côtés, pas celui du dealer supposé
-    # court les puts — bug oublié ici lors du correctif sur la chaîne CBOE.
-    df["dex"] = sign * d * oi * multiplier * spot
+    # cf. metrics.enrich pour la justification complète (revue le 2026-07-28,
+    # après un premier correctif erroné le 2026-07-27) : le DEX suit une
+    # convention DIFFÉRENTE du GEX — dealers courts calls ET courts puts, donc
+    # une négation UNIFORME du delta brut, pas le même flip différentiel
+    # `sign` que la gamma. Réutiliser `sign` ici rendait chaque contrat
+    # positif sans exception (call et put donnaient tous deux +|δ|), donc
+    # plus aucun strike ne pouvait ressortir négatif dans le graphique.
+    df["dex"] = -1.0 * d * oi * multiplier * spot
     df["spot"] = float(spot)
     return df
 

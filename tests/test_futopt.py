@@ -69,13 +69,34 @@ def test_multiplicateur_nq_distinct_des_indices():
     assert ratio == pytest.approx(5.0)  # 100 / 20
 
 
-def test_dex_meme_convention_que_gex():
-    """Régression du 2026-07-28 : enrich_native oubliait le correctif de signe
-    appliqué à metrics.enrich le 2026-07-27 — le DEX natif n'appliquait pas le
-    même flip `sign` que le GEX. Avec plus de puts que de calls (asymétrie
-    par défaut de `_raw`), GEX et DEX doivent s'accorder sur le même dealer
-    supposé (long calls, court puts) : plus de puts -> gamma net négatif ET
-    delta net positif (dealers structurellement longs)."""
+def test_dex_signs_opposes_par_contrat():
+    """Le DEX suit une convention DIFFÉRENTE du GEX (dealers courts calls ET
+    courts puts, négation uniforme du delta brut — pas le même flip `sign`
+    différentiel que la gamma, cf. commentaire dans futopt.enrich_native).
+    Régression du 2026-07-28 : un premier correctif (2026-07-27) réappliquait
+    le flip `sign` du GEX, rendant CHAQUE contrat positif sans exception —
+    plus aucun strike ne pouvait ressortir négatif sur le graphique. Un call
+    et un put à la même IV/strike doivent ressortir de signe opposé."""
+    exp = date(2026, 7, 27)
+    chain = pd.DataFrame([
+        {"strike": 28700.0, "type": "C", "expiry": exp, "streamer_symbol": "C1"},
+        {"strike": 28700.0, "type": "P", "expiry": exp, "streamer_symbol": "P1"},
+    ])
+    now = datetime(2026, 7, 27, 10, 0, tzinfo=ET)
+    raw = {"C1": {"iv": 0.15, "oi": 100.0, "volume": 0.0, "bidPrice": 10.0, "askPrice": 11.0},
+          "P1": {"iv": 0.15, "oi": 100.0, "volume": 0.0, "bidPrice": 10.0, "askPrice": 11.0}}
+    df = futopt.enrich_native(chain, raw, 28700.0, 20.0, now_et=now)
+    call_dex = df.loc[df["type"] == "C", "dex"].iloc[0]
+    put_dex = df.loc[df["type"] == "P", "dex"].iloc[0]
+    assert call_dex < 0 and put_dex > 0
+
+
+def test_dex_net_coherent_avec_gex_sur_oi_asymetrique():
+    """Le NET reste cohérent avec le récit du GEX même si la convention par
+    contrat diffère (cf. test_dex_signs_opposes_par_contrat) : avec plus de
+    puts que de calls (asymétrie par défaut de `_raw`), gamma net négatif
+    (plus de puts -> plus déstabilisant) doit s'accompagner d'un delta net
+    positif (dealers plus courts puts -> plus longs delta)."""
     chain = _chain(28700.0)
     now = datetime(2026, 7, 27, 10, 0, tzinfo=ET)
     df = futopt.enrich_native(chain, _raw(chain), 28700.0, 20.0, now_et=now)
