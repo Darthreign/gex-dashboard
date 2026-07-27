@@ -125,7 +125,7 @@ TR: dict[str, dict[str, str]] = {
         "regime_accel_modere": "Régime accélérateur (gamma négatif) : un mouvement s'auto-"
                         "entretient une fois lancé. Delta dealers {sens_delta} (pression de "
                         "couverture {pression}) : biais {biais} si un mouvement démarre. "
-                        "Rester prudent, la contrariété expose à ce régime.",
+                        "Rester prudent, une approche contrarian est exposée à ce régime.",
         "regime_accel_fort": "Régime accélérateur (gamma négatif) ET forte pression de "
                         "couverture {pression} des dealers (delta {sens_delta}) : les deux "
                         "mécaniques s'additionnent. Risque élevé de mouvement {biais} "
