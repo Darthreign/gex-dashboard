@@ -444,6 +444,7 @@ class SummaryMetrics:
     pc_volume: float
     net_gex_0dte: float = 0.0
     basis: float | None = None   # future front month - spot, suivi dans le temps
+    net_dex: float = 0.0
     # Provenance de la ligne. Détermine ce qui peut être partagé : "cboe" =
     # source publique gratuite, redistribuable ; "databento" = source payante
     # sous licence d'usage personnel, NON redistribuable.
@@ -460,6 +461,7 @@ class SummaryMetrics:
             "pc_volume": self.pc_volume,
             "net_gex_0dte": self.net_gex_0dte,
             "basis": self.basis,
+            "net_dex": self.net_dex,
             "source": self.source,
         }
 
@@ -481,7 +483,63 @@ def summarize(snapshot: ChainSnapshot, df: pd.DataFrame,
         pc_volume=ratios["pc_volume"],
         net_gex_0dte=float(df.loc[bucket_mask(df, "0DTE", today), "gex"].sum()),
         basis=futures_basis(df, snapshot.spot, today) if with_basis else None,
+        net_dex=float(df["dex"].sum()),
     )
+
+
+def regime_read(net_gex: float, net_dex: float,
+                 dex_history: pd.Series | None = None) -> dict:
+    """Lecture croisée Gamma/Delta : mécanique de couverture des dealers, pas
+    un signal d'entrée. Deux axes indépendants :
+
+    - GEX (comment un mouvement se comporte une fois lancé) : positif = les
+      dealers vendent les hausses et achètent les baisses, donc freinent ;
+      négatif = l'inverse, donc amplifient.
+    - DEX (le sens de l'obligation de couverture latente des dealers, sous
+      l'hypothèse longs calls / courts puts, cf. `enrich`) : positif = ils
+      sont structurellement LONGS delta (côté puts vendus qui s'enfoncent
+      dans la monnaie) → pression de couverture VENDEUSE latente, biais
+      baissier si un mouvement démarre. Négatif = l'inverse (short delta),
+      pression ACHETEUSE latente, biais haussier.
+
+    Ni l'un ni l'autre ne dit SI un mouvement démarre, ni dans quel sens il
+    démarre — seulement sa nature probable s'il se produit. `dex_history`
+    (série de |net_dex| passés du même sous-jacent) sert uniquement à situer
+    l'ampleur actuelle par rang percentile ; sans historique suffisant (< 20
+    points), la magnitude est laissée à None plutôt que devinée.
+    """
+    gex_frein = net_gex >= 0
+    dex_long = net_dex >= 0   # dealers structurellement longs delta
+    sens_delta = "long" if dex_long else "short"
+    # codes neutres (pas de mot figé dans une langue) : gex/i18n.py les
+    # traduit en "vendeuse"/"acheteuse" (fr) ou "selling"/"buying" (en)
+    pression_code = "sell" if dex_long else "buy"
+    biais_code = "down" if dex_long else "up"
+
+    magnitude = None
+    if dex_history is not None:
+        ref = dex_history.dropna().abs()
+        if len(ref) >= 20:
+            rank = (ref < abs(net_dex)).mean()
+            magnitude = "fort" if rank >= 0.67 else ("faible" if rank <= 0.33 else None)
+
+    params = {"sens_delta": sens_delta, "pression_code": pression_code,
+              "biais_code": biais_code}
+    if gex_frein:
+        key, severity = "regime_frein", "info"
+    elif magnitude == "fort":
+        key, severity = "regime_accel_fort", "danger"
+    else:
+        key, severity = "regime_accel_modere", "warning"
+
+    return {
+        "gex_frein": gex_frein,
+        "dex_sign": sens_delta,
+        "magnitude": magnitude,
+        "severity": severity,
+        "i18n_key": key,
+        "params": params,
+    }
 
 
 def oi_change(prev: pd.DataFrame, cur: pd.DataFrame) -> pd.DataFrame:

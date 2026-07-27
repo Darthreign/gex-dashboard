@@ -96,6 +96,48 @@ def test_dex_meme_convention_que_gex_sur_oi_asymetrique():
     assert net_dex > 0    # ... et delta net positif (dealers longs, sur ce strike)
 
 
+def test_regime_read_frein():
+    """Gamma positif : régime freiné quel que soit le signe du DEX."""
+    r = metrics.regime_read(net_gex=5e9, net_dex=-2e9)
+    assert r["gex_frein"] is True
+    assert r["severity"] == "info"
+    assert r["i18n_key"] == "regime_frein"
+    assert r["dex_sign"] == "short"  # DEX négatif -> dealers short delta
+    assert r["params"]["biais_code"] == "up"  # short delta -> pression acheteuse -> biais haussier
+
+
+def test_regime_read_accelerateur_sans_historique():
+    """Gamma négatif, DEX short, sans historique pour juger l'ampleur : cas
+    "Gamme négative et faible Delta short" de l'utilisateur -> avertissement
+    modéré (pas le plus fort), magnitude laissée à None plutôt que devinée."""
+    r = metrics.regime_read(net_gex=-3e9, net_dex=-1e9)
+    assert r["gex_frein"] is False
+    assert r["magnitude"] is None
+    assert r["severity"] == "warning"
+    assert r["i18n_key"] == "regime_accel_modere"
+    assert r["params"]["biais_code"] == "up"
+
+
+def test_regime_read_accelerateur_fort():
+    """Gamma négatif ET DEX short au 90e percentile de son historique : cas
+    "Gamme négative et fort Delta short" -> avertissement maximal."""
+    hist = pd.Series([-0.1e9] * 15 + [-0.5e9] * 5)  # ampleur courante domine l'historique
+    r = metrics.regime_read(net_gex=-3e9, net_dex=-2e9, dex_history=hist)
+    assert r["magnitude"] == "fort"
+    assert r["severity"] == "danger"
+    assert r["i18n_key"] == "regime_accel_fort"
+
+
+def test_regime_text_fr_et_en():
+    from gex.i18n import regime_text
+    r = metrics.regime_read(net_gex=-3e9, net_dex=-2e9,
+                            dex_history=pd.Series([-0.1e9] * 15 + [-0.5e9] * 5))
+    fr = regime_text("fr", r)
+    en = regime_text("en", r)
+    assert "haussier" in fr and "acheteuse" in fr
+    assert "upward" in en and "buying" in en
+
+
 def test_zero_gamma_crossing():
     """Call OI sous le spot, put OI au-dessus → le GEX net passe de positif
     (spot bas, gamma du call domine) à négatif (spot haut) : crossing ~100."""

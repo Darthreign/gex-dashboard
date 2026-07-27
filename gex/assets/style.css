@@ -221,6 +221,37 @@ body {
 
 .stat-sub { font-size: 10.5px; color: var(--ink-2); }
 
+/* ---------------------------------------------------------- regime banner */
+
+.regime-banner {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px 14px 11px 16px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+
+.regime-banner::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 3px;
+  background: var(--accent-bar, transparent);
+}
+
+.regime-label {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-weight: 600;
+  margin-bottom: 3px;
+}
+
+.regime-text { font-size: 12.5px; color: var(--ink); line-height: 1.4; }
+.regime-disclaimer { font-size: 10px; color: var(--muted); margin-top: 4px; font-style: italic; }
+
 /* ----------------------------------------------------------------- chips */
 
 .chips {

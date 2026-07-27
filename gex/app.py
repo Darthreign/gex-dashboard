@@ -18,7 +18,7 @@ from dash.exceptions import PreventUpdate
 
 from . import metrics, scales, store
 from .config import SETTINGS, UNDERLYINGS, targets
-from .i18n import LANGS, t, wall_labels
+from .i18n import LANGS, regime_text, t, wall_labels
 from .metrics import ET, EXPIRY_BUCKETS
 from .rtquote import QUOTES
 from .scheduler import STATE, market_is_open
@@ -798,6 +798,32 @@ def live_spot(symbol: str, fallback: float) -> tuple[float, bool]:
     return (px, True) if px else (fallback, False)
 
 
+_REGIME_SEVERITY_COLOR = {"info": "hvl", "warning": "zg", "danger": "neg"}
+
+
+def regime_banner(symbol: str, lang: str) -> html.Div:
+    """Cadre de lecture croisée Gamma/Delta (cf. metrics.regime_read) :
+    mécanique de couverture des dealers, jamais un point d'entrée."""
+    st = STATE.get(symbol)
+    with STATE.lock:
+        s = st.summary
+    if s is None or s.zero_gamma is None:
+        return html.Div(style={"display": "none"})
+    dex_hist = store.load_history(symbol).get("net_dex")
+    r = metrics.regime_read(s.net_gex, s.net_dex, dex_history=dex_hist)
+    color = C[_REGIME_SEVERITY_COLOR[r["severity"]]]
+    return html.Div(
+        [
+            html.Div(t(lang, "regime_label"), className="regime-label",
+                     style={"color": color}),
+            html.Div(regime_text(lang, r), className="regime-text"),
+            html.Div(t(lang, "regime_disclaimer"), className="regime-disclaimer"),
+        ],
+        className="regime-banner",
+        style={"--accent-bar": color},
+    )
+
+
 def build_cards(symbol: str, lang: str, xf=None, scale: str | None = None) -> list:
     st = STATE.get(symbol)
     with STATE.lock:
@@ -909,6 +935,7 @@ def create_app() -> Dash:
         # ---------------------------------------------------------- contenu
         html.Div([
             html.Div(id="cards", className="cards"),
+            html.Div(id="regime-banner"),
             html.Div([
                 html.Div(id="levels", className="chips"),
                 # copie des niveaux au format de l'indicateur TradingView
@@ -1099,7 +1126,7 @@ def create_app() -> Dash:
         return (sub, {}, f"rt-badge rt-{state}", tip, "dxFeed")
 
     @app.callback(
-        Output("cards", "children"),
+        [Output("cards", "children"), Output("regime-banner", "children")],
         [Input("rt-tick", "n_intervals"), Input("symbol", "value"),
          Input("lang", "value"), Input("unit", "value")],
     )
@@ -1112,7 +1139,7 @@ def create_app() -> Dash:
         est négligeable devant la grille de 161 points du Gamma Flip.
         """
         xf, _, _ = _transform_for(symbol, unit)
-        return build_cards(symbol, lang, xf, scale=unit)
+        return build_cards(symbol, lang, xf, scale=unit), regime_banner(symbol, lang)
 
     @app.callback(
         [Output("levels", "children"), Output("gex-strike", "figure"),

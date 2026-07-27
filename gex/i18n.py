@@ -117,6 +117,22 @@ TR: dict[str, dict[str, str]] = {
         "hover_net": "Net",
         "hover_flow": "Flux",
         "hover_cum": "Cumul",
+        "regime_label": "Lecture du régime",
+        "regime_frein": "Régime freiné (gamma positif) : les dealers vendent les hausses et "
+                        "achètent les baisses, range probable. Delta dealers {sens_delta} — "
+                        "pression de couverture {pression} latente en toile de fond, léger "
+                        "biais {biais} si le range casse.",
+        "regime_accel_modere": "Régime accélérateur (gamma négatif) : un mouvement s'auto-"
+                        "entretient une fois lancé. Delta dealers {sens_delta} (pression de "
+                        "couverture {pression}) : biais {biais} si un mouvement démarre. "
+                        "Rester prudent, la contrariété expose à ce régime.",
+        "regime_accel_fort": "Régime accélérateur (gamma négatif) ET forte pression de "
+                        "couverture {pression} des dealers (delta {sens_delta}) : les deux "
+                        "mécaniques s'additionnent. Risque élevé de mouvement {biais} "
+                        "auto-entretenu — une approche contrarian y est particulièrement "
+                        "exposée.",
+        "regime_disclaimer": "Lecture mécanique de la couverture dealers, pas un signal "
+                        "d'entrée ni une direction garantie.",
     },
     "en": {
         "app_title": "Gamma / Delta Exposure",
@@ -226,13 +242,43 @@ TR: dict[str, dict[str, str]] = {
         "hover_net": "Net",
         "hover_flow": "Flow",
         "hover_cum": "Cumulative",
+        "regime_label": "Regime read",
+        "regime_frein": "Dampened regime (positive gamma): dealers sell rallies and buy dips, "
+                        "range likely. Dealer delta {sens_delta} — latent {pression} pressure "
+                        "in the background, mild {biais} bias if the range breaks.",
+        "regime_accel_modere": "Accelerating regime (negative gamma): a move feeds on itself "
+                        "once started. Dealer delta {sens_delta} (latent {pression} pressure): "
+                        "{biais} bias if a move starts. Stay cautious, fading this regime is "
+                        "exposed.",
+        "regime_accel_fort": "Accelerating regime (negative gamma) AND strong latent {pression} "
+                        "pressure from dealers (delta {sens_delta}): both mechanics add up. High "
+                        "risk of a self-reinforcing {biais} move — a contrarian approach is "
+                        "particularly exposed here.",
+        "regime_disclaimer": "A mechanical read of dealer hedging, not an entry signal or a "
+                        "guaranteed direction.",
     },
 }
+
+# Mots dérivés des codes neutres renvoyés par metrics.regime_read (pas de mot
+# figé dans une langue à la source, cf. commentaire dans regime_read).
+_PRESSURE_WORD = {"fr": {"sell": "vendeuse", "buy": "acheteuse"},
+                  "en": {"sell": "selling", "buy": "buying"}}
+_BIAS_WORD = {"fr": {"down": "baissier", "up": "haussier"},
+             "en": {"down": "downward", "up": "upward"}}
 
 
 def t(lang: str, key: str, **fmt) -> str:
     s = TR.get(lang, TR["fr"]).get(key, key)
     return s.format(**fmt) if fmt else s
+
+
+def regime_text(lang: str, regime: dict) -> str:
+    """Compose le texte de lecture de régime à partir du dict `metrics.regime_read`."""
+    p = regime["params"]
+    words = {"sens_delta": p["sens_delta"],
+             "pression": _PRESSURE_WORD[lang][p["pression_code"]],
+             "biais": _BIAS_WORD[lang][p["biais_code"]]}
+    return t(lang, regime["i18n_key"], **words)
 
 
 def wall_labels(levels) -> dict:
