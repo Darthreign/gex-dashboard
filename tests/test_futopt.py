@@ -69,6 +69,20 @@ def test_multiplicateur_nq_distinct_des_indices():
     assert ratio == pytest.approx(5.0)  # 100 / 20
 
 
+def test_dex_meme_convention_que_gex():
+    """Régression du 2026-07-28 : enrich_native oubliait le correctif de signe
+    appliqué à metrics.enrich le 2026-07-27 — le DEX natif n'appliquait pas le
+    même flip `sign` que le GEX. Avec plus de puts que de calls (asymétrie
+    par défaut de `_raw`), GEX et DEX doivent s'accorder sur le même dealer
+    supposé (long calls, court puts) : plus de puts -> gamma net négatif ET
+    delta net positif (dealers structurellement longs)."""
+    chain = _chain(28700.0)
+    now = datetime(2026, 7, 27, 10, 0, tzinfo=ET)
+    df = futopt.enrich_native(chain, _raw(chain), 28700.0, 20.0, now_et=now)
+    assert df["gex"].sum() < 0
+    assert df["dex"].sum() > 0
+
+
 def test_iv_manquante_traitee_comme_gamma_nul():
     """Un contrat sans IV dxFeed (pas encore coté) ne doit pas produire un
     gamma indéfini qui polluerait la somme."""

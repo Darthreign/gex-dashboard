@@ -836,7 +836,8 @@ def build_cards(symbol: str, lang: str, xf=None, scale: str | None = None) -> li
         df = st.enriched
         err = STATE.last_error
     if s is None:
-        return [card(t(lang, "card_status"), "…", err or t(lang, "waiting_short"))]
+        wait = t(lang, "waiting_native" if symbol in ("NQ", "ES") else "waiting_short")
+        return [card(t(lang, "card_status"), "…", err or wait)]
     xf = xf or (lambda v: v)
 
     # Le GEX net dépend surtout du spot : l'open interest ne bouge qu'une fois
@@ -1177,7 +1178,7 @@ def create_app() -> Dash:
             summary = st.summary
         bucket_label = t(lang, BUCKET_KEYS[bucket])
         if df is None or snap is None:
-            wait = t(lang, "waiting_first_pull")
+            wait = t(lang, "waiting_native" if symbol in ("NQ", "ES") else "waiting_first_pull")
             return (
                 levels_strip(None, lang),
 

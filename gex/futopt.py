@@ -139,7 +139,8 @@ def filter_chain(chain: pd.DataFrame, spot: float, window: float = DEFAULT_WINDO
 
 async def _collect_one(streamer_symbols: list[str],
                        events: tuple[str, ...],
-                       timeout: float) -> dict[str, dict]:
+                       timeout: float,
+                       early_stop=None) -> dict[str, dict]:
     """Une connexion, une salve unique de souscription, jusqu'à `MAX_BURST`.
 
     Envoyer la salve complète EN UN SEUL message est essentiel : fractionner
@@ -147,6 +148,12 @@ async def _collect_one(streamer_symbols: list[str],
     échoue silencieusement — chaque lot est accusé réception (`FEED_CONFIG`)
     mais aucune donnée n'arrive jamais. Le mécanisme de snapshot initial de
     dxLink ne semble répondre qu'à la toute première demande d'un canal.
+
+    `early_stop(out)` : coupe la boucle dès que la condition est remplie,
+    sans attendre le silence — indispensable pour un symbole très liquide
+    (le future actif lui-même, coté en continu) où le flux ne se tait
+    jamais avant `MAX_DURATION_S`. Sans early_stop, `_reference_spot`
+    attendait systématiquement le plafond de 90 s pour UNE cotation.
     """
     import time as _time
 
@@ -230,12 +237,15 @@ async def _collect_one(streamer_symbols: list[str],
                             v = item.get(k)
                             if isinstance(v, (int, float)) and v == v:
                                 d[out_k] = float(v)
+                if early_stop is not None and early_stop(out):
+                    return out
     return out
 
 
 async def _collect(streamer_symbols: list[str],
                    events: tuple[str, ...] = ("Quote", "Greeks", "Summary"),
-                   timeout: float = IDLE_TIMEOUT_S) -> dict[str, dict]:
+                   timeout: float = IDLE_TIMEOUT_S,
+                   early_stop=None) -> dict[str, dict]:
     """Souscrit et fusionne les événements reçus, un dict par symbole.
 
     Fractionne en plusieurs connexions séquentielles si le nombre de
@@ -249,7 +259,7 @@ async def _collect(streamer_symbols: list[str],
     out: dict[str, dict] = {}
     for i in range(0, len(streamer_symbols), batch_size):
         batch = streamer_symbols[i:i + batch_size]
-        out.update(await _collect_one(batch, events, timeout))
+        out.update(await _collect_one(batch, events, timeout, early_stop=early_stop))
     return out
 
 
@@ -293,7 +303,13 @@ def enrich_native(chain: pd.DataFrame, raw: dict[str, dict], spot: float,
     sign = np.where(is_call, 1.0, -1.0)
     oi = df["open_interest"].to_numpy()
     df["gex"] = sign * g * oi * multiplier * spot ** 2 * 0.01
-    df["dex"] = d * oi * multiplier * spot
+    # même correctif que metrics.enrich (2026-07-27) : sous l'hypothèse
+    # dealers longs calls / courts puts, être court un put donne une
+    # exposition delta POSITIVE (delta du put négatif × position courte).
+    # Sans le flip par `sign`, ce calcul restait celui du delta de l'open
+    # interest détenu long des deux côtés, pas celui du dealer supposé
+    # court les puts — bug oublié ici lors du correctif sur la chaîne CBOE.
+    df["dex"] = sign * d * oi * multiplier * spot
     df["spot"] = float(spot)
     return df
 
@@ -311,7 +327,14 @@ def _reference_spot(product_code: str, access_token: str) -> float | None:
     if not items:
         return None
     stream_sym = items[0]["streamer-symbol"]
-    data = asyncio.run(_collect([stream_sym], events=("Quote",)))
+    # early_stop : le future actif se cote en continu, le flux ne va jamais
+    # au silence avant MAX_DURATION_S — sans coupure explicite dès la
+    # première cotation complète, cette recherche d'UN spot coûtait
+    # systématiquement les 90 s du plafond (constaté le 2026-07-28).
+    def _has_quote(out: dict) -> bool:
+        d = out.get(stream_sym, {})
+        return d.get("bidPrice") is not None and d.get("askPrice") is not None
+    data = asyncio.run(_collect([stream_sym], events=("Quote",), early_stop=_has_quote))
     d = data.get(stream_sym, {})
     bid, ask = d.get("bidPrice"), d.get("askPrice")
     if bid and ask:

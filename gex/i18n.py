@@ -10,6 +10,7 @@ TR: dict[str, dict[str, str]] = {
     "fr": {
         "app_title": "Gamma / Delta Exposure",
         "waiting_first_pull": "En attente du premier pull CBOE…",
+        "waiting_native": "Collecte native en cours (chaîne CME complète, ~3 à 5 min)…",
         "no_data_window": "Pas de données dans la fenêtre de strikes",
         "no_flow_day": "Aucun flux enregistré le {day}",
         "not_enough_history": "Historique insuffisant (revenez après quelques snapshots)",
@@ -137,6 +138,7 @@ TR: dict[str, dict[str, str]] = {
     "en": {
         "app_title": "Gamma / Delta Exposure",
         "waiting_first_pull": "Waiting for first CBOE pull…",
+        "waiting_native": "Native collection in progress (full CME chain, ~3 to 5 min)…",
         "no_data_window": "No data in the strike window",
         "no_flow_day": "No flow recorded on {day}",
         "not_enough_history": "Not enough history yet (check back after a few snapshots)",
