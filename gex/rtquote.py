@@ -62,6 +62,56 @@ def credentials_present() -> bool:
                ("TT_REFRESH", "TASTYTRADE_CLIENT_ID", "TASTYTRADE_CLIENT_SECRET"))
 
 
+# Champs demandés à FEED_SETUP, DANS CET ORDRE — cf. quote-streamer.ts du SDK
+# officiel tastytrade (JS), qui configure { acceptAggregationPeriod: 10,
+# acceptDataFormat: COMPACT } avant de souscrire. Le format FULL (reçu par
+# défaut sans ce message) est annoncé par la doc dxLink comme voué à
+# disparaître. On ne demande que les champs réellement utilisés en aval
+# (rtquote._ingest, futopt.enrich_native) plutôt que la liste complète de
+# l'exemple officiel (bidSize/askSize, delta/gamma/theta/rho/vega, etc.),
+# absents de nos besoins.
+COMPACT_FIELDS: dict[str, list[str]] = {
+    "Quote": ["eventType", "eventSymbol", "bidPrice", "askPrice"],
+    "Trade": ["eventType", "eventSymbol", "price"],
+    "Greeks": ["eventType", "eventSymbol", "volatility"],
+    "Summary": ["eventType", "eventSymbol", "openInterest", "dayVolume"],
+}
+
+
+def decode_compact_feed_data(data: list) -> list[dict]:
+    """Décode le format COMPACT de FEED_DATA en la même forme (liste de
+    dicts) que produisait l'ancien format FULL implicite — pour ne rien
+    changer au code qui consomme ces événements en aval.
+
+    En COMPACT, `data` alterne [typeTag, valeurs_à_plat, typeTag, ...] : un
+    bloc `valeurs_à_plat` répète un groupe de N valeurs par événement (N =
+    len(COMPACT_FIELDS[typeTag])), positionnellement dans l'ordre déclaré à
+    FEED_SETUP — pas de clés, l'ordre EST le contrat. Un typeTag inconnu (un
+    champ qu'on n'a pas déclaré dans COMPACT_FIELDS) est ignoré plutôt que de
+    faire échouer tout le décodage.
+    """
+    out: list[dict] = []
+    i = 0
+    while i + 1 < len(data):
+        type_tag, flat = data[i], data[i + 1]
+        i += 2
+        fields = COMPACT_FIELDS.get(type_tag)
+        if not fields or not isinstance(flat, list):
+            continue
+        n = len(fields)
+        for j in range(0, len(flat) - n + 1, n):
+            out.append(dict(zip(fields, flat[j:j + n])))
+    return out
+
+
+def feed_setup_message(channel: int) -> dict:
+    """Trame FEED_SETUP commune aux deux collecteurs (rtquote, futopt) — même
+    configuration que le SDK officiel tastytrade, cf. COMPACT_FIELDS."""
+    return {"type": "FEED_SETUP", "channel": channel,
+            "acceptAggregationPeriod": 10, "acceptDataFormat": "COMPACT",
+            "acceptEventFields": COMPACT_FIELDS}
+
+
 def quote_token() -> tuple[str, str, str]:
     """(jeton dxFeed, URL dxLink, access token tastytrade).
 
@@ -258,6 +308,8 @@ class RealtimeQuotes:
                                     "service": "FEED",
                                     "parameters": {"contract": "AUTO"}})
                 elif typ == "CHANNEL_OPENED":
+                    await send(feed_setup_message(1))
+                elif typ == "FEED_CONFIG":
                     subs = [{"type": "Quote", "symbol": s} for s in symbols.values()]
                     subs += [{"type": "Trade", "symbol": s} for s in symbols.values()]
                     await send({"type": "FEED_SUBSCRIPTION", "channel": 1, "add": subs})
@@ -265,7 +317,7 @@ class RealtimeQuotes:
                     self._detail = ""
                     log.info("Spot temps réel actif sur %s", ", ".join(symbols))
                 elif typ == "FEED_DATA":
-                    self._ingest(m.get("data") or [])
+                    self._ingest(decode_compact_feed_data(m.get("data") or []))
                 elif typ == "KEEPALIVE":
                     await send({"type": "KEEPALIVE", "channel": 0})
                 elif typ == "ERROR":

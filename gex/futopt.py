@@ -39,7 +39,7 @@ import requests
 from . import greeks, store
 from .config import RISK_FREE_RATE
 from .metrics import ET, YEAR_SECONDS, seconds_to_expiry
-from .rtquote import QUOTES, quote_token
+from .rtquote import QUOTES, decode_compact_feed_data, feed_setup_message, quote_token
 
 log = logging.getLogger(__name__)
 
@@ -206,6 +206,8 @@ async def _collect_one(streamer_symbols: list[str],
                                 "service": "FEED",
                                 "parameters": {"contract": "AUTO"}})
             elif typ == "CHANNEL_OPENED":
+                await send(feed_setup_message(1))
+            elif typ == "FEED_CONFIG":
                 subs = [{"type": e, "symbol": s}
                        for s in streamer_symbols for e in events]
                 await send({"type": "FEED_SUBSCRIPTION", "channel": 1, "add": subs})
@@ -215,7 +217,7 @@ async def _collect_one(streamer_symbols: list[str],
                 log.warning("dxFeed ERROR pendant la collecte : %s", str(m)[:300])
             elif typ == "FEED_DATA":
                 last_data = _time.monotonic()
-                for item in (m.get("data") or []):
+                for item in decode_compact_feed_data(m.get("data") or []):
                     if not isinstance(item, dict):
                         continue
                     sym = item.get("eventSymbol")

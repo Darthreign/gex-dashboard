@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 
-from gex.rtquote import RealtimeQuotes, Tick
+from gex.rtquote import RealtimeQuotes, Tick, decode_compact_feed_data
 
 
 def _connected(age_s: float = 0.0) -> RealtimeQuotes:
@@ -83,3 +83,47 @@ def test_ingest_ignore_les_symboles_inconnus():
     q._by_stream = {"/ESU26:XCME": "ES"}
     q._ingest([{"eventType": "Trade", "eventSymbol": "AUTRE", "price": 1.0}])
     assert q.price("ES") is None
+
+
+def test_decode_compact_reconstruit_le_format_full():
+    """Format COMPACT (cf. commentaire au-dessus de COMPACT_FIELDS) : un
+    tableau à plat par type d'événement, décodé en dicts pour ne rien changer
+    au code consommateur (_ingest, futopt._collect_one) qui attendait le
+    format FULL implicite avant ce correctif du 2026-07-28."""
+    data = [
+        "Quote", ["Quote", "SPY", 559.30, 559.40, "Quote", "AAPL", 190.0, 190.05],
+        "Trade", ["Trade", "SPY", 559.36],
+    ]
+    out = decode_compact_feed_data(data)
+    assert out == [
+        {"eventType": "Quote", "eventSymbol": "SPY", "bidPrice": 559.30, "askPrice": 559.40},
+        {"eventType": "Quote", "eventSymbol": "AAPL", "bidPrice": 190.0, "askPrice": 190.05},
+        {"eventType": "Trade", "eventSymbol": "SPY", "price": 559.36},
+    ]
+
+
+def test_decode_compact_ignore_un_type_non_declare():
+    """Un type qu'on n'a pas demandé dans COMPACT_FIELDS (Profile, TimeAndSale…)
+    ne doit pas faire échouer le décodage du reste du message."""
+    data = ["Profile", ["Profile", "SPY", "desc"], "Trade", ["Trade", "SPY", 100.0]]
+    out = decode_compact_feed_data(data)
+    assert out == [{"eventType": "Trade", "eventSymbol": "SPY", "price": 100.0}]
+
+
+def test_decode_compact_vide():
+    assert decode_compact_feed_data([]) == []
+
+
+def test_decode_compact_greeks_et_summary():
+    """Champs utilisés par futopt.enrich_native : IV (Greeks) et OI/volume
+    (Summary) — ceux-là seuls sont déclarés dans COMPACT_FIELDS, pas tout ce
+    que l'exemple officiel tastytrade propose (delta/gamma/theta/rho/vega,
+    dayOpenPrice…)."""
+    data = ["Greeks", ["Greeks", "./NQU26C28000:XCME", 0.18],
+           "Summary", ["Summary", "./NQU26C28000:XCME", 1200.0, 45.0]]
+    out = decode_compact_feed_data(data)
+    assert out == [
+        {"eventType": "Greeks", "eventSymbol": "./NQU26C28000:XCME", "volatility": 0.18},
+        {"eventType": "Summary", "eventSymbol": "./NQU26C28000:XCME",
+         "openInterest": 1200.0, "dayVolume": 45.0},
+    ]
