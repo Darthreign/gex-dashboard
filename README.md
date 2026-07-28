@@ -31,6 +31,11 @@ de structure de marché façon SpotGamma à partir des chaînes d'options CBOE :
 Gamma Exposure par strike, Delta Exposure, GEX net, niveau Zero Gamma,
 put/call ratios, skew IV, et proxy de flux delta intraday.
 
+**Envie de comprendre ce que chaque onglet et chaque chiffre affichent ?** →
+[Guide illustré](docs/guide/README.md), un fichier par onglet plus un fichier
+qui explique chaque nombre, pensé pour quelqu'un qui découvre le dashboard
+sans rien connaître aux options.
+
 ## Source de données
 
 Endpoint delayed public CBOE (non documenté officiellement) :
