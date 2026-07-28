@@ -20,7 +20,7 @@ from . import metrics, scales, store
 from .config import SETTINGS, UNDERLYINGS, targets
 from .i18n import LANGS, regime_text, t, wall_labels
 from .metrics import ET, EXPIRY_BUCKETS
-from .rtquote import QUOTES, credentials_present
+from .rtquote import PUBLIC_QUOTES, QUOTES, credentials_present
 from .scheduler import STATE, market_is_open
 
 # --- Palette (mode sombre, cf. skill dataviz) ---
@@ -836,8 +836,20 @@ def build_cards(symbol: str, lang: str, xf=None, scale: str | None = None) -> li
         df = st.enriched
         err = STATE.last_error
     if s is None:
-        wait = t(lang, "waiting_native" if symbol in ("NQ", "ES") else "waiting_short")
-        return [card(t(lang, "card_status"), "…", err or wait)]
+        delayed = PUBLIC_QUOTES.price(symbol) if symbol in ("NQ", "ES") else None
+        if symbol in ("NQ", "ES") and not credentials_present():
+            # sans compte, aucune collecte n'est en cours ni ne le sera jamais
+            # — "collecte en cours" mentirait par optimisme. Si un spot
+            # délayé existe, la tuile suivante l'affiche ; sinon la personne
+            # a déjà vu pourquoi via l'overlay (native_notice).
+            wait = t(lang, "native_no_chain_delayed" if delayed else "native_no_chain")
+        else:
+            wait = t(lang, "waiting_native" if symbol in ("NQ", "ES") else "waiting_short")
+        cards = [card(t(lang, "card_status"), "…", err or wait)]
+        if delayed:
+            cards.append(card(t(lang, "card_spot_delayed"), f"{delayed:,.2f}",
+                              t(lang, "card_spot_delayed_sub"), accent=C["muted"]))
+        return cards
     xf = xf or (lambda v: v)
 
     # Le GEX net dépend surtout du spot : l'open interest ne bouge qu'une fois
@@ -1158,9 +1170,14 @@ def create_app() -> Dash:
         sur futures) : sans identifiants, STATE ne sera JAMAIS peuplé pour ces
         deux-là — contrairement à un pull CBOE en échec, qui finit par
         aboutir. Le message doit donc dire "il manque des identifiants", pas
-        laisser croire à une collecte en cours qui n'arrivera jamais."""
+        laisser croire à une collecte en cours qui n'arrivera jamais.
+
+        Exception : si le repli public (PUBLIC_QUOTES) donne déjà un spot
+        délayé pour ce symbole, il y a quelque chose à montrer — pas la peine
+        de rediriger vers l'alternative transposée (NDX/SPY), la tuile spot
+        délayé de build_cards suffit."""
         hidden = {"display": "none"}
-        if symbol not in ("NQ", "ES") or credentials_present():
+        if symbol not in ("NQ", "ES") or credentials_present() or PUBLIC_QUOTES.price(symbol):
             return None, hidden, None, hidden, None
         alt = "NDX" if symbol == "NQ" else "SPY"
         banner = [

@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 
 import requests
 
@@ -34,6 +35,38 @@ log = logging.getLogger(__name__)
 TOKEN_URL = "https://api.tastyworks.com/oauth/token"
 QUOTE_TOKEN_URL = "https://api.tastyworks.com/api-quote-tokens"
 FUTURES_URL = "https://api.tastyworks.com/instruments/futures"
+
+# Flux public dxFeed (aucun compte, aucun jeton) — confirmé le 2026-07-28 :
+# AUTH_STATE renvoie directement AUTHORIZED, sans jamais demander de jeton.
+# Délayé (~15-20 min, vérifié par l'écart entre bidTime et l'heure réelle),
+# donc pas un remplacement du flux temps réel — un repli pour un poste sans
+# identifiants courtier plutôt que rien du tout sur NQ/ES.
+PUBLIC_DEMO_URL = "wss://demo.dxfeed.com/market-data/dxlink-ws"
+
+_QUARTERLY_MONTHS = (3, 6, 9, 12)
+_QUARTERLY_CODE = {3: "H", 6: "M", 9: "U", 12: "Z"}
+
+
+def _third_friday(year: int, month: int) -> date:
+    d = date(year, month, 1)
+    first_friday = 1 + (4 - d.weekday()) % 7  # weekday() : lundi=0 … vendredi=4
+    return date(year, month, first_friday + 14)
+
+
+def front_quarterly_code(today: date | None = None) -> str:
+    """Code mois+année (ex. "U26") du contrat trimestriel actif pour un future
+    indiciel (NQ, ES) — calculé sans appel réseau, contrairement à
+    `resolve_symbols` qui interroge l'API tastytrade authentifiée pour la
+    même info. Roule au contrat suivant ~1 semaine avant le 3e vendredi
+    (approximation suffisante pour un spot d'affichage, pas pour trader le
+    roll lui-même)."""
+    today = today or date.today()
+    for month in _QUARTERLY_MONTHS:
+        expiry = _third_friday(today.year, month)
+        if today <= expiry - timedelta(days=7):
+            return f"{_QUARTERLY_CODE[month]}{today.year % 100:02d}"
+    year = today.year + 1
+    return f"{_QUARTERLY_CODE[3]}{year % 100:02d}"
 
 # Au-delà de ce silence (secondes) on considère le flux dégradé : la connexion
 # tient mais plus rien n'arrive. Hors séance, l'absence de tick est normale —
@@ -386,3 +419,41 @@ class RealtimeQuotes:
 
 
 QUOTES = RealtimeQuotes()
+
+
+@dataclass
+class PublicDelayedQuotes(RealtimeQuotes):
+    """Repli gratuit sans compte : spot NQ/ES délayé (~15-20 min) via le flux
+    public dxFeed. Ne tourne QUE si aucun identifiant courtier n'est
+    configuré — un vrai compte donne le temps réel via QUOTES, ce repli
+    n'a alors plus de raison d'être.
+
+    Réutilise tout `RealtimeQuotes._session()` tel quel (SETUP/AUTH_STATE/
+    CHANNEL_REQUEST/FEED_SETUP/FEED_SUBSCRIPTION/KEEPALIVE) : seules les deux
+    méthodes qui, dans la version courtier, appelaient l'API tastytrade
+    authentifiée (jeton + résolution du contrat actif) sont remplacées par
+    un calcul local — c'est la seule vraie différence entre les deux flux.
+    """
+
+    def start(self) -> None:
+        if self._started:
+            return
+        if credentials_present():
+            return  # un compte réel est configuré : pas de repli à lancer
+        self._started = True
+        self._state = "connecting"
+        threading.Thread(target=self._run, name="rtquote-public", daemon=True).start()
+        log.info("Spot NQ/ES délayé (public, sans compte) : démarrage")
+
+    def _quote_token(self) -> tuple[str, str, str]:
+        # "demo" : aucun jeton réel requis (AUTH_STATE renvoie AUTHORIZED
+        # directement), mais une chaîne non vide au cas où une session
+        # demanderait quand même un AUTH.
+        return "demo", PUBLIC_DEMO_URL, ""
+
+    def _resolve_symbols(self, access: str) -> dict[str, str]:
+        code = front_quarterly_code()
+        return {"NQ": f"/NQ{code}:XCME", "ES": f"/ES{code}:XCME"}
+
+
+PUBLIC_QUOTES = PublicDelayedQuotes()

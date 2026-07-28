@@ -7,8 +7,16 @@ Aucun de ces tests ne touche le réseau.
 from __future__ import annotations
 
 import time
+from datetime import date
 
-from gex.rtquote import RealtimeQuotes, Tick, decode_compact_feed_data
+from gex.rtquote import (
+    PUBLIC_DEMO_URL,
+    PublicDelayedQuotes,
+    RealtimeQuotes,
+    Tick,
+    decode_compact_feed_data,
+    front_quarterly_code,
+)
 
 
 def _connected(age_s: float = 0.0) -> RealtimeQuotes:
@@ -127,3 +135,44 @@ def test_decode_compact_greeks_et_summary():
         {"eventType": "Summary", "eventSymbol": "./NQU26C28000:XCME",
          "openInterest": 1200.0, "dayVolume": 45.0},
     ]
+
+
+def test_front_quarterly_code_mois_normal():
+    """Bien avant le roulement : le contrat du trimestre en cours."""
+    assert front_quarterly_code(date(2026, 1, 15)) == "H26"   # mars
+    assert front_quarterly_code(date(2026, 3, 10)) == "H26"   # encore mars (3j avant le 3e vendredi)
+
+
+def test_front_quarterly_code_roule_avant_expiration():
+    """Régime CME standard : on bascule sur le trimestre suivant ~1 semaine
+    avant l'expiration, pas le jour même — sans ça le spot afficherait un
+    contrat sur le point d'expirer plutôt que celui qui compte."""
+    # 3e vendredi de mars 2026 = 20/03 ; expiry-7 = 13/03
+    assert front_quarterly_code(date(2026, 3, 14)) == "M26"  # juin
+
+
+def test_front_quarterly_code_bascule_decembre_annee_suivante():
+    """Après le roulement de décembre, plus aucun trimestre de l'année en
+    cours ne convient : on retombe sur mars de l'année suivante."""
+    assert front_quarterly_code(date(2026, 12, 15)) == "H27"
+
+
+def test_public_delayed_quotes_symboles_sans_reseau():
+    """_resolve_symbols ne doit faire AUCUN appel réseau (contrairement à
+    resolve_symbols côté courtier) — c'est tout l'intérêt du repli."""
+    q = PublicDelayedQuotes()
+    code = front_quarterly_code()
+    assert q._resolve_symbols("") == {"NQ": f"/NQ{code}:XCME", "ES": f"/ES{code}:XCME"}
+    assert q._quote_token() == ("demo", PUBLIC_DEMO_URL, "")
+
+
+def test_public_delayed_quotes_ne_demarre_pas_si_compte_reel(monkeypatch):
+    """Le repli n'a de sens QUE sans identifiants — un compte réel doit
+    garder l'exclusivité du flux temps réel, pas tourner les deux en même
+    temps pour rien."""
+    import gex.rtquote as rtq
+
+    monkeypatch.setattr(rtq, "credentials_present", lambda: True)
+    q = PublicDelayedQuotes()
+    q.start()
+    assert q._started is False
