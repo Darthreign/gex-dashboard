@@ -94,7 +94,14 @@ def _vix_context() -> dict | None:
     cadence 10 min). La variation du jour reste calculée depuis l'historique
     délayé (seule série qui date un "premier point du jour") même quand le
     dernier niveau vient du direct : approximation assumée, pas une vraie
-    variation intraday tick à tick."""
+    variation intraday tick à tick.
+
+    Le flux public/démo (celui du repli NQ/ES, cf. PublicDelayedQuotes) n'a
+    volontairement PAS été étendu à VIX : testé hors séance, son dernier
+    print datait pile de l'heure de clôture (MARKET_CLOSE) — cote arrêtée,
+    pas un flux en retard. Sa latence réelle EN séance reste à vérifier avant
+    de l'utiliser comme repli gratuit ici ; ne pas réinterpréter cette note
+    comme "flux non fiable" sans nouveau test pendant les heures de marché."""
     vix_hist = store.load_index_spot("vix")
     day_open = None
     delayed_last = None
