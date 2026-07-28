@@ -17,6 +17,7 @@ from dash.dependencies import Input, Output, State
 from dash.exceptions import PreventUpdate
 
 from . import metrics, scales, store
+from .api import register_api
 from .config import SETTINGS, UNDERLYINGS, targets
 from .i18n import LANGS, regime_text, t, wall_labels
 from .metrics import ET, EXPIRY_BUCKETS
@@ -1440,5 +1441,7 @@ def create_app() -> Dash:
         days = available_flow_days(symbol)
         # le jour courant s'il a des flux, sinon le plus récent disponible
         return today if today in days else (days[-1] if days else None)
+
+    register_api(app)
 
     return app
