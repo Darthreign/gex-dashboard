@@ -38,6 +38,11 @@ class Underlying:
     #                 confluence (Blind Spots) — jamais proposé à l'affichage,
     #                 et pullé plus lentement car ses murs reposent sur l'open
     #                 interest, publié une fois par jour
+    # "context"     : pas une chaîne d'options — juste un ticker de contexte
+    #                 (VIX) pullé à part (scheduler.pull_vix) et absent de
+    #                 pull_all. Listé ici uniquement pour que
+    #                 rtquote.resolve_symbols l'inclue dans l'abonnement
+    #                 dxFeed du compte courtier, quand un est configuré.
     role: str = "target"
     # Cibles que ce constituant informe. Un titre présent dans deux indices
     # (AAPL, MSFT…) en alimente deux.
@@ -92,6 +97,12 @@ UNDERLYINGS: dict[str, Underlying] = {
         # Secteurs absents du Nasdaq-100 : ils n'informent que le S&P
         *[Underlying(k, k, k, family="SP", role="constituent", links=("SPX",))
           for k in ("XLF", "XLE")],
+
+        # Contexte (get_market_context, MCP) : `cboe_symbol` est un
+        # placeholder ignoré, VIX ne passe jamais par la boucle CBOE
+        # (cf. role="context" et scheduler.pull_vix, qui utilise directement
+        # le symbole CBOE "_VIX").
+        Underlying("VIX", "VIX", "VIX", family="SP", role="context"),
     ]
 }
 

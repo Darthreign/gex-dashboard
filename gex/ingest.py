@@ -107,3 +107,20 @@ def fetch_chain(symbol: str, cboe_symbol: str, timeout: int = 60) -> ChainSnapsh
     resp = _SESSION.get(url, timeout=timeout)
     resp.raise_for_status()
     return parse_chain(symbol, resp.json(), fetched_at=datetime.utcnow())
+
+
+def fetch_index_spot(cboe_symbol: str, timeout: int = 30) -> tuple[float, datetime]:
+    """Pull léger : juste le spot d'un indice (ex. VIX en confluence pour
+    get_market_context), sans parser sa chaîne d'options — même endpoint que
+    fetch_chain, qui expose `current_price` quel que soit le symbole."""
+    url = BASE_URL.format(sym=cboe_symbol)
+    resp = _SESSION.get(url, timeout=timeout)
+    resp.raise_for_status()
+    raw = resp.json()
+    ts = (
+        datetime.strptime(raw["timestamp"], "%Y-%m-%d %H:%M:%S")
+        .replace(tzinfo=timezone.utc)
+        .astimezone(_ET)
+        .replace(tzinfo=None)
+    )
+    return float(raw["data"]["current_price"]), ts

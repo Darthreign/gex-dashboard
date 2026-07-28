@@ -64,6 +64,23 @@ def append_history(row: dict) -> Path:
     return path
 
 
+def append_index_spot(key: str, row: dict) -> Path:
+    """Historique léger d'un indice de contexte (ex. VIX) — un spot horodaté,
+    pas une chaîne d'options. Alimente get_market_context (MCP), distinct de
+    history/metrics.parquet qui suppose le schéma SummaryMetrics.as_row()."""
+    path = _ensure(SETTINGS.data_dir / "history" / f"{key}.parquet")
+    new = pd.DataFrame([row])
+    if path.exists():
+        new = pd.concat([pd.read_parquet(path), new], ignore_index=True)
+    _write_atomic(new, path)
+    return path
+
+
+def load_index_spot(key: str) -> pd.DataFrame:
+    path = SETTINGS.data_dir / "history" / f"{key}.parquet"
+    return pd.read_parquet(path) if path.exists() else pd.DataFrame()
+
+
 def append_prices(symbol: str, rows: list[dict], ts: datetime) -> Path:
     """Ajoute des bougies 1 min au fichier du jour.
 

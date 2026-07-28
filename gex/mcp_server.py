@@ -14,8 +14,10 @@ from pathlib import Path
 import pandas as pd
 from mcp.server.fastmcp import FastMCP
 
+from . import store
 from .config import SETTINGS, UNDERLYINGS
-from .metrics import ET
+from .metrics import ET, regime_read
+from .rtquote import QUOTES, credentials_present
 
 mcp = FastMCP("gex-data")
 
@@ -83,6 +85,101 @@ def get_gex_by_strike(symbol: str = "SPX", top_n: int = 15) -> str:
         for r in top.itertuples()
     ]
     return json.dumps({"snapshot": path.name, "murs_de_gamma": rows})
+
+
+def _vix_context() -> dict | None:
+    """VIX en direct via dxFeed si un compte courtier est configuré ET que
+    l'abonnement inclut ce ticker (`QUOTES.price` renvoie None sinon, repli
+    silencieux) — sinon le pull délayé CBOE (scheduler.pull_vix, ~15 min,
+    cadence 10 min). La variation du jour reste calculée depuis l'historique
+    délayé (seule série qui date un "premier point du jour") même quand le
+    dernier niveau vient du direct : approximation assumée, pas une vraie
+    variation intraday tick à tick."""
+    vix_hist = store.load_index_spot("vix")
+    day_open = None
+    delayed_last = None
+    delayed_nb_points = 0
+    if not vix_hist.empty:
+        vix_hist = vix_hist.sort_values("timestamp")
+        today = str(pd.to_datetime(vix_hist["timestamp"].iloc[-1]).date())
+        today_rows = vix_hist[pd.to_datetime(vix_hist["timestamp"]).dt.strftime("%Y-%m-%d") == today]
+        if not today_rows.empty:
+            day_open = float(today_rows["vix"].iloc[0])
+            delayed_last = float(today_rows["vix"].iloc[-1])
+            delayed_nb_points = len(today_rows)
+
+    vix_live = QUOTES.price("VIX") if credentials_present() else None
+    if vix_live is not None:
+        return {
+            "dernier": vix_live,
+            "source": "dxfeed_live",
+            "variation_du_jour": (vix_live - day_open) if day_open is not None else None,
+        }
+    if delayed_last is not None:
+        return {
+            "dernier": delayed_last,
+            "source": "cboe_delaye",
+            "variation_du_jour": (delayed_last - day_open) if delayed_nb_points > 1 else None,
+        }
+    return None
+
+
+@mcp.tool()
+def get_market_context(symbol: str = "SPX") -> str:
+    """Vue d'ensemble condensée d'un sous-jacent : régime gamma (frein/
+    accélération, cf. metrics.regime_read), position du spot par rapport au
+    Zero Gamma, murs de gamma les plus proches (au-dessus et en-dessous du
+    spot), P/C ratio, et VIX (dernier niveau + variation du jour) en
+    confluence. Pensé pour éviter d'enchaîner get_gex_summary +
+    get_gex_by_strike + une lecture VIX séparée sur une question du type
+    « le contexte est-il propice à une journée directionnelle ? ».
+
+    Ne renvoie ni probabilité de scénario ni recommandation de position —
+    uniquement des données calculées, à interpréter, jamais un signal."""
+    symbol = _check_symbol(symbol)
+    metrics_path = SETTINGS.data_dir / "history" / "metrics.parquet"
+    if not metrics_path.exists():
+        return "Aucun historique — le dashboard n'a pas encore tourné."
+    hist = pd.read_parquet(metrics_path)
+    hist = hist[hist["symbol"] == symbol].sort_values("timestamp")
+    if hist.empty:
+        return f"Aucune donnée pour {symbol}."
+    last = hist.iloc[-1]
+    spot = float(last["spot"])
+    zero_gamma = float(last["zero_gamma"]) if pd.notna(last.get("zero_gamma")) else None
+    net_dex = float(last["net_dex"]) if pd.notna(last.get("net_dex")) else 0.0
+
+    regime = regime_read(
+        float(last["net_gex"]), net_dex,
+        dex_history=hist["net_dex"] if "net_dex" in hist.columns else None,
+    )
+
+    walls = json.loads(get_gex_by_strike(symbol, 15))["murs_de_gamma"]
+    calls_above = [w for w in walls if w["strike"] > spot and w["gex_net_dollars"] > 0]
+    puts_below = [w for w in walls if w["strike"] < spot and w["gex_net_dollars"] < 0]
+    call_wall = min(calls_above, key=lambda w: w["strike"]) if calls_above else None
+    put_wall = max(puts_below, key=lambda w: w["strike"]) if puts_below else None
+
+    vix_ctx = _vix_context()
+
+    out = {
+        "symbol": symbol,
+        "spot": spot,
+        "net_gex": float(last["net_gex"]),
+        "zero_gamma": zero_gamma,
+        "spot_vs_zero_gamma": (spot - zero_gamma) if zero_gamma is not None else None,
+        "regime": {
+            "severite": regime["severity"],
+            "cle": regime["i18n_key"],
+            "gex_frein": regime["gex_frein"],
+            "magnitude_dex": regime["magnitude"],
+        },
+        "pc_oi": float(last["pc_oi"]) if pd.notna(last.get("pc_oi")) else None,
+        "mur_call_proche": call_wall,
+        "mur_put_proche": put_wall,
+        "vix": vix_ctx,
+    }
+    return json.dumps(out, default=str)
 
 
 @mcp.tool()

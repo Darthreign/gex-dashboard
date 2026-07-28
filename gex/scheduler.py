@@ -17,7 +17,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from . import backup, metrics, store
 from .config import SETTINGS, UNDERLYINGS
-from .ingest import ChainSnapshot, fetch_chain
+from .ingest import ChainSnapshot, fetch_chain, fetch_index_spot
 from .metrics import ET, SummaryMetrics
 from . import futopt
 from .rtquote import PUBLIC_QUOTES, QUOTES, credentials_present
@@ -121,14 +121,32 @@ _CONSTITUENT_CADENCE = _Cadence(SETTINGS.constituent_interval_s)
 _CONSTITUENT_SNAPSHOT = _Cadence(SETTINGS.constituent_snapshot_interval_s)
 
 
+def pull_vix() -> None:
+    """VIX comme donnée de confluence (get_market_context, MCP) : pas un
+    sous-jacent analysé, juste un spot horodaté — cf. store.append_index_spot.
+    Cadence alignée sur les constituants (~10 min), un signal de fond n'a pas
+    besoin d'une résolution à la minute."""
+    try:
+        spot, ts = fetch_index_spot("_VIX")
+        store.append_index_spot("vix", {"timestamp": ts, "vix": spot})
+    except Exception:  # noqa: BLE001 — un échec VIX ne doit rien casser d'autre
+        log.exception("Échec pull VIX")
+
+
 def pull_all(force: bool = False) -> None:
     if SETTINGS.market_hours_only and not market_is_open() and not force:
         return
     persist = _CADENCE.tick()
     due = _CONSTITUENT_CADENCE.tick()
     persist_constituent = _CONSTITUENT_SNAPSHOT.tick()
+    if due or force:
+        pull_vix()
     for key, u in UNDERLYINGS.items():
         if not u.enabled:
+            continue
+        if u.role == "context":
+            # pas une chaîne d'options — pullé séparément (pull_vix), listé
+            # dans UNDERLYINGS uniquement pour l'abonnement dxFeed live
             continue
         if u.source == "futopt":
             # collecte native séparée (pull_native_options) : une chaîne
