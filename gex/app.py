@@ -854,6 +854,34 @@ def live_spot(symbol: str, fallback: float) -> tuple[float, bool]:
     return (px, True) if px else (fallback, False)
 
 
+def pc_gauge(symbol: str, lang: str) -> html.Div:
+    """Jauge visuelle calls vs puts, sur l'open interest — même donnée que la
+    tuile "P/C Open Interest", juste plus lisible d'un coup d'œil qu'un
+    ratio brut. part_calls = 1/(1+pc_oi) : dérivable directement du ratio
+    déjà stocké (pc_oi = OI puts / OI calls), aucun nouveau calcul requis."""
+    st = STATE.get(symbol)
+    with STATE.lock:
+        s = st.summary
+    if s is None or not s.pc_oi or s.pc_oi <= 0:
+        return html.Div(style={"display": "none"})
+    call_share = 1.0 / (1.0 + s.pc_oi)
+    put_share = 1.0 - call_share
+    return html.Div([
+        html.Div([
+            html.Span(t(lang, "pc_gauge_calls", pct=f"{call_share * 100:.0f}"),
+                     style={"color": C["pos"]}),
+            html.Span(t(lang, "pc_gauge_puts", pct=f"{put_share * 100:.0f}"),
+                     style={"color": C["neg"]}),
+        ], className="pc-gauge-labels"),
+        html.Div([
+            html.Div(style={"width": f"{call_share * 100:.2f}%"},
+                     className="pc-gauge-fill pc-gauge-calls"),
+            html.Div(style={"width": f"{put_share * 100:.2f}%"},
+                     className="pc-gauge-fill pc-gauge-puts"),
+        ], className="pc-gauge-track"),
+    ], className="pc-gauge")
+
+
 _REGIME_SEVERITY_COLOR = {"info": "hvl", "warning": "zg", "danger": "neg"}
 
 
@@ -1011,6 +1039,7 @@ def create_app() -> Dash:
         # ---------------------------------------------------------- contenu
         html.Div([
             html.Div(id="cards", className="cards"),
+            html.Div(id="pc-gauge"),
             html.Div(id="regime-banner"),
             html.Div([
                 html.Div(id="levels", className="chips"),
@@ -1273,7 +1302,8 @@ def create_app() -> Dash:
         return alt
 
     @app.callback(
-        [Output("cards", "children"), Output("regime-banner", "children")],
+        [Output("cards", "children"), Output("regime-banner", "children"),
+         Output("pc-gauge", "children")],
         [Input("rt-tick", "n_intervals"), Input("symbol", "value"),
          Input("lang", "value"), Input("unit", "value")],
     )
@@ -1286,7 +1316,8 @@ def create_app() -> Dash:
         est négligeable devant la grille de 161 points du Gamma Flip.
         """
         xf, _, _ = _transform_for(symbol, unit)
-        return build_cards(symbol, lang, xf, scale=unit), regime_banner(symbol, lang)
+        return (build_cards(symbol, lang, xf, scale=unit), regime_banner(symbol, lang),
+                pc_gauge(symbol, lang))
 
     @app.callback(
         [Output("levels", "children"), Output("gex-strike", "figure"),

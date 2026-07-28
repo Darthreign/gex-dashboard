@@ -279,6 +279,31 @@ body {
 
 .stat-sub { font-size: 10.5px; color: var(--ink-2); }
 
+/* ------------------------------------------------------------ P/C gauge */
+
+.pc-gauge { margin-bottom: 12px; }
+
+.pc-gauge-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 4px;
+}
+
+.pc-gauge-track {
+  display: flex;
+  height: 8px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--line);
+}
+
+.pc-gauge-fill { height: 100%; transition: width 0.4s ease; }
+.pc-gauge-calls { background: var(--pos); }
+.pc-gauge-puts { background: var(--neg); }
+
 /* ---------------------------------------------------------- regime banner */
 
 .regime-banner {
