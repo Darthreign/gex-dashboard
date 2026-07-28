@@ -20,7 +20,7 @@ from .config import SETTINGS, UNDERLYINGS
 from .ingest import ChainSnapshot, fetch_chain
 from .metrics import ET, SummaryMetrics
 from . import futopt
-from .rtquote import QUOTES, credentials_present
+from .rtquote import PUBLIC_QUOTES, QUOTES, credentials_present
 
 log = logging.getLogger(__name__)
 
@@ -278,14 +278,9 @@ def pull_native_options() -> None:
             log.exception("%s : échec de la collecte native", code)
 
 
-def flush_prices() -> None:
-    """Écrit sur disque les bougies 1 min achevées par le flux temps réel.
-
-    Sans identifiants courtier, `drain_bars` renvoie une liste vide et la
-    fonction ne fait rien : la collecte de prix est optionnelle comme le reste
-    de la couche temps réel.
-    """
-    bars = QUOTES.drain_bars()
+def _flush_bars(bars: list, source: str) -> None:
+    """Écrit sur disque les bougies 1 min achevées, quelle que soit la
+    source (compte courtier ou repli public délayé — cf. flush_prices)."""
     if not bars:
         return
     by_symbol: dict[str, list[dict]] = {}
@@ -294,14 +289,34 @@ def flush_prices() -> None:
         by_symbol.setdefault(symbol, []).append({
             "timestamp": ts, "open": bar.open, "high": bar.high,
             "low": bar.low, "close": bar.close, "ticks": bar.ticks,
-            # provenance courtier : non redistribuable (cf. gex/export.py)
-            "source": "dxfeed",
+            "source": source,
         })
     for symbol, rows in by_symbol.items():
         try:
             store.append_prices(symbol, rows, rows[0]["timestamp"])
         except Exception:  # noqa: BLE001 — une écriture ratée ne doit rien casser
             log.exception("Échec écriture des prix %s", symbol)
+
+
+def flush_prices() -> None:
+    """Écrit sur disque les bougies 1 min achevées par le flux temps réel.
+
+    Sans identifiants courtier, `QUOTES.drain_bars()` renvoie une liste vide
+    (la couche temps réel payante est inerte), mais `PUBLIC_QUOTES` — le
+    repli gratuit délayé sur NQ/ES (cf. rtquote.PublicDelayedQuotes) —
+    construit ses propres bougies de la même façon et doit être vidé lui
+    aussi : sans cette ligne, ses bougies s'accumulaient en mémoire sans
+    jamais être écrites, et le Heatmap retombait sur le repli grossier
+    (un point par pull, ~10 min) même là où un spot délayé existait déjà.
+
+    Provenance marquée à l'écriture : "dxfeed" (courtier, licence usage
+    personnel non redistribuable) ou "dxfeed_public" (flux démo public,
+    délayé ~15-20 min) — les deux exclues de l'export par défaut (cf.
+    gex/export.py, qui n'autorise que source == "cboe"), mais distinguées
+    pour ne jamais laisser croire que l'une est l'autre.
+    """
+    _flush_bars(QUOTES.drain_bars(), "dxfeed")
+    _flush_bars(PUBLIC_QUOTES.drain_bars(), "dxfeed_public")
 
 
 def start_scheduler() -> BackgroundScheduler:
