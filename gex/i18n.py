@@ -11,6 +11,15 @@ TR: dict[str, dict[str, str]] = {
         "app_title": "Gamma / Delta Exposure",
         "waiting_first_pull": "En attente du premier pull CBOE…",
         "waiting_native": "Collecte native en cours (chaîne CME complète, ~3 à 5 min)…",
+        "native_banner": "Données {sym} indisponibles : nécessitent un compte courtier (identifiants dxFeed manquants).",
+        "native_more_info": "Plus d'infos",
+        "native_overlay_title": "{sym} nécessite un compte courtier",
+        "native_overlay_body": "Les chaînes natives sur futures CME ({sym}) exigent un flux temps réel "
+                        "dxFeed via un compte courtier — gratuit avec le compte, mais pas configuré ici. "
+                        "Ce n'est pas pénalisant en attendant : {alt} affiche des niveaux quasi "
+                        "identiques, transposables vers {sym} via l'échelle dans le sélecteur d'unité.",
+        "native_overlay_link": "Comment activer le temps réel",
+        "native_overlay_ok": "OK, afficher {alt}",
         "no_data_window": "Pas de données dans la fenêtre de strikes",
         "no_flow_day": "Aucun flux enregistré le {day}",
         "not_enough_history": "Historique insuffisant (revenez après quelques snapshots)",
@@ -139,6 +148,15 @@ TR: dict[str, dict[str, str]] = {
         "app_title": "Gamma / Delta Exposure",
         "waiting_first_pull": "Waiting for first CBOE pull…",
         "waiting_native": "Native collection in progress (full CME chain, ~3 to 5 min)…",
+        "native_banner": "{sym} data unavailable: requires a broker account (dxFeed credentials missing).",
+        "native_more_info": "More info",
+        "native_overlay_title": "{sym} requires a broker account",
+        "native_overlay_body": "Native CME futures chains ({sym}) require a real-time dxFeed stream via "
+                        "a broker account — free with the account, but not configured here. Nothing is "
+                        "lost in the meantime: {alt} shows nearly identical levels, transposable to "
+                        "{sym} via the scale picker.",
+        "native_overlay_link": "How to enable real-time",
+        "native_overlay_ok": "OK, show {alt}",
         "no_data_window": "No data in the strike window",
         "no_flow_day": "No flow recorded on {day}",
         "not_enough_history": "Not enough history yet (check back after a few snapshots)",

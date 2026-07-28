@@ -20,7 +20,7 @@ from . import metrics, scales, store
 from .config import SETTINGS, UNDERLYINGS, targets
 from .i18n import LANGS, regime_text, t, wall_labels
 from .metrics import ET, EXPIRY_BUCKETS
-from .rtquote import QUOTES
+from .rtquote import QUOTES, credentials_present
 from .scheduler import STATE, market_is_open
 
 # --- Palette (mode sombre, cf. skill dataviz) ---
@@ -895,6 +895,10 @@ def create_app() -> Dash:
                         className="ctl")
 
     app.layout = html.Div([
+        # bandeau + superposition : NQ/ES sans identifiants dxFeed (cf.
+        # native_notice_content) — vides par défaut, peuplés par le callback
+        # native_notice sur changement de symbole.
+        html.Div(id="native-banner", className="native-banner", style={"display": "none"}),
         # ------------------------------------------------------ barre haute
         html.Div([
             html.Div([
@@ -1017,6 +1021,8 @@ def create_app() -> Dash:
             dcc.Store(id="lang-boot", data=0),
             html.Div(id="footer", className="footer"),
         ], className="page"),
+        dcc.Store(id="native-alt"),  # "NDX" ou "SPY" : cible du bouton OK
+        html.Div(id="native-overlay", className="native-overlay", style={"display": "none"}),
     ])
 
     def _chip(children, accent):
@@ -1140,6 +1146,48 @@ def create_app() -> Dash:
         # le sous-titre ne promet le temps réel que si le flux le tient
         sub = t(lang, "brand_sub_rt" if state == "connected" else "brand_sub")
         return (sub, {}, f"rt-badge rt-{state}", tip, "dxFeed")
+
+    @app.callback(
+        [Output("native-banner", "children"), Output("native-banner", "style"),
+         Output("native-overlay", "children"), Output("native-overlay", "style"),
+         Output("native-alt", "data")],
+        [Input("symbol", "value"), Input("lang", "value")],
+    )
+    def native_notice(symbol, lang):
+        """NQ/ES n'existent QUE via dxFeed (pas de repli CBOE pour des options
+        sur futures) : sans identifiants, STATE ne sera JAMAIS peuplé pour ces
+        deux-là — contrairement à un pull CBOE en échec, qui finit par
+        aboutir. Le message doit donc dire "il manque des identifiants", pas
+        laisser croire à une collecte en cours qui n'arrivera jamais."""
+        hidden = {"display": "none"}
+        if symbol not in ("NQ", "ES") or credentials_present():
+            return None, hidden, None, hidden, None
+        alt = "NDX" if symbol == "NQ" else "SPY"
+        banner = [
+            html.Span(t(lang, "native_banner", sym=symbol)),
+            html.A(t(lang, "native_more_info"), href="/assets/faq.html#realtime",
+                  target="_blank"),
+        ]
+        overlay = html.Div([
+            html.H3(t(lang, "native_overlay_title", sym=symbol)),
+            html.P(t(lang, "native_overlay_body", sym=symbol, alt=alt)),
+            html.A(t(lang, "native_overlay_link"), href="/assets/faq.html#realtime",
+                  target="_blank", style={"display": "block", "marginBottom": "14px"}),
+            html.Button(t(lang, "native_overlay_ok", alt=alt),
+                       id="native-overlay-ok", n_clicks=0, className="btn"),
+        ], className="native-overlay-card")
+        return banner, {}, overlay, {}, alt
+
+    @app.callback(
+        Output("symbol", "value"),
+        Input("native-overlay-ok", "n_clicks"),
+        State("native-alt", "data"),
+        prevent_initial_call=True,
+    )
+    def native_overlay_dismiss(n_clicks, alt):
+        if not n_clicks or not alt:
+            raise PreventUpdate
+        return alt
 
     @app.callback(
         [Output("cards", "children"), Output("regime-banner", "children")],

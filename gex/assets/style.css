@@ -29,6 +29,64 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* ------------------------------------------------------- avis NQ/ES natif */
+
+.native-banner {
+  background: rgba(230, 103, 103, 0.15);
+  border-bottom: 1px solid var(--neg);
+  color: var(--ink);
+  font-size: 12.5px;
+  padding: 8px 24px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.native-banner a { color: var(--ink); text-decoration: underline; }
+
+.native-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.native-overlay-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 22px 26px;
+  max-width: 460px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.native-overlay-card h3 {
+  margin: 0 0 10px;
+  font-size: 15px;
+  color: var(--neg);
+}
+
+.native-overlay-card p {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.native-overlay-card a { color: var(--pos); }
+
+.native-overlay-card .btn {
+  width: 100%;
+  text-align: center;
+  padding: 8px 0;
+}
+
 /* ---------------------------------------------------------------- header */
 
 .topbar {
