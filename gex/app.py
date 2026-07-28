@@ -107,6 +107,8 @@ def time_range_selector() -> dict:
     return dict(
         rangeselector=dict(
             buttons=[
+                dict(count=1, label="1H", step="hour", stepmode="backward"),
+                dict(count=1, label="1J", step="day", stepmode="backward"),
                 dict(count=7, label="1S", step="day", stepmode="backward"),
                 dict(count=1, label="1M", step="month", stepmode="backward"),
                 dict(count=3, label="3M", step="month", stepmode="backward"),
@@ -936,6 +938,9 @@ def build_cards(symbol: str, lang: str, xf=None, scale: str | None = None) -> li
         card(t(lang, "card_net_gex"), f"{net_gex / 1e9:+.1f} $Bn",
              t(lang, "stabilizing") if net_gex >= 0 else t(lang, "destabilizing"),
              accent=gex_color),
+        card(t(lang, "card_net_dex"), f"{s.net_dex / 1e9:+.1f} $Bn",
+             t(lang, "dex_long") if s.net_dex >= 0 else t(lang, "dex_short"),
+             accent=C["pos"] if s.net_dex >= 0 else C["neg"]),
         card(t(lang, "card_zero_gamma"), zg_txt, zg_sub, accent=C["zg"]),
         card(t(lang, "card_gex_0dte"), f"{s.net_gex_0dte / 1e9:+.1f} $Bn"),
         card(t(lang, "card_pc_oi"), f"{s.pc_oi:.2f}"),
