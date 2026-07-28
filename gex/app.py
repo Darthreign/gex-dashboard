@@ -306,7 +306,8 @@ def available_flow_days(symbol: str) -> list[str]:
 
 
 def heatmap_fig(symbol: str, lang: str, day: str | None = None,
-                window: float = 0.04, xf=None) -> go.Figure:
+                window: float = 0.04, xf=None, unit: str | None = None,
+                levels_shown: list[str] | None = None) -> go.Figure:
     """Profil de gamma en barres + parcours du prix, sur un axe de prix commun.
 
     Deux échelles horizontales partagent l'axe vertical des prix : les barres
@@ -322,11 +323,24 @@ def heatmap_fig(symbol: str, lang: str, day: str | None = None,
     day = day or datetime.now(ET).strftime("%Y-%m-%d")
     title = t(lang, "heat_title", day=day)
     xf = xf or (lambda v: v)
+    levels_shown = (levels_shown if levels_shown is not None
+                    else ["zero_gamma", "call_wall", "put_support"])
 
     df, spot = _chain_for_day(symbol, day)
-    path = _price_overlay(symbol, day)
     if df is None or df.empty or not spot:
         return empty_fig(t(lang, "heat_none", day=day), title)
+
+    # Parcours du prix : si l'échelle affichée est un future qui a SON PROPRE
+    # historique (NQ/ES), on le prend tel quel — inutile de transposer une
+    # approximation quand le prix réel existe déjà à cette échelle. Sinon on
+    # retombe sur l'historique du symbole natif, passé par xf.
+    path, native_price = None, False
+    if unit and unit in ("NQ", "ES") and unit != symbol:
+        alt = _price_overlay(unit, day)
+        if alt is not None and not alt.empty:
+            path, native_price = alt, True
+    if path is None:
+        path = _price_overlay(symbol, day)
 
     lo, hi = spot * (1 - window), spot * (1 + window)
     sel = df[df["strike"].between(lo, hi)]
@@ -362,24 +376,55 @@ def heatmap_fig(symbol: str, lang: str, day: str | None = None,
         )
 
     if path is not None and not path.empty:
-        fig.add_scatter(x=to_local(path["timestamp"]), y=xf(path["close"].to_numpy()),
-                        mode="lines", name=t(lang, "legend_spot"),
-                        line=dict(color="#22d3ee", width=1.3),
-                        hovertemplate=(f"%{{x|%H:%M}}<br>{t(lang, 'legend_spot')}"
-                                       " %{y:.0f}<extra></extra>"))
+        ts = to_local(path["timestamp"])
+        # bougies véritables si open/high/low/close sont distincts quelque
+        # part (sinon — repli sur les spots de snapshots — les 4 valent la
+        # même chose et une bougie n'aurait aucun sens à tracer)
+        has_ohlc = (path["open"] != path["close"]).any() or (path["high"] != path["low"]).any()
+        _id = (lambda v: v) if native_price else xf
+        if has_ohlc:
+            fig.add_candlestick(
+                x=ts, open=_id(path["open"].to_numpy()), high=_id(path["high"].to_numpy()),
+                low=_id(path["low"].to_numpy()), close=_id(path["close"].to_numpy()),
+                name=t(lang, "legend_spot"), increasing=dict(line=dict(color=C["pos"])),
+                decreasing=dict(line=dict(color=C["neg"])),
+            )
+        else:
+            fig.add_scatter(x=ts, y=_id(path["close"].to_numpy()),
+                            mode="lines", name=t(lang, "legend_spot"),
+                            line=dict(color="#22d3ee", width=1.3),
+                            hovertemplate=(f"%{{x|%H:%M}}<br>{t(lang, 'legend_spot')}"
+                                           " %{y:.0f}<extra></extra>"))
 
-    # repères horizontaux : le spot, la bascule de régime, et les deux murs les
-    # plus lourds de chaque côté — de quoi situer le prix sans quitter l'onglet
+    # repères horizontaux, choisis par la checklist de l'onglet — seul le
+    # spot reste toujours affiché, comme référence de lecture systématique
     keys = metrics.key_levels(sel, spot)
     items = [dict(y=xf(spot), label=t(lang, "legend_spot"), color=C["spot"], dash="dot")]
-    zg = metrics.zero_gamma(df, spot)
-    if zg is not None:
-        items.append(dict(y=xf(zg), label="Gamma Flip", color=C["zg"], dash="dash"))
-    for key, color, label in (("call_wall", C["cw"], "Call Wall"),
-                              ("put_support", C["ps"], "Put Support")):
+    if "zero_gamma" in levels_shown:
+        zg = metrics.zero_gamma(df, spot)
+        if zg is not None:
+            items.append(dict(y=xf(zg), label="Gamma Flip", color=C["zg"], dash="dash"))
+    if "hvl" in levels_shown:
+        hvl = metrics.zero_gamma(df, spot, weight_col="volume")
+        if hvl is not None:
+            items.append(dict(y=xf(hvl), label="HVL", color=C["hvl"], dash="dash"))
+    for opt_key, key, color, label in (
+        ("call_wall", "call_wall", C["cw"], "Call Wall"),
+        ("put_support", "put_support", C["ps"], "Put Support"),
+        ("d1", "d1_min", C["d1"], "1D Min"),
+        ("d1", "d1_max", C["d1"], "1D Max"),
+    ):
+        if opt_key not in levels_shown:
+            continue
         v = keys.get(key)
         if v is not None:
             items.append(dict(y=xf(v), label=label, color=color, dash="dash"))
+    if "gex_walls" in levels_shown:
+        walls = metrics.top_gex_levels(sel, ref_spot=spot)
+        labels = wall_labels(walls) if not walls.empty else {}
+        for lv in walls.itertuples():
+            items.append(dict(y=xf(lv.strike), label=labels.get(lv.strike, "GEX"),
+                              color=C["lvl"], dash="dot"))
     _draw_levels(fig, items, xf(lo), xf(hi))
 
     lay = with_legend(base_layout(title, height=560))
@@ -433,11 +478,12 @@ def _chain_for_day(symbol: str, day: str) -> tuple[pd.DataFrame | None, float | 
 
 
 def _price_overlay(symbol: str, day: str) -> pd.DataFrame | None:
-    """Parcours du prix pour le heatmap : bougies 1 min, à défaut les spots
-    des snapshots (plus grossiers mais toujours parlants)."""
+    """Parcours du prix pour le heatmap : bougies 1 min (open/high/low/close),
+    à défaut les spots des snapshots (plus grossiers, une seule valeur par
+    pull — open=high=low=close, pas de vraies bougies possibles avec ça)."""
     px = store.load_prices(symbol, day)
     if not px.empty:
-        return px.sort_values("timestamp")[["timestamp", "close"]]
+        return px.sort_values("timestamp")[["timestamp", "open", "high", "low", "close"]]
     h = store.load_history(symbol)
     if h.empty:
         return None
@@ -445,7 +491,9 @@ def _price_overlay(symbol: str, day: str) -> pd.DataFrame | None:
     sel = h[hts.dt.strftime("%Y-%m-%d") == day].sort_values("timestamp")
     if sel.empty:
         return None
-    return sel[["timestamp", "spot"]].rename(columns={"spot": "close"})
+    out = sel[["timestamp", "spot"]].rename(columns={"spot": "close"})
+    out["open"] = out["high"] = out["low"] = out["close"]
+    return out
 
 
 def gamma_flow_fig(symbol: str, lang: str, day: str | None = None,
@@ -1013,12 +1061,16 @@ def create_app() -> Dash:
 
             html.Div(id="pane-heat", children=[
                 html.Div(id="heat-hint", className="hint"),
-                # sélecteur propre : les jours disponibles sont ceux des
-                # snapshots de chaîne, pas ceux des fichiers de flux
-                html.Div([html.Span(id="heat-day-label", className="ctl-label"),
-                          dcc.Dropdown(id="heat-day", className="dash-dropdown",
-                                       clearable=False, style={"width": "180px"})],
-                         className="ctl"),
+                html.Div([
+                    # sélecteur propre : les jours disponibles sont ceux des
+                    # snapshots de chaîne, pas ceux des fichiers de flux
+                    html.Span(id="heat-day-label", className="ctl-label"),
+                    dcc.Dropdown(id="heat-day", className="dash-dropdown",
+                                 clearable=False, style={"width": "180px"}),
+                    html.Span(id="heat-levels-label", className="ctl-label"),
+                    dcc.Checklist(id="heat-levels", className="check", inline=True,
+                                 value=["zero_gamma", "call_wall", "put_support"]),
+                ], className="ctl", style={"flexWrap": "wrap"}),
                 dcc.Graph(config=GRAPH_CONFIG, id="heatmap"),
             ]),
 
@@ -1109,7 +1161,8 @@ def create_app() -> Dash:
          Output("app-title", "children"),
          Output("lbl-bucket", "children"), Output("lbl-window", "children"),
          Output("unit", "value"),
-         Output("lbl-gflow-series", "children"), Output("gflow-series", "options")],
+         Output("lbl-gflow-series", "children"), Output("gflow-series", "options"),
+         Output("heat-levels-label", "children"), Output("heat-levels", "options")],
         [Input("lang", "value"), Input("symbol", "value")],
     )
     def apply_lang(lang, symbol):
@@ -1118,6 +1171,12 @@ def create_app() -> Dash:
         gflow_series_opts = [{"label": t(lang, "legend_gcalls"), "value": "calls"},
                              {"label": t(lang, "legend_gputs"), "value": "puts"},
                              {"label": t(lang, "legend_gnet"), "value": "net"}]
+        heat_levels_opts = [{"label": "Gamma Flip", "value": "zero_gamma"},
+                           {"label": "HVL", "value": "hvl"},
+                           {"label": "Call Wall", "value": "call_wall"},
+                           {"label": "Put Support", "value": "put_support"},
+                           {"label": "1D Min/Max", "value": "d1"},
+                           {"label": t(lang, "heat_levels_gex_walls"), "value": "gex_walls"}]
         # échelles : le sous-jacent natif, puis les deux futures (la
         # transposition croisée SPX→NQ est le cas d'usage visé). Pour NQ/ES
         # eux-mêmes (chaîne native, pas transposée), la question ne se pose
@@ -1134,7 +1193,8 @@ def create_app() -> Dash:
                 t(lang, "last_session"), t(lang, "footer"), opts,
                 t(lang, "app_title"),
                 t(lang, "lbl_expiry"), t(lang, "lbl_window"), symbol,
-                t(lang, "gflow_series_label"), gflow_series_opts)
+                t(lang, "gflow_series_label"), gflow_series_opts,
+                t(lang, "heat_levels_label"), heat_levels_opts)
 
     @app.callback(
         [Output("brand-sub", "children"), Output("rt-badge", "style"),
@@ -1383,14 +1443,15 @@ def create_app() -> Dash:
         [Output("heatmap", "figure"), Output("heat-hint", "children")],
         [Input("tick", "n_intervals"), Input("tab", "value"), Input("symbol", "value"),
          Input("window", "value"), Input("lang", "value"), Input("unit", "value"),
-         Input("heat-day", "value")],
+         Input("heat-day", "value"), Input("heat-levels", "value")],
     )
-    def refresh_heatmap(_, tab, symbol, window, lang, unit, day):
+    def refresh_heatmap(_, tab, symbol, window, lang, unit, day, levels_shown):
         # onglet masqué : ne pas relire une quarantaine de fichiers pour rien
         if tab != "heat":
             raise PreventUpdate
         xf, _, _ = _transform_for(symbol, unit)
-        return heatmap_fig(symbol, lang, day, window, xf), t(lang, "heat_hint")
+        return (heatmap_fig(symbol, lang, day, window, xf, unit, levels_shown),
+                t(lang, "heat_hint"))
 
     @app.callback(
         [Output("oi-change", "figure"), Output("pos-hint", "children")],
