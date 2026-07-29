@@ -27,6 +27,56 @@ def _print(sym, side, size, price=10.0, spread=False):
             "price": price, "spreadLeg": spread}
 
 
+def test_delta_pondere_limpact_pas_le_nombre_de_contrats():
+    """Le cœur de la mesure façon HIRO : 100 calls très hors-monnaie
+    (delta 0,05) n'obligent le dealer à presque rien, 100 calls à la monnaie
+    (delta 0,50) le forcent à dix fois plus de couverture."""
+    t = _tape()
+    t._spot["SPX"] = 7400.0
+    t._delta[".SPXW260729C7400"] = 0.50
+    t.ingest_print(_print(".SPXW260729C7400", "BUY", 100), now=60.0)
+    proche = t.bars["SPX"].net_delta
+
+    t2 = _tape()
+    t2._spot["SPX"] = 7400.0
+    t2._delta[".SPXW260729C7400"] = 0.05
+    t2.ingest_print(_print(".SPXW260729C7400", "BUY", 100), now=60.0)
+    loin = t2.bars["SPX"].net_delta
+
+    assert proche == pytest.approx(100 * 0.50 * 100 * 7400.0)
+    assert proche == pytest.approx(loin * 10)
+
+
+def test_achat_de_puts_pousse_le_delta_vers_le_bas():
+    """Signe de l'impact de couverture : acheter des puts (delta négatif)
+    oblige le dealer à VENDRE du sous-jacent — pression baissière — alors que
+    le décompte de contrats, lui, serait positif dans les deux cas."""
+    t = _tape()
+    t._spot["SPX"] = 7400.0
+    t._delta[".SPXW260729P7400"] = -0.45
+    t.ingest_print(_print(".SPXW260729P7400", "BUY", 10), now=60.0)
+    bar = t.bars["SPX"]
+    assert bar.net_contracts > 0        # 10 contrats achetés
+    assert bar.net_delta < 0            # mais couverture VENDEUSE
+
+
+def test_print_sans_delta_connu_exclu_pas_estime():
+    t = _tape()
+    t._spot["SPX"] = 7400.0            # delta jamais reçu pour ce contrat
+    t.ingest_print(_print(".SPXW260729C7400", "BUY", 10), now=60.0)
+    bar = t.bars["SPX"]
+    assert bar.net_delta == 0.0
+    assert bar.no_delta_prints == 1
+    assert bar.net_contracts == pytest.approx(10.0)   # le reste compte quand même
+
+
+def test_ingest_greeks_ignore_les_symboles_non_suivis():
+    t = _tape()
+    t.ingest_greeks({"eventSymbol": ".AAPL260729C200", "delta": 0.5})
+    t.ingest_greeks({"eventSymbol": ".SPXW260729C7400", "delta": 0.42})
+    assert t._delta == {".SPXW260729C7400": 0.42}
+
+
 def test_signe_du_point_de_vue_de_lagresseur():
     t = _tape()
     t.ingest_print(_print(".SPXW260729C7400", "BUY", 10), now=60.0)

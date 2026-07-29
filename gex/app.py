@@ -543,6 +543,69 @@ def gamma_flow_fig(symbol: str, lang: str, day: str | None = None,
     return fig
 
 
+def tape_fig(symbol: str, lang: str, day: str | None = None,
+             series: list[str] | None = None) -> go.Figure:
+    """Order flow SIGNÉ cumulé sur la séance (cf. gex/flowtape.py).
+
+    À ne pas confondre avec `flow_fig` / `gamma_flow_fig` juste au-dessus :
+    ceux-là mesurent une activité pondérée, sans savoir qui a agressé le
+    carnet. Ici le côté vient de la source (`aggressorSide`), donc la courbe
+    dit réellement si les preneurs de liquidité ont acheté ou vendu.
+
+    Monte = les agresseurs achètent net, descend = ils vendent net. Les
+    jambes de combos sont exclues du net (elles ne sont pas directionnelles)
+    et les prints sont pondérés par leur taille, jamais comptés à l'unité.
+    """
+    day = day or datetime.now(ET).strftime("%Y-%m-%d")
+    tape = store.load_tape(symbol, day)
+    title = t(lang, "tape_title")
+    if tape.empty:
+        return empty_fig(t(lang, "no_tape_day", day=day), title)
+    series = series if series is not None else ["net", "calls", "puts"]
+    tape = tape.sort_values("timestamp")
+    ts = to_local(tape["timestamp"])
+    # Courbe pondérée par le DELTA, pas par le nombre de contrats : c'est ce
+    # qui en fait une mesure d'impact de couverture (cf. gex/flowtape.py).
+    # Les journées collectées avant l'ajout de cette colonne retombent sur le
+    # décompte de contrats plutôt que d'afficher une courbe plate.
+    if "net_delta" in tape.columns:
+        net = np.cumsum(tape["net_delta"].fillna(0.0).to_numpy()) / 1e6
+        unit, axis = t(lang, "unit_musd"), t(lang, "axis_tape_delta")
+    else:
+        net = np.cumsum(tape["net_contracts"].fillna(0.0).to_numpy())
+        unit, axis = t(lang, "unit_contracts"), t(lang, "axis_tape")
+    calls = np.cumsum(tape["net_calls"].fillna(0.0).to_numpy())
+    puts = np.cumsum(tape["net_puts"].fillna(0.0).to_numpy())
+
+    fig = go.Figure()
+    if "net" in series:
+        fig.add_scatter(x=ts, y=net, mode="lines", name=t(lang, "legend_tape_net"),
+                        line=dict(color=C["ink"], width=2.2),
+                        hovertemplate=(f"%{{x|%H:%M}}<br>{t(lang, 'legend_tape_net')}:"
+                                       f" %{{y:+,.1f}} {unit}<extra></extra>"))
+    # calls et puts restent en CONTRATS, sur leur propre axe : mélanger deux
+    # unités sur une même échelle donnerait une lecture fausse
+    for key, y, name, color in (
+        ("calls", calls, t(lang, "legend_tape_calls"), C["pos"]),
+        ("puts", puts, t(lang, "legend_tape_puts"), C["neg"]),
+    ):
+        if key not in series:
+            continue
+        fig.add_scatter(x=ts, y=y, mode="lines", name=name, yaxis="y2",
+                        line=dict(color=color, width=1.3, dash="dot"),
+                        hovertemplate=(f"%{{x|%H:%M}}<br>{name}: %{{y:+,.0f}}"
+                                       f" {t(lang, 'unit_contracts')}<extra></extra>"))
+    lay = with_legend(base_layout(title, height=340))
+    lay["yaxis"]["title"] = dict(text=axis, font=dict(color=C["muted"]))
+    lay["yaxis2"] = dict(overlaying="y", side="right", showgrid=False,
+                         zeroline=False, tickfont=dict(color=C["muted"]),
+                         title=dict(text=t(lang, "axis_tape"),
+                                    font=dict(color=C["muted"])))
+    fig.update_layout(**lay)
+    fig.add_hline(y=0, line_color=C["axis"], line_width=1)
+    return fig
+
+
 def flow_fig(symbol: str, lang: str, day: str | None = None) -> go.Figure:
     day = day or datetime.now(ET).strftime("%Y-%m-%d")
     flows = store.load_flows(symbol, day)
@@ -1071,6 +1134,17 @@ def create_app() -> Dash:
                                  value=["calls", "puts", "net"]),
                 ], className="daybar"),
                 dcc.Graph(config=GRAPH_CONFIG, id="gflow", style={"marginBottom": "12px"}),
+                # Order flow SIGNÉ : placé juste après les deux proxys non
+                # signés, pour que la différence saute aux yeux plutôt que de
+                # se deviner. Le bandeau porte la provenance et la licence.
+                html.Div([
+                    html.Span(id="lbl-tape-series", className="ctl-label"),
+                    dcc.Checklist(id="tape-series", className="check", inline=True,
+                                 value=["net", "calls", "puts"]),
+                ], className="daybar"),
+                dcc.Graph(config=GRAPH_CONFIG, id="tape"),
+                html.Div(id="tape-note", className="hint",
+                         style={"marginBottom": "12px"}),
                 html.Div([
                     dcc.Graph(config=GRAPH_CONFIG, id="gex-history"),
                     dcc.Graph(config=GRAPH_CONFIG, id="spot-zg"),
@@ -1196,6 +1270,8 @@ def create_app() -> Dash:
          Output("lbl-bucket", "children"), Output("lbl-window", "children"),
          Output("unit", "value"),
          Output("lbl-gflow-series", "children"), Output("gflow-series", "options"),
+         Output("lbl-tape-series", "children"), Output("tape-series", "options"),
+         Output("tape-note", "children"),
          Output("heat-levels-label", "children"), Output("heat-levels", "options")],
         [Input("lang", "value"), Input("symbol", "value")],
     )
@@ -1205,6 +1281,9 @@ def create_app() -> Dash:
         gflow_series_opts = [{"label": t(lang, "legend_gcalls"), "value": "calls"},
                              {"label": t(lang, "legend_gputs"), "value": "puts"},
                              {"label": t(lang, "legend_gnet"), "value": "net"}]
+        tape_series_opts = [{"label": t(lang, "legend_tape_net"), "value": "net"},
+                            {"label": t(lang, "legend_tape_calls"), "value": "calls"},
+                            {"label": t(lang, "legend_tape_puts"), "value": "puts"}]
         heat_levels_opts = [{"label": "Gamma Flip", "value": "zero_gamma"},
                            {"label": "HVL", "value": "hvl"},
                            {"label": "Call Wall", "value": "call_wall"},
@@ -1228,6 +1307,8 @@ def create_app() -> Dash:
                 t(lang, "app_title"),
                 t(lang, "lbl_expiry"), t(lang, "lbl_window"), symbol,
                 t(lang, "gflow_series_label"), gflow_series_opts,
+                t(lang, "tape_series_label"), tape_series_opts,
+                t(lang, "tape_note"),
                 t(lang, "heat_levels_label"), heat_levels_opts)
 
     @app.callback(
@@ -1322,7 +1403,7 @@ def create_app() -> Dash:
     @app.callback(
         [Output("levels", "children"), Output("gex-strike", "figure"),
          Output("dex-strike", "figure"), Output("flow", "figure"),
-         Output("gflow", "figure"),
+         Output("gflow", "figure"), Output("tape", "figure"),
          Output("gex-history", "figure"), Output("spot-zg", "figure"),
          Output("smile", "figure"), Output("tv-copy", "content"),
          Output("tv-copy", "title")],
@@ -1330,9 +1411,10 @@ def create_app() -> Dash:
          Input("bucket", "value"), Input("window", "value"),
          Input("majors", "value"), Input("flow-day", "value"),
          Input("lang", "value"), Input("unit", "value"),
-         Input("gflow-series", "value")],
+         Input("gflow-series", "value"), Input("tape-series", "value")],
     )
-    def refresh(_, symbol, bucket, window, majors, flow_day, lang, unit, gflow_series):
+    def refresh(_, symbol, bucket, window, majors, flow_day, lang, unit, gflow_series,
+                tape_series):
         st = STATE.get(symbol)
         with STATE.lock:
             df = st.enriched
@@ -1348,6 +1430,7 @@ def create_app() -> Dash:
                 empty_fig(wait, t(lang, "dex_title", bucket=bucket_label)),
                 empty_fig(wait, t(lang, "flow_title")),
                 empty_fig(wait, t(lang, "gflow_title")),
+                empty_fig(wait, t(lang, "tape_title")),
                 empty_fig(wait, t(lang, "hist_title")),
                 empty_fig(wait, t(lang, "spotzg_title")),
                 empty_fig(wait, t(lang, "smile_title")),
@@ -1392,6 +1475,8 @@ def create_app() -> Dash:
             _pin(flow_fig(symbol, lang, flow_day), f"{symbol}-{flow_day}"),
             _pin(gamma_flow_fig(symbol, lang, flow_day, gflow_series),
                 f"g{symbol}-{flow_day}-{gflow_series}"),
+            _pin(tape_fig(symbol, lang, flow_day, tape_series),
+                f"t{symbol}-{flow_day}-{tape_series}"),
             _pin(history_fig(symbol, lang), symbol),
             _pin(spot_zg_fig(symbol, lang), symbol),
             _pin(smile_fig(sel, snap.spot, lang), rev),

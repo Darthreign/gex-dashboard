@@ -87,6 +87,14 @@ class FlowBar:
     net_premium: float = 0.0        # signé, en dollars (prix x taille x mult)
     net_calls: float = 0.0          # contrats signés, calls seuls
     net_puts: float = 0.0           # contrats signés, puts seuls
+    # Delta net des PRENEURS de liquidité, en dollars de sous-jacent. C'est
+    # aussi, au signe près, le flux de couverture que les dealers doivent
+    # exécuter : ils prennent l'autre côté, donc leur delta est l'opposé du
+    # client, et se couvrir revient à répliquer le delta client. Positif =
+    # pression acheteuse sur le sous-jacent.
+    net_delta: float = 0.0
+    delta_prints: int = 0           # prints ayant un delta connu
+    no_delta_prints: int = 0        # delta pas encore reçu : exclu de net_delta
     buy_contracts: float = 0.0      # bruts, pour retrouver le volume total
     sell_contracts: float = 0.0
     prints: int = 0
@@ -99,6 +107,9 @@ class FlowBar:
             "timestamp": timestamp, "symbol": symbol,
             "net_contracts": self.net_contracts, "net_premium": self.net_premium,
             "net_calls": self.net_calls, "net_puts": self.net_puts,
+            "net_delta": self.net_delta,
+            "delta_prints": float(self.delta_prints),
+            "no_delta_prints": float(self.no_delta_prints),
             "buy_contracts": self.buy_contracts, "sell_contracts": self.sell_contracts,
             "prints": float(self.prints),
             "spread_contracts": self.spread_contracts,
@@ -178,6 +189,17 @@ class FlowTape:
     done: list[tuple[str, FlowBar]] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
     _by_stream: dict[str, str] = field(default_factory=dict)    # streamer -> sous-jacent
+    # delta courant par contrat, alimenté par l'événement Greeks du MÊME flux.
+    # Pris chez dxFeed plutôt que recalculé : ici on veut le delta au moment
+    # exact du print, pas celui d'un snapshot de chaîne vieux de 15 minutes.
+    # (Le GEX, lui, reste sur du Black-Scholes maison — cf. futopt : c'est un
+    # historique cohérent qu'on y construit, pas une mesure instantanée.)
+    _delta: dict[str, float] = field(default_factory=dict)
+    # spot par sous-jacent, figé à la construction de l'univers : il sert à
+    # convertir un delta en dollars de sous-jacent. Une dérive intra-session
+    # de quelques dixièmes de pour cent ne change pas la lecture d'un flux
+    # cumulé, et le rafraîchir à chaque print coûterait un verrou par message.
+    _spot: dict[str, float] = field(default_factory=dict)
     _started: bool = False
     _state: str = "off"
 
@@ -234,14 +256,36 @@ class FlowTape:
             else:
                 bar.sell_contracts += size
 
+            mult = multiplier_of(symbol)
             if isinstance(price, (int, float)) and price == price:
-                bar.net_premium += signed * float(price) * multiplier_of(symbol)
+                bar.net_premium += signed * float(price) * mult
 
             typ = option_type_of(stream or "")
             if typ == "C":
                 bar.net_calls += signed
             elif typ == "P":
                 bar.net_puts += signed
+
+            # Pondération par le delta : c'est elle qui transforme un décompte
+            # de contrats en mesure d'IMPACT de couverture. 100 calls très
+            # hors-monnaie (delta 0,05) n'obligent le dealer à presque rien,
+            # 100 calls à la monnaie (delta 0,50) le forcent à dix fois plus.
+            # Sans delta encore reçu, le print est exclu du net et compté à
+            # part plutôt qu'estimé au jugé.
+            delta = self._delta.get(stream)
+            spot = self._spot.get(symbol)
+            if delta is None or not spot:
+                bar.no_delta_prints += 1
+            else:
+                bar.net_delta += signed * delta * mult * spot
+                bar.delta_prints += 1
+
+    def ingest_greeks(self, item: dict) -> None:
+        """Mémorise le delta courant d'un contrat (événement Greeks)."""
+        stream = item.get("eventSymbol")
+        delta = item.get("delta")
+        if stream in self._by_stream and isinstance(delta, (int, float)) and delta == delta:
+            self._delta[stream] = float(delta)
 
     def drain_bars(self, flush: bool = False) -> list[tuple[str, FlowBar]]:
         """Retire et renvoie les barres achevées.
@@ -287,6 +331,7 @@ class FlowTape:
 
         _, _, access = quote_token()
         out: dict[str, str] = {}
+        spots: dict[str, float] = {}
         for symbol, kind in TRACKED.items():
             try:
                 if kind == "future":
@@ -297,10 +342,14 @@ class FlowTape:
                     spot = idxopt.reference_spot(symbol)
                     syms = (build_index_universe(symbol, spot, access)
                             if spot else [])
+                if spot:
+                    spots[symbol] = float(spot)
                 for s in syms:
                     out[s] = symbol
             except Exception:  # noqa: BLE001 — un marché muet n'en condamne pas six
                 log.exception("%s : univers de flux indisponible", symbol)
+        with self.lock:
+            self._spot.update(spots)
         return out
 
     def _run(self) -> None:
@@ -369,9 +418,13 @@ class FlowTape:
                                 "acceptDataFormat": "FULL"})
                 elif typ == "FEED_CONFIG" and not subscribed:
                     subscribed = True
+                    # Greeks en plus des prints : le delta doit être celui du
+                    # MOMENT de la transaction, pas celui d'un snapshot de
+                    # chaîne vieux de plusieurs minutes.
                     await send({"type": "FEED_SUBSCRIPTION", "channel": 1,
-                                "add": [{"type": "TimeAndSale", "symbol": s}
-                                        for s in universe]})
+                                "add": [{"type": e, "symbol": s}
+                                        for s in universe
+                                        for e in ("TimeAndSale", "Greeks")]})
                     self._state = "connected"
                     log.info("Order flow options actif — %d contrats sur %s",
                              len(universe), ", ".join(TRACKED))
@@ -382,7 +435,12 @@ class FlowTape:
                 elif typ == "FEED_DATA":
                     now = time.time()
                     for item in m.get("data") or []:
-                        if isinstance(item, dict) and item.get("eventType") == "TimeAndSale":
+                        if not isinstance(item, dict):
+                            continue
+                        etype = item.get("eventType")
+                        if etype == "Greeks":
+                            self.ingest_greeks(item)
+                        elif etype == "TimeAndSale":
                             self.ingest_print(item, now)
 
                 if time.monotonic() > deadline:

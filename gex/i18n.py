@@ -57,6 +57,22 @@ TR: dict[str, dict[str, str]] = {
         "legend_gputs": "Puts (gamma −)",
         "legend_gnet": "Net",
         "axis_gflow_bn": "$Bn de gamma cumulé",
+        # Order flow SIGNÉ (cf. gex/flowtape.py) — à distinguer du flux delta
+        # juste au-dessus, qui est un proxy non signé : ici le côté agresseur
+        # vient de la source, il n'est pas déduit.
+        "tape_title": "Order flow signé cumulé — qui agresse le carnet",
+        "legend_tape_calls": "Calls",
+        "legend_tape_puts": "Puts",
+        "legend_tape_net": "Net",
+        "axis_tape": "Contrats nets cumulés",
+        "axis_tape_delta": "Delta net cumulé ($M de sous-jacent)",
+        "unit_contracts": "contrats",
+        "unit_musd": "$M",
+        "no_tape_day": "Aucun order flow enregistré le {day}",
+        "tape_note": ("Signe donné par la source (côté agresseur), non déduit. "
+                      "Jambes de combos exclues du net, prints pondérés par la taille. "
+                      "Données courtier — non redistribuables."),
+        "tape_series_label": "Séries affichées",
         "card_spot": "Spot (délayé 15 min)",
         "card_spot_rt": "Spot (temps réel)",
         "card_spot_live": "GEX net recalculé à ce spot",
@@ -205,6 +221,19 @@ TR: dict[str, dict[str, str]] = {
         "legend_gputs": "Puts (gamma −)",
         "legend_gnet": "Net",
         "axis_gflow_bn": "$Bn cumulative gamma",
+        "tape_title": "Cumulative signed order flow — who lifts the book",
+        "legend_tape_calls": "Calls",
+        "legend_tape_puts": "Puts",
+        "legend_tape_net": "Net",
+        "axis_tape": "Cumulative net contracts",
+        "axis_tape_delta": "Cumulative net delta ($M of underlying)",
+        "unit_contracts": "contracts",
+        "unit_musd": "$M",
+        "no_tape_day": "No order flow recorded on {day}",
+        "tape_note": ("Side reported by the source (aggressor), not inferred. "
+                      "Combo legs excluded from the net, prints weighted by size. "
+                      "Broker data — not redistributable."),
+        "tape_series_label": "Series shown",
         "card_spot": "Spot (15-min delayed)",
         "card_spot_rt": "Spot (real-time)",
         "card_spot_live": "net GEX recomputed at this spot",
