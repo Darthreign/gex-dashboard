@@ -128,6 +128,36 @@ def load_prices(symbol: str, day: str) -> pd.DataFrame:
     return pd.read_parquet(path) if path.exists() else pd.DataFrame()
 
 
+def append_tape(symbol: str, rows: list[dict], ts: datetime) -> Path:
+    """Ajoute des barres d'order flow signé (1 min) au fichier du jour.
+
+    Séparé de `flows/` à dessein : `flows/` contient le proxy non signé
+    calculé sur la source publique CBOE (redistribuable), `tape/` le flux
+    réellement signé issu du courtier (usage personnel). Les mélanger
+    rendrait impossible de dire, en relisant un fichier, si le signe est
+    observé ou déduit.
+    """
+    path = _ensure(SETTINGS.data_dir / "tape" / symbol / f"{ts:%Y-%m-%d}.parquet")
+    new = pd.DataFrame(rows)
+    if path.exists():
+        new = pd.concat([pd.read_parquet(path), new], ignore_index=True)
+    new = new.drop_duplicates(subset="timestamp", keep="last").sort_values("timestamp")
+    _write_atomic(new, path)
+    return path
+
+
+def load_tape(symbol: str, day: str) -> pd.DataFrame:
+    path = SETTINGS.data_dir / "tape" / symbol / f"{day}.parquet"
+    return pd.read_parquet(path) if path.exists() else pd.DataFrame()
+
+
+def tape_days(symbol: str) -> list[str]:
+    root = SETTINGS.data_dir / "tape" / symbol
+    if not root.exists():
+        return []
+    return sorted(p.stem for p in root.glob("*.parquet"))
+
+
 def load_flows(symbol: str, day: str) -> pd.DataFrame:
     path = SETTINGS.data_dir / "flows" / symbol / f"{day}.parquet"
     return pd.read_parquet(path) if path.exists() else pd.DataFrame()

@@ -10,6 +10,7 @@ http://127.0.0.1:8050. Utilisable de trois façons équivalentes :
 from __future__ import annotations
 
 from gex.app import create_app
+from gex.flowtape import TAPE
 from gex.logsetup import setup_logging
 from gex.rtquote import PUBLIC_QUOTES, QUOTES
 from gex.scheduler import start_scheduler
@@ -23,6 +24,8 @@ def main(host: str = "127.0.0.1", port: int = 8050) -> None:
     QUOTES.start()
     # repli gratuit NQ/ES délayé : ne démarre que si QUOTES ne tourne pas
     PUBLIC_QUOTES.start()
+    # order flow signé sur options : sans identifiants, l'appel est sans effet
+    TAPE.start()
     create_app().run(host=host, port=port, debug=False)
 
 

@@ -15,7 +15,7 @@ from datetime import UTC, datetime, time
 import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from . import backup, metrics, store
+from . import backup, flowtape, metrics, store
 from .config import SETTINGS, UNDERLYINGS
 from .ingest import ChainSnapshot, fetch_chain, fetch_index_spot
 from .metrics import ET, SummaryMetrics
@@ -343,6 +343,27 @@ def flush_prices() -> None:
     _flush_bars(PUBLIC_QUOTES.drain_bars(), "dxfeed_public")
 
 
+def flush_tape() -> None:
+    """Écrit les barres d'order flow signé achevées (cf. gex/flowtape.py).
+
+    Même logique que `flush_prices` : le collecteur agrège en mémoire (~2,4 M
+    de prints par séance, hors de question de les persister un par un), seules
+    les barres d'une minute touchent le disque.
+    """
+    bars = flowtape.TAPE.drain_bars()
+    if not bars:
+        return
+    by_symbol: dict[str, list[dict]] = {}
+    for symbol, bar in bars:
+        ts = datetime.fromtimestamp(bar.minute, tz=UTC).astimezone(ET).replace(tzinfo=None)
+        by_symbol.setdefault(symbol, []).append(bar.as_row(symbol, ts))
+    for symbol, rows in by_symbol.items():
+        try:
+            store.append_tape(symbol, rows, rows[0]["timestamp"])
+        except Exception:  # noqa: BLE001 — une écriture ratée ne doit rien casser
+            log.exception("Échec écriture de l'order flow %s", symbol)
+
+
 def start_scheduler() -> BackgroundScheduler:
     sched = BackgroundScheduler(timezone="America/New_York")
     sched.add_job(
@@ -355,6 +376,7 @@ def start_scheduler() -> BackgroundScheduler:
     # Vidange plus fréquente que la minute : une bougie n'est écrite qu'une
     # fois close, ce décalage borne simplement la perte en cas d'arrêt brutal.
     sched.add_job(flush_prices, "interval", seconds=30, max_instances=1, coalesce=True)
+    sched.add_job(flush_tape, "interval", seconds=30, max_instances=1, coalesce=True)
     # Options natives NQ/ES : cadence lâche (chaque cycle prend lui-même
     # ~90 s x 2), max_instances=1 empêche un cycle en cours d'en chevaucher
     # un autre si jamais il dépassait l'intervalle.
