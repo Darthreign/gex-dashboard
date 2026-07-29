@@ -103,11 +103,19 @@ def credentials_present() -> bool:
 # (rtquote._ingest, futopt.enrich_native) plutôt que la liste complète de
 # l'exemple officiel (bidSize/askSize, delta/gamma/theta/rho/vega, etc.),
 # absents de nos besoins.
+# ⚠️ Le volume du jour vit sur `Trade` (`dayVolume`), PAS sur `Summary`.
+# Vérifié le 2026-07-29 en interrogeant le flux en format FULL, sur options
+# d'indice (OPRA) comme sur options sur future (CME) : `Summary` ne porte que
+# `openInterest` et `prevDayVolume` (celui de la VEILLE). Le réclamer sur
+# `Summary` comme on le faisait ne produisait aucune erreur — le champ était
+# simplement toujours absent, donc le volume restait à zéro sur toute la
+# chaîne native, `pc_volume` à NaN et le HVL (pondéré volume) incalculable
+# pour NQ/ES.
 COMPACT_FIELDS: dict[str, list[str]] = {
     "Quote": ["eventType", "eventSymbol", "bidPrice", "askPrice"],
-    "Trade": ["eventType", "eventSymbol", "price"],
+    "Trade": ["eventType", "eventSymbol", "price", "dayVolume"],
     "Greeks": ["eventType", "eventSymbol", "volatility"],
-    "Summary": ["eventType", "eventSymbol", "openInterest", "dayVolume"],
+    "Summary": ["eventType", "eventSymbol", "openInterest"],
 }
 
 

@@ -100,22 +100,25 @@ def test_decode_compact_reconstruit_le_format_full():
     format FULL implicite avant ce correctif du 2026-07-28."""
     data = [
         "Quote", ["Quote", "SPY", 559.30, 559.40, "Quote", "AAPL", 190.0, 190.05],
-        "Trade", ["Trade", "SPY", 559.36],
+        "Trade", ["Trade", "SPY", 559.36, 1_250_000.0],
     ]
     out = decode_compact_feed_data(data)
     assert out == [
         {"eventType": "Quote", "eventSymbol": "SPY", "bidPrice": 559.30, "askPrice": 559.40},
         {"eventType": "Quote", "eventSymbol": "AAPL", "bidPrice": 190.0, "askPrice": 190.05},
-        {"eventType": "Trade", "eventSymbol": "SPY", "price": 559.36},
+        {"eventType": "Trade", "eventSymbol": "SPY", "price": 559.36,
+         "dayVolume": 1_250_000.0},
     ]
 
 
 def test_decode_compact_ignore_un_type_non_declare():
     """Un type qu'on n'a pas demandé dans COMPACT_FIELDS (Profile, TimeAndSale…)
     ne doit pas faire échouer le décodage du reste du message."""
-    data = ["Profile", ["Profile", "SPY", "desc"], "Trade", ["Trade", "SPY", 100.0]]
+    data = ["Profile", ["Profile", "SPY", "desc"],
+           "Trade", ["Trade", "SPY", 100.0, 42.0]]
     out = decode_compact_feed_data(data)
-    assert out == [{"eventType": "Trade", "eventSymbol": "SPY", "price": 100.0}]
+    assert out == [{"eventType": "Trade", "eventSymbol": "SPY", "price": 100.0,
+                    "dayVolume": 42.0}]
 
 
 def test_decode_compact_vide():
@@ -123,17 +126,24 @@ def test_decode_compact_vide():
 
 
 def test_decode_compact_greeks_et_summary():
-    """Champs utilisés par futopt.enrich_native : IV (Greeks) et OI/volume
-    (Summary) — ceux-là seuls sont déclarés dans COMPACT_FIELDS, pas tout ce
-    que l'exemple officiel tastytrade propose (delta/gamma/theta/rho/vega,
-    dayOpenPrice…)."""
+    """Champs utilisés par futopt.enrich_native : IV (Greeks), OI (Summary) et
+    volume du jour (Trade) — ceux-là seuls sont déclarés dans COMPACT_FIELDS,
+    pas tout ce que l'exemple officiel tastytrade propose
+    (delta/gamma/theta/rho/vega, dayOpenPrice…).
+
+    Le volume est bien sur Trade et NON sur Summary : vérifié le 2026-07-29
+    contre le flux réel en format FULL, sur options d'indice comme sur
+    options sur future (cf. COMPACT_FIELDS)."""
     data = ["Greeks", ["Greeks", "./NQU26C28000:XCME", 0.18],
-           "Summary", ["Summary", "./NQU26C28000:XCME", 1200.0, 45.0]]
+           "Summary", ["Summary", "./NQU26C28000:XCME", 1200.0],
+           "Trade", ["Trade", "./NQU26C28000:XCME", 51.25, 45.0]]
     out = decode_compact_feed_data(data)
     assert out == [
         {"eventType": "Greeks", "eventSymbol": "./NQU26C28000:XCME", "volatility": 0.18},
         {"eventType": "Summary", "eventSymbol": "./NQU26C28000:XCME",
-         "openInterest": 1200.0, "dayVolume": 45.0},
+         "openInterest": 1200.0},
+        {"eventType": "Trade", "eventSymbol": "./NQU26C28000:XCME",
+         "price": 51.25, "dayVolume": 45.0},
     ]
 
 

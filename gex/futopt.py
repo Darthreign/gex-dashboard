@@ -242,18 +242,23 @@ async def _collect_one(streamer_symbols: list[str],
                         v = item.get("volatility")
                         if isinstance(v, (int, float)) and v == v:
                             d["iv"] = float(v)
+                    elif etype == "Trade":
+                        # le volume du jour est ici, pas sur Summary
+                        # (cf. rtquote.COMPACT_FIELDS)
+                        v = item.get("dayVolume")
+                        if isinstance(v, (int, float)) and v == v:
+                            d["volume"] = float(v)
                     elif etype == "Summary":
-                        for k, out_k in (("openInterest", "oi"), ("dayVolume", "volume")):
-                            v = item.get(k)
-                            if isinstance(v, (int, float)) and v == v:
-                                d[out_k] = float(v)
+                        v = item.get("openInterest")
+                        if isinstance(v, (int, float)) and v == v:
+                            d["oi"] = float(v)
                 if early_stop is not None and early_stop(out):
                     return out
     return out
 
 
 async def _collect(streamer_symbols: list[str],
-                   events: tuple[str, ...] = ("Quote", "Greeks", "Summary"),
+                   events: tuple[str, ...] = ("Quote", "Trade", "Greeks", "Summary"),
                    timeout: float = IDLE_TIMEOUT_S,
                    early_stop=None) -> dict[str, dict]:
     """Souscrit et fusionne les événements reçus, un dict par symbole.
