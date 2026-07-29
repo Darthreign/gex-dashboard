@@ -78,6 +78,15 @@ MAX_BURST = 6000  # marge sous le seuil de rejet observé (9000)
 # indéfiniment — d'où ce plafond, en plus du calcul corrigé sur le seul FEED_DATA.
 MAX_DURATION_S = 90.0
 
+# Délai laissé au flux après que tous les symboles d'un lot ont livré leur IV,
+# pour drainer les événements plus lents (Summary/open interest). Calibré le
+# 2026-07-29 sur SPX en comparant l'OI collecté à celui de CBOE, qui fait
+# référence : 0 s -> 94,1 % de l'OI (6 s de collecte), 4 s -> 100,0 % (18 s),
+# 8 et 15 s n'apportent plus rien. Retenu 5 s, soit la valeur mesurée plus une
+# marge, le coût d'une seconde de trop étant négligeable devant celui d'une
+# chaîne amputée (94 % de l'OI faisait 1 Md$ d'écart sur le GEX net).
+COMPLETION_GRACE_S = 5.0
+
 _multiplier_cache: dict[str, float] = {}
 
 
@@ -140,7 +149,8 @@ def filter_chain(chain: pd.DataFrame, spot: float, window: float = DEFAULT_WINDO
 async def _collect_one(streamer_symbols: list[str],
                        events: tuple[str, ...],
                        timeout: float,
-                       early_stop=None) -> dict[str, dict]:
+                       early_stop=None,
+                       grace_s: float = 0.0) -> dict[str, dict]:
     """Une connexion, une salve unique de souscription, jusqu'à `MAX_BURST`.
 
     Envoyer la salve complète EN UN SEUL message est essentiel : fractionner
@@ -154,6 +164,14 @@ async def _collect_one(streamer_symbols: list[str],
     (le future actif lui-même, coté en continu) où le flux ne se tait
     jamais avant `MAX_DURATION_S`. Sans early_stop, `_reference_spot`
     attendait systématiquement le plafond de 90 s pour UNE cotation.
+
+    `grace_s` : délai accordé APRÈS le déclenchement d'`early_stop` avant de
+    rendre la main. Les événements n'arrivent pas au même rythme — sur une
+    chaîne d'indice, les Greeks (IV) sont tous servis bien avant les Summary
+    (open interest). Couper net sur la complétude de l'IV amputait donc l'OI
+    de ~6,5 % face à CBOE (mesuré le 2026-07-29 sur SPX), soit 1 Md$ d'écart
+    sur le GEX net. Laisser 0 convient à une attente d'UNE cotation
+    (`_reference_spot`), où il n'y a pas de traînard à drainer.
     """
     import time as _time
 
@@ -186,10 +204,16 @@ async def _collect_one(streamer_symbols: list[str],
         # une fois toute la donnée reçue. Seul un FEED_DATA repousse
         # `last_data`, un KEEPALIVE est traité mais ignoré pour ce calcul.
         started = last_data = _time.monotonic()
+        # Rempli quand `early_stop` se déclenche : la collecte ne s'arrête pas
+        # net, elle se donne encore `grace_s` pour drainer les traînards
+        # (cf. le paramètre, et la mesure qui l'a rendu nécessaire).
+        stop_deadline: float | None = None
         while True:
             now = _time.monotonic()
             remaining = min(timeout - (now - last_data),
                             MAX_DURATION_S - (now - started))
+            if stop_deadline is not None:
+                remaining = min(remaining, stop_deadline - now)
             if remaining <= 0:
                 break
             try:
@@ -252,15 +276,37 @@ async def _collect_one(streamer_symbols: list[str],
                         v = item.get("openInterest")
                         if isinstance(v, (int, float)) and v == v:
                             d["oi"] = float(v)
-                if early_stop is not None and early_stop(out):
-                    return out
+                if (early_stop is not None and stop_deadline is None
+                        and early_stop(out)):
+                    if grace_s <= 0:
+                        return out
+                    stop_deadline = _time.monotonic() + grace_s
     return out
+
+
+def _all_have_iv(symbols: list[str]):
+    """Condition d'arrêt : l'IV a été reçue pour TOUS les symboles du lot.
+
+    L'IV (événement Greeks) est le seul champ livré systématiquement sur
+    100 % des contrats — mesuré le 2026-07-29 : 3710/3710 sur SPX, 60/60 sur
+    ES. L'open interest ne convient pas (les contrats sans position ouverte
+    n'émettent rien) ni le volume (idem sans échange du jour), ce qui rendrait
+    la condition indéclenchable.
+    """
+    total = len(symbols)
+
+    def check(out: dict) -> bool:
+        return sum(1 for v in out.values() if "iv" in v) >= total
+
+    return check
 
 
 async def _collect(streamer_symbols: list[str],
                    events: tuple[str, ...] = ("Quote", "Trade", "Greeks", "Summary"),
                    timeout: float = IDLE_TIMEOUT_S,
-                   early_stop=None) -> dict[str, dict]:
+                   early_stop=None,
+                   stop_when_complete: bool = False,
+                   grace_s: float = COMPLETION_GRACE_S) -> dict[str, dict]:
     """Souscrit et fusionne les événements reçus, un dict par symbole.
 
     Fractionne en plusieurs connexions séquentielles si le nombre de
@@ -268,13 +314,31 @@ async def _collect(streamer_symbols: list[str],
     message (cf. `_collect_one`). Contrairement au flux temps réel
     (`rtquote`), ce sont des connexions à usage unique : demander l'état
     courant, l'accumuler jusqu'au silence, puis fermer.
+
+    `stop_when_complete` coupe chaque connexion dès que son lot est
+    intégralement servi, sans attendre le silence. Sans lui, une chaîne
+    d'options liquides ne se tait JAMAIS 20 s d'affilée : chaque connexion
+    allait au plafond `MAX_DURATION_S`, et une collecte SPX coûtait
+    mécaniquement 3 x 90 s (278 s mesurées le 2026-07-29) alors que la donnée
+    était complète bien avant. La condition est construite par lot, pas sur
+    le total : un lot ne peut pas attendre des symboles qu'il n'a pas
+    souscrits.
     """
     per_symbol = max(len(events), 1)
     batch_size = max(MAX_BURST // per_symbol, 1)
     out: dict[str, dict] = {}
     for i in range(0, len(streamer_symbols), batch_size):
         batch = streamer_symbols[i:i + batch_size]
-        out.update(await _collect_one(batch, events, timeout, early_stop=early_stop))
+        if early_stop is not None:
+            # condition fournie par l'appelant (ex. _reference_spot) : elle
+            # sait ce qu'elle attend, on lui rend la main immédiatement
+            stop, grace = early_stop, 0.0
+        elif stop_when_complete:
+            stop, grace = _all_have_iv(batch), grace_s
+        else:
+            stop, grace = None, 0.0
+        out.update(await _collect_one(batch, events, timeout,
+                                      early_stop=stop, grace_s=grace))
     return out
 
 
@@ -381,7 +445,8 @@ def build_native_chain(product_code: str, window: float = DEFAULT_WINDOW,
         log.warning("%s : aucun contrat dans la fenêtre", product_code)
         return None
 
-    raw = asyncio.run(_collect(chain["streamer_symbol"].tolist()))
+    raw = asyncio.run(_collect(chain["streamer_symbol"].tolist(),
+                               stop_when_complete=True))
     df = enrich_native(chain, raw, spot, multiplier)
     log.info("%s : chaîne native — %d contrats, spot %.2f, multiplicateur %.0f",
              product_code, len(df), spot, multiplier)
