@@ -174,27 +174,60 @@ def quote_token() -> tuple[str, str, str]:
     return d["token"], d["dxlink-url"], access
 
 
+def _is_future_key(key: str) -> bool:
+    """Un sous-jacent qui EST un future (NQ, ES), et non un indice ou une action.
+
+    Ces clés ne doivent jamais servir de symbole dxFeed telles quelles : elles
+    coïncident avec des tickers d'actions sans rapport (cf. resolve_symbols).
+    """
+    u = UNDERLYINGS.get(key)
+    return u is not None and u.source == "futopt"
+
+
+# Symbole streamer du contrat actif, mémorisé une fois résolu. L'API
+# tastytrade renvoie des 429 quand plusieurs composants l'interrogent coup sur
+# coup (resolve_symbols, futopt._reference_spot, flowtape._build_universe se
+# suivent à chaque démarrage) : ce cache supprime l'essentiel de ces appels.
+_FUTURE_STREAM_CACHE: dict[str, str] = {}
+
+
 def resolve_symbols(access: str) -> dict[str, str]:
     """Table clé interne -> symbole dxFeed.
 
     Indices, ETF et actions portent leur ticker. Les futures exigent le contrat
     actif, dont le symbole streamer (`/ESU26:XCME`, année sur DEUX chiffres) ne
     se devine pas : il est lu depuis l'API.
+
+    ⚠️ Un future NON résolu est OMIS, jamais rabattu sur son code brut. Ce
+    repli existait et il était dangereux : « ES » et « NQ » sont aussi des
+    tickers d'ACTIONS (Eversource Energy cote autour de 75 $). Sur un 429 de
+    l'API — provoqué le 2026-07-30 par des redémarrages rapprochés — le flux
+    souscrivait donc à Eversource et enregistrait 74,75 comme prix du future
+    ES, dans les bougies servant à la Heatmap. Mieux vaut aucun spot qu'un
+    spot d'un autre instrument : c'est le même principe qu'ailleurs dans le
+    projet, ne rien produire plutôt que du faux.
     """
-    out = {u.key: u.key for u in UNDERLYINGS.values() if u.enabled}
+    out = {u.key: u.key for u in UNDERLYINGS.values()
+           if u.enabled and not _is_future_key(u.key)}
     h = {"Authorization": f"Bearer {access}"}
     for code in {u.future for u in UNDERLYINGS.values() if u.future and u.enabled}:
+        cached = _FUTURE_STREAM_CACHE.get(code)
+        if cached:
+            out[code] = cached
+            continue
         try:
             r = requests.get(FUTURES_URL, params={"product-code": code},
                              headers=h, timeout=30)
             r.raise_for_status()
             items = [i for i in r.json()["data"]["items"] if i.get("active-month")]
             if items:
-                out[code] = items[0]["streamer-symbol"]
+                out[code] = _FUTURE_STREAM_CACHE[code] = items[0]["streamer-symbol"]
             else:
-                log.warning("Aucun contrat actif pour %s", code)
+                log.warning("Aucun contrat actif pour %s — %s exclu du flux", code, code)
         except Exception as exc:  # pragma: no cover - dépend du réseau
-            log.warning("Symbole future %s non résolu : %s", code, exc)
+            log.warning("Symbole future %s non résolu (%s) — exclu du flux "
+                        "plutôt que rabattu sur le ticker action homonyme",
+                        code, exc)
     return out
 
 

@@ -186,3 +186,51 @@ def test_public_delayed_quotes_ne_demarre_pas_si_compte_reel(monkeypatch):
     q = PublicDelayedQuotes()
     q.start()
     assert q._started is False
+
+
+def test_future_non_resolu_est_omis_pas_rabattu_sur_le_ticker(monkeypatch):
+    """« ES » et « NQ » sont AUSSI des tickers d'actions (Eversource Energy
+    cote vers 75 $). Sur un 429 de l'API tastytrade, l'ancien code rabattait
+    le future sur son code brut : le flux souscrivait à Eversource et
+    enregistrait 74,75 comme prix du future ES dans les bougies de la Heatmap
+    (constaté le 2026-07-30). Mieux vaut aucun spot qu'un spot d'un autre
+    instrument."""
+    import gex.rtquote as rtq
+
+    rtq._FUTURE_STREAM_CACHE.clear()
+
+    def api_saturee(*a, **k):
+        raise RuntimeError("429 Too Many Requests")
+
+    monkeypatch.setattr(rtq.requests, "get", api_saturee)
+    out = rtq.resolve_symbols("token")
+
+    assert "ES" not in out and "NQ" not in out
+    # les non-futures restent servis normalement
+    assert out.get("SPX") == "SPX"
+    assert out.get("SPY") == "SPY"
+
+
+def test_symbole_future_resolu_est_mis_en_cache(monkeypatch):
+    """Le cache existe pour éviter les 429 : resolve_symbols,
+    futopt._reference_spot et flowtape._build_universe interrogeaient tous
+    l'API coup sur coup à chaque démarrage."""
+    import gex.rtquote as rtq
+
+    rtq._FUTURE_STREAM_CACHE.clear()
+    appels = []
+
+    class _R:
+        def raise_for_status(self): pass
+        def json(self): return {"data": {"items": [
+            {"active-month": True, "streamer-symbol": "/ESU26:XCME"}]}}
+
+    def api(*a, **k):
+        appels.append(k.get("params"))
+        return _R()
+
+    monkeypatch.setattr(rtq.requests, "get", api)
+    assert rtq.resolve_symbols("tok").get("ES") == "/ESU26:XCME"
+    n = len(appels)
+    rtq.resolve_symbols("tok")           # second appel : doit taper le cache
+    assert len(appels) == n, "le symbole résolu doit être mémorisé"
