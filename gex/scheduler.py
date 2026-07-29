@@ -15,7 +15,7 @@ from datetime import UTC, datetime, time
 import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from . import backup, flowtape, metrics, store
+from . import backup, flowtape, idxopt, metrics, store
 from .config import SETTINGS, UNDERLYINGS
 from .ingest import ChainSnapshot, fetch_chain, fetch_index_spot
 from .metrics import ET, SummaryMetrics
@@ -302,6 +302,46 @@ def pull_native_options() -> None:
             log.exception("%s : échec de la collecte native", code)
 
 
+def native_index_key(symbol: str) -> str:
+    """Clé de stockage des chaînes d'indice natives.
+
+    Volontairement DISTINCTE du symbole CBOE : les deux sources coexistent
+    sur disque sans jamais se mélanger. Le natif porte les niveaux (il n'a
+    pas les 15 min de retard), CBOE continue de tourner à 60 s pour le flux
+    delta — qui a besoin d'une clé `contract` stable entre deux pulls et
+    d'une cadence qu'une collecte native (~20 s par chaîne) ne peut pas
+    tenir. L'interface, elle, n'expose qu'un seul symbole.
+    """
+    return f"{symbol}_RT"
+
+
+def pull_native_index() -> None:
+    """Chaînes d'options d'indice natives (SPX, NDX) — sans compte, ne fait rien.
+
+    Bien plus rapide que les chaînes sur future (~20 s contre ~90 s) depuis
+    l'arrêt anticipé sur complétude, d'où une cadence plus serrée : le retard
+    de 15 min de CBOE est précisément ce qu'on cherche à supprimer, le
+    rafraîchir toutes les 15 min n'aurait aucun sens.
+    """
+    if not credentials_present():
+        return
+    for symbol in idxopt.NATIVE_INDEX:
+        try:
+            df = idxopt.build_native_chain(symbol)
+            if df is None or df.empty:
+                continue
+            now = datetime.now(ET)
+            key = native_index_key(symbol)
+            store.save_snapshot(key, df, now)
+            summary = _seed_native_state(key, df, now)
+            store.append_history(summary.as_row())
+            log.info("%s (indice natif) pull ok — spot=%.2f netGEX=%.2f Bn zeroG=%s",
+                     symbol, summary.spot, summary.net_gex / 1e9,
+                     f"{summary.zero_gamma:.0f}" if summary.zero_gamma else "n/a")
+        except Exception:  # noqa: BLE001 — un échec ne doit rien casser d'autre
+            log.exception("%s : échec de la chaîne d'indice native", symbol)
+
+
 def _flush_bars(bars: list, source: str) -> None:
     """Écrit sur disque les bougies 1 min achevées, quelle que soit la
     source (compte courtier ou repli public délayé — cf. flush_prices)."""
@@ -382,6 +422,11 @@ def start_scheduler() -> BackgroundScheduler:
     # un autre si jamais il dépassait l'intervalle.
     sched.add_job(pull_native_options, "interval", minutes=15,
                   max_instances=1, coalesce=True)
+    # Chaînes d'indice natives : ~20 s par chaîne (contre ~90 s sur future),
+    # donc une cadence bien plus serrée — supprimer un retard de 15 min pour
+    # rafraîchir toutes les 15 min n'aurait aucun sens.
+    sched.add_job(pull_native_index, "interval", minutes=3,
+                  max_instances=1, coalesce=True)
     sched.add_job(push_data_repo, "cron", day_of_week="mon-fri", hour=16, minute=20)
     # Sauvegarde distante après le push git : elle porte ce que GitHub refuse
     # (archives Databento de plus de 100 Mo). Sans rclone configuré, l'appel
@@ -393,4 +438,5 @@ def start_scheduler() -> BackgroundScheduler:
     # Idem pour NQ/ES natifs : sans cet appel, ils resteraient invisibles dans
     # l'interface jusqu'à la première exécution planifiée (jusqu'à 15 min).
     threading.Thread(target=pull_native_options, daemon=True).start()
+    threading.Thread(target=pull_native_index, daemon=True).start()
     return sched

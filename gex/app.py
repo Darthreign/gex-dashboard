@@ -21,8 +21,10 @@ from .api import register_api
 from .config import SETTINGS, UNDERLYINGS, targets
 from .i18n import LANGS, regime_text, t, wall_labels
 from .metrics import ET, EXPIRY_BUCKETS
+from . import idxopt
 from .rtquote import PUBLIC_QUOTES, QUOTES, credentials_present
 from .scheduler import STATE, market_is_open
+from .scheduler import native_index_key as scheduler_native_key
 
 # --- Palette (mode sombre, cf. skill dataviz) ---
 C = {
@@ -467,7 +469,7 @@ def _chain_for_day(symbol: str, day: str) -> tuple[pd.DataFrame | None, float | 
     snapshot persisté ; pour une séance passée, le dernier snapshot du jour.
     """
     if day == datetime.now(ET).strftime("%Y-%m-%d"):
-        st = STATE.get(symbol)
+        st = chain_state(symbol)
         with STATE.lock:
             df, snap = st.enriched, st.snapshot
         if df is not None and snap is not None:
@@ -922,7 +924,7 @@ def pc_gauge(symbol: str, lang: str) -> html.Div:
     tuile "P/C Open Interest", juste plus lisible d'un coup d'œil qu'un
     ratio brut. part_calls = 1/(1+pc_oi) : dérivable directement du ratio
     déjà stocké (pc_oi = OI puts / OI calls), aucun nouveau calcul requis."""
-    st = STATE.get(symbol)
+    st = chain_state(symbol)
     with STATE.lock:
         s = st.summary
     if s is None or not s.pc_oi or s.pc_oi <= 0:
@@ -951,7 +953,7 @@ _REGIME_SEVERITY_COLOR = {"info": "hvl", "warning": "zg", "danger": "neg"}
 def regime_banner(symbol: str, lang: str) -> html.Div:
     """Cadre de lecture croisée Gamma/Delta (cf. metrics.regime_read) :
     mécanique de couverture des dealers, jamais un point d'entrée."""
-    st = STATE.get(symbol)
+    st = chain_state(symbol)
     with STATE.lock:
         s = st.summary
     if s is None or s.zero_gamma is None:
@@ -971,8 +973,37 @@ def regime_banner(symbol: str, lang: str) -> html.Div:
     )
 
 
+NATIVE_STALE_S = 600
+
+
+def chain_state(symbol: str):
+    """État de chaîne à AFFICHER pour un sous-jacent.
+
+    Quand un compte courtier est configuré, SPX et NDX ont une chaîne native
+    dxFeed sans les 15 min de retard de CBOE (cf. gex/idxopt.py) : c'est elle
+    qui porte les niveaux, les tuiles et les graphes de structure. La chaîne
+    CBOE continue de tourner en parallèle à 60 s, mais seulement pour le flux
+    delta, qui a besoin d'une clé `contract` stable entre deux pulls et d'une
+    cadence qu'une collecte native ne tient pas — ces graphiques-là lisent le
+    disque, pas cet état, donc rien ne les perturbe.
+
+    Repli sur CBOE si le natif est absent ou dormant depuis plus de
+    `NATIVE_STALE_S` : une donnée délayée mais vivante vaut mieux qu'une
+    donnée fraîche figée il y a une heure.
+    """
+    if symbol in idxopt.NATIVE_INDEX and credentials_present():
+        native = STATE.get(scheduler_native_key(symbol))
+        with STATE.lock:
+            s, ts = native.summary, native.last_feed_ts
+        if s is not None and ts is not None:
+            age = (datetime.now(ET).replace(tzinfo=None) - ts).total_seconds()
+            if 0 <= age < NATIVE_STALE_S:
+                return native
+    return STATE.get(symbol)
+
+
 def build_cards(symbol: str, lang: str, xf=None, scale: str | None = None) -> list:
-    st = STATE.get(symbol)
+    st = chain_state(symbol)
     with STATE.lock:
         s = st.summary
         df = st.enriched
@@ -1415,7 +1446,7 @@ def create_app() -> Dash:
     )
     def refresh(_, symbol, bucket, window, majors, flow_day, lang, unit, gflow_series,
                 tape_series):
-        st = STATE.get(symbol)
+        st = chain_state(symbol)
         with STATE.lock:
             df = st.enriched
             snap = st.snapshot
@@ -1503,7 +1534,7 @@ def create_app() -> Dash:
     def refresh_profile(_, tab, symbol, window, lang, unit):
         if tab != "profile":   # onglet masqué : rien à recalculer
             raise PreventUpdate
-        st = STATE.get(symbol)
+        st = chain_state(symbol)
         with STATE.lock:
             df, snap, summary = st.enriched, st.snapshot, st.summary
         if df is None or snap is None:
@@ -1527,7 +1558,7 @@ def create_app() -> Dash:
     def refresh_greeks2(_, tab, symbol, bucket, window, lang, unit):
         if tab != "greeks2":
             raise PreventUpdate
-        st = STATE.get(symbol)
+        st = chain_state(symbol)
         with STATE.lock:
             df, snap, summary = st.enriched, st.snapshot, st.summary
         if df is None or snap is None:
@@ -1582,7 +1613,7 @@ def create_app() -> Dash:
     def refresh_positioning(_, tab, symbol, window, lang, unit):
         if tab != "pos":
             raise PreventUpdate
-        st = STATE.get(symbol)
+        st = chain_state(symbol)
         with STATE.lock:
             df, snap, summary = st.enriched, st.snapshot, st.summary
         if df is None or snap is None:
