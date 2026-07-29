@@ -66,10 +66,18 @@ def test_repli_sur_cboe_sans_compte(monkeypatch):
     assert gex_app.chain_state("SPX").summary.spot == 7000.0
 
 
-def test_symbole_hors_perimetre_inchange(monkeypatch):
-    """SPY/QQQ restent sur CBOE (ETF à dividende, cf. idxopt.NATIVE_INDEX) et
-    NQ/ES ont déjà leur propre chaîne native sous leur nom."""
+def test_spy_suit_la_meme_regle(monkeypatch):
+    """SPY/QQQ sont désormais dans le périmètre natif : la règle
+    dxFeed-sinon-CBOE ne souffre pas d'exception."""
     monkeypatch.setattr(gex_app, "credentials_present", lambda: True)
     _seed("SPY", 740.0)
-    _seed("SPY_RT", 999.0)      # ne doit jamais être consulté
-    assert gex_app.chain_state("SPY").summary.spot == 740.0
+    _seed("SPY_RT", 741.5)
+    assert gex_app.chain_state("SPY").summary.spot == 741.5
+
+
+def test_nq_es_ont_deja_leur_chaine_native_sous_leur_nom(monkeypatch):
+    """NQ/ES ne passent pas par _RT : leur chaîne native EST stockée sous leur
+    propre nom (pull_native_options), il n'y a pas de version CBOE à doubler."""
+    monkeypatch.setattr(gex_app, "credentials_present", lambda: True)
+    _seed("NQ", 27500.0)
+    assert gex_app.chain_state("NQ").summary.spot == 27500.0

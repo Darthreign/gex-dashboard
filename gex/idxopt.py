@@ -1,4 +1,4 @@
-"""Chaînes d'options d'INDICE (SPX, NDX) lues nativement via dxFeed.
+"""Chaînes d'options d'INDICE et d'ETF (SPX, NDX, SPY, QQQ) lues nativement via dxFeed.
 
 Pourquoi ce module existe : l'endpoint public CBOE est délayé ~15 min à la
 source. Sur du 0DTE, c'est énorme — mesuré le 2026-07-29 sur SPX, dxFeed
@@ -48,12 +48,17 @@ log = logging.getLogger(__name__)
 
 CHAIN_URL = "https://api.tastyworks.com/option-chains/{symbol}/nested"
 
-# Indices pour lesquels une chaîne native remplace la chaîne CBOE quand un
-# compte courtier est configuré. SPY/QQQ en sont volontairement absents :
-# ce sont des ETF versant un dividende, que le calcul traite déjà avec une
-# approximation q=0 (cf. limites du README) — le retard de 15 min n'est pas
-# leur principal facteur d'imprécision.
-NATIVE_INDEX = ("SPX", "NDX")
+# Sous-jacents dont la chaîne native remplace la chaîne CBOE dès qu'un compte
+# courtier est configuré. Règle unique dans tout le projet : dxFeed s'il est
+# disponible, CBOE sinon.
+#
+# SPY/QQQ en étaient d'abord exclus au motif qu'ils versent un dividende, que
+# le calcul traite avec une approximation q=0. C'était un mauvais argument :
+# cette approximation vit dans le Black-Scholes maison, identique quelle que
+# soit la source des données. Elle ne rend donc pas le natif moins bon — elle
+# affecte les deux à égalité, tandis que le natif apporte en plus un open
+# interest, une IV et un volume temps réel.
+NATIVE_INDEX = ("SPX", "NDX", "SPY", "QQQ")
 
 
 def fetch_chain_instruments(symbol: str, access_token: str) -> pd.DataFrame:
@@ -91,7 +96,7 @@ def fetch_chain_instruments(symbol: str, access_token: str) -> pd.DataFrame:
 def reference_spot(symbol: str) -> float | None:
     """Spot de l'indice, temps réel de préférence.
 
-    `rtquote.QUOTES` est déjà abonné à SPX et NDX pour l'affichage : le prix
+    `rtquote.QUOTES` est déjà abonné à ces tickers pour l'affichage : le prix
     y est donc disponible sans un seul appel supplémentaire. Le repli sur le
     spot CBOE (délayé) ne sert qu'au démarrage, avant que le flux n'ait reçu
     sa première cotation — mieux vaut une chaîne évaluée à un spot de 15 min

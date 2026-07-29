@@ -468,6 +468,14 @@ def _chain_for_day(symbol: str, day: str) -> tuple[pd.DataFrame | None, float | 
     Pour la journée en cours on prend l'état vivant, plus frais que le dernier
     snapshot persisté ; pour une séance passée, le dernier snapshot du jour.
     """
+    # Séance passée comme séance en cours : dxFeed s'il a laissé des
+    # snapshots, CBOE sinon — la même règle partout, y compris pour relire
+    # l'historique.
+    if day != datetime.now(ET).strftime("%Y-%m-%d"):
+        rt = scheduler_native_key(symbol)
+        alt = store.load_last_snapshot(rt, day)
+        if alt is not None and not alt.empty and "spot" in alt.columns:
+            return alt, float(alt["spot"].iloc[0])
     if day == datetime.now(ET).strftime("%Y-%m-%d"):
         st = chain_state(symbol)
         with STATE.lock:
@@ -514,15 +522,17 @@ def gamma_flow_fig(symbol: str, lang: str, day: str | None = None,
     feed. On mesure l'activité pondérée par le gamma, pas un flux signé.
     """
     day = day or datetime.now(ET).strftime("%Y-%m-%d")
-    flows = store.load_flows(symbol, day)
-    title = t(lang, "gflow_title")
-    if flows.empty or "gflow_calls" not in flows.columns:
+    flows, src = flow_source(symbol, day)
+    signe = src == "dxfeed" and "net_gamma_calls" in getattr(flows, "columns", [])
+    title = t(lang, "gflow_title_signed" if signe else "gflow_title")
+    col_c, col_p = ("net_gamma_calls", "net_gamma_puts") if signe else ("gflow_calls", "gflow_puts")
+    if flows.empty or col_c not in flows.columns:
         # colonnes absentes = journée collectée avant l'ajout de cette mesure
         return empty_fig(t(lang, "no_flow_day", day=day), title)
     series = series if series is not None else ["calls", "puts", "net"]
     ts = to_local(flows["timestamp"])
-    calls = np.cumsum(flows["gflow_calls"].fillna(0.0).to_numpy()) / 1e9
-    puts = np.cumsum(flows["gflow_puts"].fillna(0.0).to_numpy()) / 1e9
+    calls = np.cumsum(flows[col_c].fillna(0.0).to_numpy()) / 1e9
+    puts = np.cumsum(flows[col_p].fillna(0.0).to_numpy()) / 1e9
     net = calls + puts
 
     fig = go.Figure()
@@ -543,6 +553,28 @@ def gamma_flow_fig(symbol: str, lang: str, day: str | None = None,
     fig.update_layout(**lay)
     fig.add_hline(y=0, line_color=C["axis"], line_width=1)
     return fig
+
+
+def flow_source(symbol: str, day: str):
+    """(données, source) pour les graphiques de flux, selon UNE règle unique :
+    dxFeed s'il est disponible, CBOE sinon.
+
+    C'est la même règle que `chain_state` applique aux chaînes, et elle vaut
+    pour tout ce qui s'affiche — sinon l'abonnement temps réel ne sert à rien.
+    `tape/` porte le flux réellement SIGNÉ (côté agresseur donné par la
+    source) ; `flows/` le proxy Δvolume×δ calculé sur CBOE, non signé et
+    délayé de 15 min.
+
+    ⚠️ Les deux ne couvrent PAS le même périmètre : le proxy CBOE porte sur
+    toute la chaîne, le flux signé sur la fenêtre souscrite par flowtape
+    (±1,5 %, 2 échéances). Les amplitudes ne sont donc pas comparables d'une
+    source à l'autre — d'où la source rendue avec les données, pour que le
+    titre du graphique le dise au lieu de le laisser deviner.
+    """
+    tape = store.load_tape(symbol, day)
+    if not tape.empty:
+        return tape.sort_values("timestamp"), "dxfeed"
+    return store.load_flows(symbol, day), "cboe"
 
 
 def tape_fig(symbol: str, lang: str, day: str | None = None,
@@ -610,12 +642,14 @@ def tape_fig(symbol: str, lang: str, day: str | None = None,
 
 def flow_fig(symbol: str, lang: str, day: str | None = None) -> go.Figure:
     day = day or datetime.now(ET).strftime("%Y-%m-%d")
-    flows = store.load_flows(symbol, day)
-    title = t(lang, "flow_title")
-    if flows.empty:
+    flows, src = flow_source(symbol, day)
+    signe = src == "dxfeed" and "net_delta" in getattr(flows, "columns", [])
+    title = t(lang, "flow_title_signed" if signe else "flow_title")
+    col = "net_delta" if signe else "flow_total"
+    if flows.empty or col not in flows.columns:
         return empty_fig(t(lang, "no_flow_day", day=day), title)
     ts = to_local(flows["timestamp"])
-    vals = flows["flow_total"].to_numpy() / 1e6
+    vals = flows[col].fillna(0.0).to_numpy() / 1e6
     cum = np.cumsum(vals)
     fig = go.Figure()
     fig.add_bar(x=ts, y=vals, name=t(lang, "legend_flow"),

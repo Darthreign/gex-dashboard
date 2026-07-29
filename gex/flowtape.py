@@ -95,6 +95,14 @@ class FlowBar:
     net_delta: float = 0.0
     delta_prints: int = 0           # prints ayant un delta connu
     no_delta_prints: int = 0        # delta pas encore reçu : exclu de net_delta
+    # Gamma net des preneurs de liquidité, même convention d'échelle que le GEX
+    # ($ par 1 % de move). Les dealers portent l'OPPOSÉ : quand un client
+    # achète du gamma, le dealer en devient court, donc moins capable
+    # d'amortir. Un net_gamma positif signale ainsi du gamma qui QUITTE les
+    # dealers — déstabilisant — et non l'inverse.
+    net_gamma: float = 0.0
+    net_gamma_calls: float = 0.0
+    net_gamma_puts: float = 0.0
     buy_contracts: float = 0.0      # bruts, pour retrouver le volume total
     sell_contracts: float = 0.0
     prints: int = 0
@@ -108,6 +116,9 @@ class FlowBar:
             "net_contracts": self.net_contracts, "net_premium": self.net_premium,
             "net_calls": self.net_calls, "net_puts": self.net_puts,
             "net_delta": self.net_delta,
+            "net_gamma": self.net_gamma,
+            "net_gamma_calls": self.net_gamma_calls,
+            "net_gamma_puts": self.net_gamma_puts,
             "delta_prints": float(self.delta_prints),
             "no_delta_prints": float(self.no_delta_prints),
             "buy_contracts": self.buy_contracts, "sell_contracts": self.sell_contracts,
@@ -195,6 +206,7 @@ class FlowTape:
     # (Le GEX, lui, reste sur du Black-Scholes maison — cf. futopt : c'est un
     # historique cohérent qu'on y construit, pas une mesure instantanée.)
     _delta: dict[str, float] = field(default_factory=dict)
+    _gamma: dict[str, float] = field(default_factory=dict)
     # spot par sous-jacent, figé à la construction de l'univers : il sert à
     # convertir un delta en dollars de sous-jacent. Une dérive intra-session
     # de quelques dixièmes de pour cent ne change pas la lecture d'un flux
@@ -280,12 +292,34 @@ class FlowTape:
                 bar.net_delta += signed * delta * mult * spot
                 bar.delta_prints += 1
 
+            # Gamma signé, à l'échelle du GEX ($ par 1 % de move) pour rester
+            # comparable aux niveaux affichés ailleurs. Les calls et les puts
+            # sont séparés sans inverser leur signe : ici ce qui porte le sens
+            # est le côté agresseur, pas la convention dealers-longs-calls du
+            # GEX statique — mélanger les deux rendrait la courbe illisible.
+            gamma = self._gamma.get(stream)
+            if gamma is not None and spot:
+                g = signed * gamma * mult * spot ** 2 * 0.01
+                bar.net_gamma += g
+                if typ == "C":
+                    bar.net_gamma_calls += g
+                elif typ == "P":
+                    bar.net_gamma_puts += g
+
     def ingest_greeks(self, item: dict) -> None:
-        """Mémorise le delta courant d'un contrat (événement Greeks)."""
+        """Mémorise delta ET gamma courants d'un contrat (événement Greeks).
+
+        Les deux arrivent dans le MÊME message : ne prendre que le delta
+        revenait à jeter le gamma pour le recalculer ailleurs, ou à laisser le
+        gamma échangé sur le proxy CBOE délayé faute de mieux.
+        """
         stream = item.get("eventSymbol")
-        delta = item.get("delta")
-        if stream in self._by_stream and isinstance(delta, (int, float)) and delta == delta:
-            self._delta[stream] = float(delta)
+        if stream not in self._by_stream:
+            return
+        for champ, cible in (("delta", self._delta), ("gamma", self._gamma)):
+            v = item.get(champ)
+            if isinstance(v, (int, float)) and v == v:
+                cible[stream] = float(v)
 
     def drain_bars(self, flush: bool = False) -> list[tuple[str, FlowBar]]:
         """Retire et renvoie les barres achevées.

@@ -95,7 +95,9 @@ def test_condition_darret_sur_iv_complete():
     assert check({"a": {"iv": 0.2}, "b": {"iv": 0.3}})
 
 
-def test_index_natifs_limites_aux_indices_purs():
-    """SPY/QQQ restent sur CBOE : ce sont des ETF à dividende, dont
-    l'approximation q=0 pèse plus que les 15 min de retard."""
-    assert idxopt.NATIVE_INDEX == ("SPX", "NDX")
+def test_regle_unique_dxfeed_sinon_cboe():
+    """Règle unique du projet : dxFeed dès qu'il est disponible, CBOE sinon —
+    y compris SPY/QQQ, un temps exclus au motif du dividende. Mauvais
+    argument : l'approximation q=0 vit dans le Black-Scholes maison, donc elle
+    frappe les deux sources à égalité (cf. NATIVE_INDEX)."""
+    assert set(idxopt.NATIVE_INDEX) == {"SPX", "NDX", "SPY", "QQQ"}

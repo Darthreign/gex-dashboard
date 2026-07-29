@@ -30,6 +30,25 @@ def _latest_snapshot_path(symbol: str) -> Path | None:
     return files[-1] if files else None
 
 
+def _preferred_symbol(symbol: str) -> str:
+    """Clé à lire : la native (dxFeed) si elle a des données, CBOE sinon.
+
+    Même règle que l'interface (cf. app.chain_state) : sans cela les outils
+    MCP répondaient sur la source délayée alors qu'une source temps réel
+    existait — deux vérités différentes pour la même question selon qu'on
+    regarde l'écran ou qu'on interroge Claude.
+    """
+    key = f"{symbol}_RT"
+    path = SETTINGS.data_dir / "history" / "metrics.parquet"
+    if not path.exists():
+        return symbol
+    try:
+        df = pd.read_parquet(path, columns=["symbol"])
+    except Exception:  # noqa: BLE001 — un historique illisible n'est pas fatal ici
+        return symbol
+    return key if (df["symbol"] == key).any() else symbol
+
+
 def _check_symbol(symbol: str) -> str:
     symbol = symbol.upper()
     if symbol not in UNDERLYINGS:
@@ -41,7 +60,7 @@ def _check_symbol(symbol: str) -> str:
 def get_gex_summary(symbol: str = "SPX") -> str:
     """Dernières métriques de synthèse (GEX net, zero gamma, P/C ratios, spot)
     pour un sous-jacent (SPX, NDX, SPY, QQQ), plus leur évolution sur la journée."""
-    symbol = _check_symbol(symbol)
+    symbol = _preferred_symbol(_check_symbol(symbol))
     path = SETTINGS.data_dir / "history" / "metrics.parquet"
     if not path.exists():
         return "Aucun historique — le dashboard n'a pas encore tourné."
@@ -65,7 +84,7 @@ def get_gex_summary(symbol: str = "SPX") -> str:
 def get_gex_by_strike(symbol: str = "SPX", top_n: int = 15) -> str:
     """Les top_n strikes par |GEX| du dernier snapshot — les murs de gamma.
     Colonnes : strike, GEX net ($), côté dominant (calls/puts), open interest."""
-    symbol = _check_symbol(symbol)
+    symbol = _preferred_symbol(_check_symbol(symbol))
     path = _latest_snapshot_path(symbol)
     if path is None:
         return "Aucun snapshot — le dashboard n'a pas encore tourné."
@@ -143,7 +162,7 @@ def get_market_context(symbol: str = "SPX") -> str:
 
     Ne renvoie ni probabilité de scénario ni recommandation de position —
     uniquement des données calculées, à interpréter, jamais un signal."""
-    symbol = _check_symbol(symbol)
+    symbol = _preferred_symbol(_check_symbol(symbol))
     metrics_path = SETTINGS.data_dir / "history" / "metrics.parquet"
     if not metrics_path.exists():
         return "Aucun historique — le dashboard n'a pas encore tourné."
@@ -216,7 +235,7 @@ def get_flow_delta(symbol: str = "SPX", day: str | None = None) -> str:
 def get_history(symbol: str = "SPX", last_n: int = 50) -> str:
     """Historique des métriques de synthèse (une ligne par snapshot ~10 min) :
     spot, GEX net, zero gamma, P/C ratios. Pour analyser l'évolution du régime."""
-    symbol = _check_symbol(symbol)
+    symbol = _preferred_symbol(_check_symbol(symbol))
     path = SETTINGS.data_dir / "history" / "metrics.parquet"
     if not path.exists():
         return "Aucun historique."
