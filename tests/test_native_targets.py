@@ -58,6 +58,11 @@ def test_build_native_summary_colonnes_exploitables():
     assert snap.feed_timestamp.tzinfo is None  # naïf en ET, comme le feed CBOE
     assert summary.symbol == "NQ"
     assert summary.net_gex == pytest.approx(df["gex"].sum())
+    # le DEX net était laissé à sa valeur par défaut (0.0) jusqu'au
+    # 2026-07-29 : un zéro qui passait pour une mesure alors que la colonne
+    # existait bel et bien dans la chaîne native
+    assert summary.net_dex == pytest.approx(df["dex"].sum())
+    assert summary.net_dex != 0.0
     assert summary.basis is None   # pas de further-future à convertir
     assert summary.source == "dxfeed"  # donnée courtier, exclue de l'export
 

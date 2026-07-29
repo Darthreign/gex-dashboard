@@ -222,6 +222,12 @@ def build_native_summary(code: str, df: pd.DataFrame,
         zero_gamma=metrics.zero_gamma(df, spot),
         pc_oi=ratios["pc_oi"], pc_volume=ratios["pc_volume"],
         net_gex_0dte=float(df.loc[metrics.bucket_mask(df, "0DTE", today), "gex"].sum()),
+        # `futopt.enrich_native` calcule bien une colonne "dex" par contrat,
+        # mais elle n'était pas sommée ici : le champ retombait donc sur sa
+        # valeur par défaut (0.0) et NQ/ES affichaient un DEX net nul depuis
+        # toujours — un zéro qui ressemblait à une mesure alors que c'était un
+        # trou (constaté le 2026-07-29).
+        net_dex=float(df["dex"].sum()),
         # pas de "basis" : ce sont déjà des options sur LE future, pas un
         # indice à convertir vers un contrat qui lui serait associé
         basis=None, source="dxfeed",
