@@ -5,7 +5,7 @@ d'enchaîner get_gex_summary + get_gex_by_strike + une lecture VIX séparée.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, time as dtime
 
 import pandas as pd
 
@@ -73,9 +73,12 @@ def test_vix_absent_reste_none(tmp_path, monkeypatch):
 
 def test_vix_variation_du_jour(tmp_path, monkeypatch):
     _seed_history(tmp_path, monkeypatch)
-    now = datetime.now()
-    store.append_index_spot("vix", {"timestamp": now - timedelta(hours=2), "vix": 15.0})
-    store.append_index_spot("vix", {"timestamp": now, "vix": 17.8})
+    # deux points ancrés sur la MÊME journée : un simple `now - 2h` bascule
+    # sur la veille quand le test tourne peu après minuit, et la variation du
+    # jour devient alors indéterminable
+    jour = datetime.now().date()
+    store.append_index_spot("vix", {"timestamp": datetime.combine(jour, dtime(10, 0)), "vix": 15.0})
+    store.append_index_spot("vix", {"timestamp": datetime.combine(jour, dtime(12, 0)), "vix": 17.8})
     out = json.loads(mcp_server.get_market_context("SPX"))
     assert out["vix"]["dernier"] == 17.8
     assert out["vix"]["source"] == "cboe_delaye"
@@ -87,9 +90,12 @@ def test_vix_live_prioritaire_si_compte_courtier(tmp_path, monkeypatch):
     prime sur le pull délayé CBOE — repli sur le délayé sinon (cf. logique
     de _vix_context, qui ne dépend d'aucun état global au-delà de ça)."""
     _seed_history(tmp_path, monkeypatch)
-    now = datetime.now()
-    store.append_index_spot("vix", {"timestamp": now - timedelta(hours=2), "vix": 15.0})
-    store.append_index_spot("vix", {"timestamp": now, "vix": 17.8})
+    # deux points ancrés sur la MÊME journée : un simple `now - 2h` bascule
+    # sur la veille quand le test tourne peu après minuit, et la variation du
+    # jour devient alors indéterminable
+    jour = datetime.now().date()
+    store.append_index_spot("vix", {"timestamp": datetime.combine(jour, dtime(10, 0)), "vix": 15.0})
+    store.append_index_spot("vix", {"timestamp": datetime.combine(jour, dtime(12, 0)), "vix": 17.8})
     monkeypatch.setattr(mcp_server, "credentials_present", lambda: True)
     monkeypatch.setattr(mcp_server.QUOTES, "price", lambda key: 19.5 if key == "VIX" else None)
     out = json.loads(mcp_server.get_market_context("SPX"))
@@ -102,8 +108,7 @@ def test_vix_repli_delaye_si_pas_de_tick_live(tmp_path, monkeypatch):
     """Identifiants présents mais VIX pas dans l'abonnement (price() = None,
     entitlement manquant) : repli sur le délayé, pas de trou silencieux."""
     _seed_history(tmp_path, monkeypatch)
-    now = datetime.now()
-    store.append_index_spot("vix", {"timestamp": now, "vix": 16.4})
+    store.append_index_spot("vix", {"timestamp": datetime.combine(datetime.now().date(), dtime(11, 0)), "vix": 16.4})
     monkeypatch.setattr(mcp_server, "credentials_present", lambda: True)
     monkeypatch.setattr(mcp_server.QUOTES, "price", lambda key: None)
     out = json.loads(mcp_server.get_market_context("SPX"))

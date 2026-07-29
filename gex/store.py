@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -31,10 +33,41 @@ def _write_atomic(df: pd.DataFrame, path: Path) -> None:
     partiellement écrit — pyarrow lève alors « Invalid column metadata
     (corrupt file?) » alors que les données sont saines. os.replace est
     atomique sur un même système de fichiers.
+
+    ⚠️ Le nom du temporaire doit être UNIQUE par écriture, pas dérivé de la
+    seule destination. Avec un `.tmp` partagé, deux threads qui écrivent le
+    même fichier entrelacent leurs octets dans ce temporaire, puis `os.replace`
+    publie le résultat : la destination devient illisible alors que chaque
+    écriture était correcte prise isolément. C'est exactement ce qui a détruit
+    history/metrics.parquet le 2026-07-29 (« Page was smaller than expected »),
+    ce fichier ayant trois producteurs dans trois threads APScheduler
+    différents — pull_all, pull_native_options et pull_native_index.
     """
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    df.to_parquet(tmp, index=False)
-    os.replace(tmp, path)
+    tmp = path.with_suffix(f"{path.suffix}.{os.getpid()}.{threading.get_ident()}"
+                           f".{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        df.to_parquet(tmp, index=False)
+        os.replace(tmp, path)
+    except BaseException:
+        # ne jamais laisser traîner un temporaire à moitié écrit
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+# Un verrou par fichier : les fonctions append_* font un lire-modifier-écrire,
+# que deux threads peuvent entrelacer même avec des temporaires distincts —
+# le second relit alors un état d'avant l'écriture du premier et l'écrase.
+# Le temporaire unique évite la corruption, ce verrou évite la perte de lignes.
+# (Portée intra-processus : deux instances du dashboard sur le même dossier
+# resteraient exposées au dernier-qui-écrit-gagne, sans corruption pour
+# autant. Ce n'est pas un mode d'emploi prévu.)
+_LOCKS: dict[Path, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(path: Path) -> threading.Lock:
+    with _LOCKS_GUARD:
+        return _LOCKS.setdefault(path, threading.Lock())
 
 
 def save_snapshot(symbol: str, df: pd.DataFrame, ts: datetime) -> Path:
@@ -48,19 +81,25 @@ def save_snapshot(symbol: str, df: pd.DataFrame, ts: datetime) -> Path:
 def append_daily(kind: str, symbol: str, row: dict, ts: datetime) -> Path:
     """Ajoute une ligne à un fichier journalier (flows) — petit, réécrit à chaque fois."""
     path = _ensure(SETTINGS.data_dir / kind / symbol / f"{ts:%Y-%m-%d}.parquet")
-    new = pd.DataFrame([row])
-    if path.exists():
-        new = pd.concat([pd.read_parquet(path), new], ignore_index=True)
-    _write_atomic(new, path)
+    with _lock_for(path):
+        new = pd.DataFrame([row])
+        if path.exists():
+            new = pd.concat([pd.read_parquet(path), new], ignore_index=True)
+        _write_atomic(new, path)
     return path
 
 
 def append_history(row: dict) -> Path:
+    """⚠️ Trois producteurs distincts écrivent ici, chacun dans son thread
+    APScheduler : pull_all (CBOE), pull_native_options (NQ/ES) et
+    pull_native_index (SPX/NDX). D'où le verrou — cf. _write_atomic pour la
+    corruption que leur concurrence a provoquée le 2026-07-29."""
     path = _ensure(SETTINGS.data_dir / "history" / "metrics.parquet")
-    new = pd.DataFrame([row])
-    if path.exists():
-        new = pd.concat([pd.read_parquet(path), new], ignore_index=True)
-    _write_atomic(new, path)
+    with _lock_for(path):
+        new = pd.DataFrame([row])
+        if path.exists():
+            new = pd.concat([pd.read_parquet(path), new], ignore_index=True)
+        _write_atomic(new, path)
     return path
 
 
@@ -69,10 +108,11 @@ def append_index_spot(key: str, row: dict) -> Path:
     pas une chaîne d'options. Alimente get_market_context (MCP), distinct de
     history/metrics.parquet qui suppose le schéma SummaryMetrics.as_row()."""
     path = _ensure(SETTINGS.data_dir / "history" / f"{key}.parquet")
-    new = pd.DataFrame([row])
-    if path.exists():
-        new = pd.concat([pd.read_parquet(path), new], ignore_index=True)
-    _write_atomic(new, path)
+    with _lock_for(path):
+        new = pd.DataFrame([row])
+        if path.exists():
+            new = pd.concat([pd.read_parquet(path), new], ignore_index=True)
+        _write_atomic(new, path)
     return path
 
 
@@ -90,11 +130,12 @@ def append_prices(symbol: str, rows: list[dict], ts: datetime) -> Path:
     oublier ici les rendrait partageables par défaut.
     """
     path = _ensure(SETTINGS.data_dir / "prices" / symbol / f"{ts:%Y-%m-%d}.parquet")
-    new = pd.DataFrame(rows)
-    if path.exists():
-        new = pd.concat([pd.read_parquet(path), new], ignore_index=True)
-    new = new.drop_duplicates(subset="timestamp", keep="last").sort_values("timestamp")
-    _write_atomic(new, path)
+    with _lock_for(path):
+        new = pd.DataFrame(rows)
+        if path.exists():
+            new = pd.concat([pd.read_parquet(path), new], ignore_index=True)
+        new = new.drop_duplicates(subset="timestamp", keep="last").sort_values("timestamp")
+        _write_atomic(new, path)
     return path
 
 
@@ -138,11 +179,12 @@ def append_tape(symbol: str, rows: list[dict], ts: datetime) -> Path:
     observé ou déduit.
     """
     path = _ensure(SETTINGS.data_dir / "tape" / symbol / f"{ts:%Y-%m-%d}.parquet")
-    new = pd.DataFrame(rows)
-    if path.exists():
-        new = pd.concat([pd.read_parquet(path), new], ignore_index=True)
-    new = new.drop_duplicates(subset="timestamp", keep="last").sort_values("timestamp")
-    _write_atomic(new, path)
+    with _lock_for(path):
+        new = pd.DataFrame(rows)
+        if path.exists():
+            new = pd.concat([pd.read_parquet(path), new], ignore_index=True)
+        new = new.drop_duplicates(subset="timestamp", keep="last").sort_values("timestamp")
+        _write_atomic(new, path)
     return path
 
 

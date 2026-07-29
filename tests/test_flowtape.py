@@ -195,7 +195,12 @@ def test_flush_ecrit_dans_tape_pas_dans_flows(tmp_path, monkeypatch):
 
     scheduler.flush_tape()
 
-    day = __import__("pandas").Timestamp.now().strftime("%Y-%m-%d")
+    # jour lu en ET comme flush_tape, qui convertit avant d'écrire : entre
+    # minuit local et minuit ET, la date locale n'est pas celle du marché
+    from datetime import datetime
+
+    from gex.metrics import ET
+    day = datetime.now(ET).strftime("%Y-%m-%d")
     # la barre en cours n'est pas encore achevée : rien ne doit être écrit
     assert store.load_tape("SPX", day).empty
 

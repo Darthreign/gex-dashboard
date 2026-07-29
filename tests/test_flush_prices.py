@@ -27,7 +27,12 @@ def test_flush_prices_vide_les_deux_sources(tmp_path, monkeypatch):
 
     scheduler.flush_prices()
 
-    day = pd.Timestamp.now().strftime("%Y-%m-%d")
+    # jour lu en ET, comme _flush_bars qui convertit avant d'écrire : entre
+    # minuit local et minuit ET, la date locale n'est PAS celle du marché
+    from datetime import datetime
+
+    from gex.metrics import ET
+    day = datetime.now(ET).strftime("%Y-%m-%d")
     spx = store.load_prices("SPX", day)
     nq = store.load_prices("NQ", day)
     assert not spx.empty and spx["source"].iloc[0] == "dxfeed"
