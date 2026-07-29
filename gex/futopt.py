@@ -172,6 +172,13 @@ async def _collect_one(streamer_symbols: list[str],
         await send({"type": "SETUP", "channel": 0, "version": "0.1-futopt",
                     "keepaliveTimeout": 60, "acceptKeepaliveTimeout": 60})
         auth_sent = False
+        # cf. rtquote._session : FEED_CONFIG est renvoyé à chaque évolution de
+        # la configuration du feed, pas une seule fois. Ici l'enjeu est plus
+        # lourd qu'ailleurs — une salve NQ vaut ~3500 contrats x 3 événements,
+        # donc trois renvois dépassaient les 30 000 souscriptions et faisaient
+        # rejeter la collecte entière ("subscription rate is too high",
+        # 2026-07-29 : plus aucune chaîne native ne passait).
+        subscribed = False
         # Le silence qui compte est celui du FLUX DE DONNÉES, pas celui de la
         # connexion : un KEEPALIVE arrive indéfiniment sur une connexion
         # normale et rouvrirait la fenêtre à chaque fois si on l'y incluait —
@@ -207,7 +214,8 @@ async def _collect_one(streamer_symbols: list[str],
                                 "parameters": {"contract": "AUTO"}})
             elif typ == "CHANNEL_OPENED":
                 await send(feed_setup_message(1))
-            elif typ == "FEED_CONFIG":
+            elif typ == "FEED_CONFIG" and not subscribed:
+                subscribed = True
                 subs = [{"type": e, "symbol": s}
                        for s in streamer_symbols for e in events]
                 await send({"type": "FEED_SUBSCRIPTION", "channel": 1, "add": subs})

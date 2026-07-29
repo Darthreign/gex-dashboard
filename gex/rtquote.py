@@ -322,6 +322,16 @@ class RealtimeQuotes:
             await send({"type": "SETUP", "channel": 0, "version": "0.1-gex",
                         "keepaliveTimeout": 60, "acceptKeepaliveTimeout": 60})
             auth_sent = False
+            # FEED_CONFIG n'est PAS un événement unique : le serveur le renvoie
+            # chaque fois que la configuration du feed évolue, y compris APRÈS
+            # notre propre souscription. Sans ce verrou, chaque renvoi
+            # réexpédiait la salve entière — observé le 2026-07-29, trois
+            # salves en 100 ms (cf. les trois "Spot temps réel actif" d'affilée
+            # dans les logs), rejetées par dxFeed en "BAD_ACTION: Your
+            # subscription rate is too high". Régression introduite avec le
+            # passage au format COMPACT : la souscription partait auparavant
+            # sur CHANNEL_OPENED, qui lui n'arrive qu'une fois.
+            subscribed = False
 
             async for raw in ws:
                 m = json.loads(raw)
@@ -342,7 +352,8 @@ class RealtimeQuotes:
                                     "parameters": {"contract": "AUTO"}})
                 elif typ == "CHANNEL_OPENED":
                     await send(feed_setup_message(1))
-                elif typ == "FEED_CONFIG":
+                elif typ == "FEED_CONFIG" and not subscribed:
+                    subscribed = True
                     subs = [{"type": "Quote", "symbol": s} for s in symbols.values()]
                     subs += [{"type": "Trade", "symbol": s} for s in symbols.values()]
                     await send({"type": "FEED_SUBSCRIPTION", "channel": 1, "add": subs})
