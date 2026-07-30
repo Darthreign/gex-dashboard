@@ -669,7 +669,10 @@ def tape_table(symbol: str, lang: str, min_size: float = 0.0,
         contrat = (f"{int(r['strike'])}{r['type']}"
                    if r["strike"] is not None and r["type"] else "—")
         side_txt = ("ACHAT" if achat else "VENTE" if vente else "?")
-        heure = datetime.fromtimestamp(r["t"], tz=ET).strftime("%H:%M:%S")
+        # heure locale de la machine (= celle de l'utilisateur, l'appli tourne
+        # chez lui), cohérente avec to_local() utilisé sur tous les graphes.
+        # r["t"] est un epoch absolu, donc la conversion de fuseau est exacte.
+        heure = datetime.fromtimestamp(r["t"], tz=LOCAL_TZ).strftime("%H:%M:%S")
         notio = _fmt_notional(r["notional"])
         prix = f"{r['price']:.2f}" if r["price"] is not None else "—"
         style = {"color": couleur}
