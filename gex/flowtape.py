@@ -103,23 +103,23 @@ class FlowBar:
     vendu sur la minute.
     """
     minute: int
-    net_contracts: float = 0.0      # signé, hors jambes de spread
-    net_premium: float = 0.0        # signé, en dollars (prix x taille x mult)
-    net_calls: float = 0.0          # contrats signés, calls seuls
-    net_puts: float = 0.0           # contrats signés, puts seuls
-    # Delta net des PRENEURS de liquidité, en dollars de sous-jacent. C'est
-    # aussi, au signe près, le flux de couverture que les dealers doivent
-    # exécuter : ils prennent l'autre côté, donc leur delta est l'opposé du
-    # client, et se couvrir revient à répliquer le delta client. Positif =
-    # pression acheteuse sur le sous-jacent.
+    # TOUS les agrégats signés ci-dessous sont en POINT DE VUE DEALER, la même
+    # convention que le bandeau et les graphes par strike (cf. ingest_print).
+    # Un « + » y veut dire la même chose que sur le GEX/DEX statique.
+    net_contracts: float = 0.0      # convention GEX : call acheté +, put acheté −
+    net_premium: float = 0.0        # $ encaissés par le dealer (opposé du preneur)
+    net_calls: float = 0.0          # contrats, calls (achat preneur -> +)
+    net_puts: float = 0.0           # contrats, puts (achat preneur -> −)
+    # Delta net des DEALERS, en dollars de sous-jacent — même sens que la tuile
+    # « DEX net ». Positif = dealers longs delta (issu d'achats de puts par les
+    # preneurs, ou de ventes de calls). C'est l'opposé du delta pris par le
+    # preneur, cohérent avec dex = −δ·oi de metrics.enrich.
     net_delta: float = 0.0
     delta_prints: int = 0           # prints ayant un delta connu
     no_delta_prints: int = 0        # delta pas encore reçu : exclu de net_delta
-    # Gamma net des preneurs de liquidité, même convention d'échelle que le GEX
-    # ($ par 1 % de move). Les dealers portent l'OPPOSÉ : quand un client
-    # achète du gamma, le dealer en devient court, donc moins capable
-    # d'amortir. Un net_gamma positif signale ainsi du gamma qui QUITTE les
-    # dealers — déstabilisant — et non l'inverse.
+    # Gamma net à l'échelle du GEX ($ par 1 % de move), signe-type GEX (call +,
+    # put −). Positif = flux qui ajoute du gamma côté dealers (stabilisant),
+    # négatif = qui en retire — même lecture que « GEX net ».
     net_gamma: float = 0.0
     net_gamma_calls: float = 0.0
     net_gamma_puts: float = 0.0
@@ -300,45 +300,64 @@ class FlowTape:
                 bar.undefined_prints += 1
                 return
 
-            signed = sign * size
-            bar.net_contracts += signed
+            # Tout ce qui suit est écrit du POINT DE VUE DEALER, comme le reste
+            # du tableau (bandeau, GEX/DEX par strike, cadre de régime). C'est
+            # ce qui garde une seule convention partout : un « + » veut dire la
+            # même chose sur une courbe de flux et sur un graphe statique. Le
+            # dealer prend le côté opposé du preneur, d'où les signes ci-dessous
+            # — dérivés de sorte que la CONTRIBUTION PAR TYPE d'un print colle à
+            # celle du contrat correspondant dans metrics.enrich (gex/dex).
+            typ = option_type_of(stream or "")
+            # signe-type du GEX : call +1, put −1 (dealers longs calls / courts
+            # puts). Sans lui, calls et puts seraient indiscernables sur le
+            # gamma, dont la valeur est toujours positive — exactement la raison
+            # d'être du même flip dans metrics.enrich.
+            type_sign = 1.0 if typ == "C" else -1.0 if typ == "P" else 0.0
+
+            # Contrats signés en convention GEX : un call acheté monte, un put
+            # acheté descend — comme les barres du graphe par strike.
+            dealer_contracts = sign * type_sign * size
+            bar.net_contracts += dealer_contracts
+            if typ == "C":
+                bar.net_calls += dealer_contracts
+            elif typ == "P":
+                bar.net_puts += dealer_contracts
+            # bruts, hors convention : servent à retrouver le volume total
             if sign > 0:
                 bar.buy_contracts += size
             else:
                 bar.sell_contracts += size
 
             mult = multiplier_of(symbol)
+            # Prime encaissée par le dealer : + quand le preneur ACHÈTE (le
+            # dealer vend et encaisse), − quand le preneur vend. En valeur
+            # c'est la prime que paie le preneur, vue de l'autre côté.
             if isinstance(price, (int, float)) and price == price:
-                bar.net_premium += signed * float(price) * mult
+                bar.net_premium += sign * size * float(price) * mult
 
-            typ = option_type_of(stream or "")
-            if typ == "C":
-                bar.net_calls += signed
-            elif typ == "P":
-                bar.net_puts += signed
-
-            # Pondération par le delta : c'est elle qui transforme un décompte
-            # de contrats en mesure d'IMPACT de couverture. 100 calls très
-            # hors-monnaie (delta 0,05) n'obligent le dealer à presque rien,
-            # 100 calls à la monnaie (delta 0,50) le forcent à dix fois plus.
-            # Sans delta encore reçu, le print est exclu du net et compté à
-            # part plutôt qu'estimé au jugé.
+            # DELTA dealer = opposé du delta pris par le preneur. On vérifie
+            # que le signe colle à la tuile DEX (metrics.enrich : dex = −δ·oi) :
+            #   preneur achète un CALL (δ>0)  -> dealer court delta -> négatif,
+            #   comme la contribution −δ_call d'un call à l'open interest ;
+            #   preneur achète un PUT (δ<0)   -> dealer long delta  -> positif.
+            # Positif = dealers longs delta, exactement comme « DEX net » > 0.
             delta = self._delta.get(stream)
             spot = self._spot.get(symbol)
             if delta is None or not spot:
                 bar.no_delta_prints += 1
             else:
-                bar.net_delta += signed * delta * mult * spot
+                bar.net_delta += -sign * size * delta * mult * spot
                 bar.delta_prints += 1
 
-            # Gamma signé, à l'échelle du GEX ($ par 1 % de move) pour rester
-            # comparable aux niveaux affichés ailleurs. Les calls et les puts
-            # sont séparés sans inverser leur signe : ici ce qui porte le sens
-            # est le côté agresseur, pas la convention dealers-longs-calls du
-            # GEX statique — mélanger les deux rendrait la courbe illisible.
+            # Gamma signé, à l'échelle du GEX ($ par 1 % de move). Même signe-
+            # type que metrics.enrich (call +, put −) : un call acheté ajoute du
+            # gamma positif, un put acheté du négatif — exactement comme les
+            # barres du graphe GEX par strike. Le gamma d'une option étant
+            # toujours positif, c'est ce flip qui rend calls et puts lisibles au
+            # lieu de les empiler tous du même côté.
             gamma = self._gamma.get(stream)
-            if gamma is not None and spot:
-                g = signed * gamma * mult * spot ** 2 * 0.01
+            if gamma is not None and spot and type_sign:
+                g = sign * type_sign * size * gamma * mult * spot ** 2 * 0.01
                 bar.net_gamma += g
                 if typ == "C":
                     bar.net_gamma_calls += g

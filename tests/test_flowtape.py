@@ -28,9 +28,11 @@ def _print(sym, side, size, price=10.0, spread=False):
 
 
 def test_delta_pondere_limpact_pas_le_nombre_de_contrats():
-    """Le cœur de la mesure façon HIRO : 100 calls très hors-monnaie
-    (delta 0,05) n'obligent le dealer à presque rien, 100 calls à la monnaie
-    (delta 0,50) le forcent à dix fois plus de couverture."""
+    """La pondération par le delta reste : 100 calls très hors-monnaie
+    (delta 0,05) pèsent dix fois moins que 100 à la monnaie (delta 0,50). Le
+    signe est en convention DEALER — un achat de calls par le preneur laisse
+    le dealer COURT delta, donc net_delta négatif (comme la contribution −δ
+    d'un call dans la tuile DEX)."""
     t = _tape()
     t._spot["SPX"] = 7400.0
     t._delta[".SPXW260729C7400"] = 0.50
@@ -43,21 +45,22 @@ def test_delta_pondere_limpact_pas_le_nombre_de_contrats():
     t2.ingest_print(_print(".SPXW260729C7400", "BUY", 100), now=60.0)
     loin = t2.bars["SPX"].net_delta
 
-    assert proche == pytest.approx(100 * 0.50 * 100 * 7400.0)
+    assert proche == pytest.approx(-100 * 0.50 * 100 * 7400.0)  # dealer court
     assert proche == pytest.approx(loin * 10)
 
 
-def test_achat_de_puts_pousse_le_delta_vers_le_bas():
-    """Signe de l'impact de couverture : acheter des puts (delta négatif)
-    oblige le dealer à VENDRE du sous-jacent — pression baissière — alors que
-    le décompte de contrats, lui, serait positif dans les deux cas."""
+def test_achat_de_puts_rend_les_dealers_longs_delta():
+    """Convention dealer, cohérente avec la tuile DEX (dex = −δ·oi) : un preneur
+    qui achète des puts laisse le dealer LONG delta (net_delta positif), et le
+    put acheté descend sur la ligne des contrats — comme un put sur le graphe
+    GEX par strike."""
     t = _tape()
     t._spot["SPX"] = 7400.0
     t._delta[".SPXW260729P7400"] = -0.45
     t.ingest_print(_print(".SPXW260729P7400", "BUY", 10), now=60.0)
     bar = t.bars["SPX"]
-    assert bar.net_contracts > 0        # 10 contrats achetés
-    assert bar.net_delta < 0            # mais couverture VENDEUSE
+    assert bar.net_puts < 0             # put acheté -> négatif (convention GEX)
+    assert bar.net_delta > 0            # dealers LONGS delta
 
 
 def test_print_sans_delta_connu_exclu_pas_estime():
@@ -120,16 +123,20 @@ def test_ponderation_par_la_taille_pas_par_le_nombre_de_prints():
 
 
 def test_separation_calls_puts():
+    """Convention GEX (call +, put −) appliquée à la direction du preneur :
+    un call ACHETÉ monte (+8), un put VENDU monte aussi (+3, car put −1 fois
+    vente −1). Le net est leur somme."""
     t = _tape()
     t.ingest_print(_print(".SPXW260729C7400", "BUY", 8), now=60.0)
     t.ingest_print(_print(".SPXW260729P7400", "SELL", 3), now=60.0)
     bar = t.bars["SPX"]
-    assert bar.net_calls == pytest.approx(8.0)
-    assert bar.net_puts == pytest.approx(-3.0)
-    assert bar.net_contracts == pytest.approx(5.0)
+    assert bar.net_calls == pytest.approx(8.0)     # call acheté -> +
+    assert bar.net_puts == pytest.approx(3.0)      # put vendu -> + (−1×−1)
+    assert bar.net_contracts == pytest.approx(11.0)
 
 
 def test_prime_en_dollars_avec_le_multiplicateur():
+    """+ quand le preneur achète (le dealer encaisse la prime)."""
     t = _tape()
     t.ingest_print(_print(".SPXW260729C7400", "BUY", 2, price=18.5), now=60.0)
     # indice : multiplicateur 100

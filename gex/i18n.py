@@ -62,17 +62,18 @@ TR: dict[str, dict[str, str]] = {
         # Order flow SIGNÉ (cf. gex/flowtape.py) — à distinguer du flux delta
         # juste au-dessus, qui est un proxy non signé : ici le côté agresseur
         # vient de la source, il n'est pas déduit.
-        "tape_title": "Order flow signé cumulé — qui agresse le carnet",
+        "tape_title": "Order flow signé cumulé — vu côté dealers",
         "legend_tape_calls": "Calls",
         "legend_tape_puts": "Puts",
         "legend_tape_net": "Net",
         "axis_tape": "Contrats nets cumulés",
-        "axis_tape_delta": "Delta net cumulé ($M de sous-jacent)",
+        "axis_tape_delta": "Delta net dealers cumulé ($M)",
         "unit_contracts": "contrats",
         "unit_musd": "$M",
         "no_tape_day": "Aucun order flow enregistré le {day}",
-        "tape_note": ("Signe donné par la source (côté agresseur), non déduit. "
-                      "Jambes de combos exclues du net, prints pondérés par la taille. "
+        "tape_note": ("Convention dealers, comme le bandeau : + = dealers longs delta. "
+                      "Côté agresseur donné par la source (non déduit), jambes de combos "
+                      "exclues du net, prints pondérés par la taille. "
                       "Données courtier — non redistribuables."),
         "tape_series_label": "Séries affichées",
         "card_spot": "Spot (délayé 15 min)",
@@ -226,17 +227,18 @@ TR: dict[str, dict[str, str]] = {
         "legend_gputs": "Puts (gamma −)",
         "legend_gnet": "Net",
         "axis_gflow_bn": "$Bn cumulative gamma",
-        "tape_title": "Cumulative signed order flow — who lifts the book",
+        "tape_title": "Cumulative signed order flow — dealer view",
         "legend_tape_calls": "Calls",
         "legend_tape_puts": "Puts",
         "legend_tape_net": "Net",
         "axis_tape": "Cumulative net contracts",
-        "axis_tape_delta": "Cumulative net delta ($M of underlying)",
+        "axis_tape_delta": "Cumulative dealer net delta ($M)",
         "unit_contracts": "contracts",
         "unit_musd": "$M",
         "no_tape_day": "No order flow recorded on {day}",
-        "tape_note": ("Side reported by the source (aggressor), not inferred. "
-                      "Combo legs excluded from the net, prints weighted by size. "
+        "tape_note": ("Dealer convention, like the header tiles: + = dealers long delta. "
+                      "Aggressor side reported by the source (not inferred), combo legs "
+                      "excluded from the net, prints weighted by size. "
                       "Broker data — not redistributable."),
         "tape_series_label": "Series shown",
         "card_spot": "Spot (15-min delayed)",
