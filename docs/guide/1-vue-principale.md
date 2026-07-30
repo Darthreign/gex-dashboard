@@ -79,6 +79,8 @@ Les courbes **Calls** et **Puts** restent en nombre de contrats, sur l'axe de dr
 
 ⚠️ **Périmètre plus étroit que les autres graphiques.** Pour écouter le flux, il faut dire au fournisseur *quels contrats* suivre — on ne peut pas tout écouter. Le dashboard suit les strikes à moins de **1,5 % du prix actuel**, sur les **2 échéances les plus proches**. C'est là que se traite l'essentiel, mais ça veut dire que les amplitudes de ce graphique ne sont **pas comparables** à celles du proxy CBOE, qui porte sur toute la chaîne.
 
+Cette bande **suit le prix** : dès qu'il s'éloigne du centre de plus de la moitié de la fenêtre, la liste des contrats écoutés est reconstruite autour du nouveau prix. Un mouvement rapide ne fait donc pas décrocher le graphique — utile en scalp/intraday, où le flux compte justement le plus les jours qui bougent.
+
 <a id="historique"></a>
 ## GEX net — historique
 

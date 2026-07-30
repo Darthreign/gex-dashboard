@@ -249,3 +249,59 @@ def test_repli_cboe_si_la_colonne_dxfeed_manque(tmp_path, monkeypatch):
     d2, src2 = flow_source("SPX", "2026-07-29", ("net_delta",))
     assert src2 == "dxfeed"      # celle-là est bien présente
     assert "net_delta" in d2.columns
+
+
+def test_derive_detectee_au_dela_du_seuil(monkeypatch):
+    """Recentrage anticipé : dès que le spot live s'éloigne du centre de plus
+    de la moitié de la demi-fenêtre, l'univers doit être reconstruit. Sinon un
+    mouvement rapide fait sortir le prix de la bande souscrite (NQ, 3 min sur
+    550 le 2026-07-29)."""
+    import gex.flowtape as ft
+
+    t = ft.FlowTape()
+    t._center = {"SPX": 7400.0}
+    seuil = ft.STRIKE_WINDOW * ft.RECENTER_FRACTION      # 0.0075 -> 55,5 pts
+
+    # juste en deçà du seuil : pas de recentrage
+    monkeypatch.setattr(ft.QUOTES, "price", lambda k: 7400.0 + 50)
+    assert t._drifted() is None
+
+    # au-delà : recentrage
+    monkeypatch.setattr(ft.QUOTES, "price", lambda k: 7400.0 + 70)
+    assert t._drifted() == "SPX"
+
+    # symétrique vers le bas
+    monkeypatch.setattr(ft.QUOTES, "price", lambda k: 7400.0 - 70)
+    assert t._drifted() == "SPX"
+
+
+def test_derive_ignore_un_spot_live_absent(monkeypatch):
+    """Un sous-jacent sans cotation live (price() = None) ne doit jamais
+    déclencher de recentrage — sinon un flux muet reconstruirait en boucle."""
+    import gex.flowtape as ft
+
+    t = ft.FlowTape()
+    t._center = {"SPX": 7400.0, "NQ": 27000.0}
+    monkeypatch.setattr(ft.QUOTES, "price",
+                        lambda k: None if k == "NQ" else 7400.0)
+    assert t._drifted() is None
+
+
+def test_build_universe_fixe_le_centre(monkeypatch):
+    """Le centre est REMPLACÉ à chaque construction, pas cumulé : c'est le
+    référentiel de la fenêtre courante."""
+    import gex.flowtape as ft
+    from gex import futopt, idxopt
+
+    t = ft.FlowTape()
+    t._center = {"SPX": 1.0, "OBSOLETE": 2.0}      # ancien état à écraser
+    monkeypatch.setattr(ft, "quote_token", lambda: ("tok", "wss://x", "acc"))
+    monkeypatch.setattr(idxopt, "reference_spot",
+                        lambda s: 7400.0 if s == "SPX" else None)
+    monkeypatch.setattr(futopt, "_reference_spot", lambda s, a: None)
+    monkeypatch.setattr(ft, "build_index_universe",
+                        lambda s, spot, acc: [".SPXW260729C7400"])
+
+    t._build_universe()
+    assert t._center.get("SPX") == 7400.0
+    assert "OBSOLETE" not in t._center      # remplacé, pas fusionné

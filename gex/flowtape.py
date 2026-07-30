@@ -45,7 +45,13 @@ from dataclasses import dataclass, field
 import requests
 
 from .config import CONTRACT_MULTIPLIER
-from .rtquote import BACKOFF_MAX, BACKOFF_START, credentials_present, quote_token
+from .rtquote import (
+    BACKOFF_MAX,
+    BACKOFF_START,
+    QUOTES,
+    credentials_present,
+    quote_token,
+)
 
 log = logging.getLogger(__name__)
 
@@ -65,10 +71,24 @@ TRACKED: dict[str, str] = {
 STRIKE_WINDOW = 0.015
 MAX_EXPIRIES = 2
 
-# L'univers est reconstruit périodiquement : le spot dérive et les échéances
-# roulent. On reconnecte plutôt que d'empiler les souscriptions sur un canal
-# déjà ouvert — un ajout tardif n'est pas fiable sur dxLink (cf. futopt).
+# L'univers est reconstruit périodiquement : les échéances roulent et, à
+# défaut de dérive marquée, le centrage se rafraîchit quand même. On reconnecte
+# plutôt que d'empiler les souscriptions sur un canal déjà ouvert — un ajout
+# tardif n'est pas fiable sur dxLink (cf. futopt).
 UNIVERSE_REFRESH_S = 1800
+
+# Recentrage anticipé : dès que le spot d'un sous-jacent s'éloigne de son
+# centre de plus de cette FRACTION de la demi-fenêtre, l'univers est
+# reconstruit sans attendre les 30 min. Sinon, un mouvement rapide fait sortir
+# le prix de la bande souscrite : on écouterait alors des strikes que le marché
+# a quittés et on raterait ceux vers lesquels il va — précisément les jours qui
+# bougent, quand le flux compte le plus. Mesuré le 2026-07-29 : NQ sortait de
+# la fenêtre 3 minutes sur 550. À 0,5, on recentre à mi-chemin du bord, ce qui
+# laisse toujours une demi-fenêtre de marge du côté où le prix se dirige.
+RECENTER_FRACTION = 0.5
+# La dérive se vérifie au plus toutes les N secondes : le flux FEED_DATA passe
+# des milliers de fois par seconde, inutile de recalculer à chaque print.
+DRIFT_CHECK_S = 5.0
 
 INDEX_CHAIN_URL = "https://api.tastyworks.com/option-chains/{symbol}/nested"
 
@@ -212,8 +232,27 @@ class FlowTape:
     # de quelques dixièmes de pour cent ne change pas la lecture d'un flux
     # cumulé, et le rafraîchir à chaque print coûterait un verrou par message.
     _spot: dict[str, float] = field(default_factory=dict)
+    # spot autour duquel la fenêtre de souscription courante a été centrée. On
+    # y compare le spot LIVE pour décider d'un recentrage : `_spot` peut être
+    # figé au spot de construction, `_center` l'est délibérément — c'est le
+    # point de référence de la fenêtre, pas une estimation du prix courant.
+    _center: dict[str, float] = field(default_factory=dict)
     _started: bool = False
     _state: str = "off"
+
+    def _drifted(self) -> str | None:
+        """Nom du premier sous-jacent dont le spot live a trop dérivé de son
+        centre, ou None. Compare au spot temps réel de `rtquote.QUOTES`, déjà
+        abonné à tous les sous-jacents suivis — aucun appel réseau ajouté.
+        """
+        seuil = STRIKE_WINDOW * RECENTER_FRACTION
+        with self.lock:
+            centres = dict(self._center)
+        for symbol, centre in centres.items():
+            live = QUOTES.price(symbol)
+            if live and centre and abs(live - centre) / centre > seuil:
+                return symbol
+        return None
 
     def ingest_print(self, item: dict, now: float) -> None:
         """Range un print dans la barre de sa minute.
@@ -384,6 +423,9 @@ class FlowTape:
                 log.exception("%s : univers de flux indisponible", symbol)
         with self.lock:
             self._spot.update(spots)
+            # le centre est REMPLACÉ (pas mis à jour) : c'est le référentiel de
+            # la fenêtre qu'on vient de construire, pas un cumul historique
+            self._center = dict(spots)
         return out
 
     def _run(self) -> None:
@@ -429,6 +471,7 @@ class FlowTape:
             # de la configuration, réexpédier la salve fait rejeter la session
             subscribed = False
             deadline = time.monotonic() + UNIVERSE_REFRESH_S
+            next_drift_check = time.monotonic() + DRIFT_CHECK_S
 
             async for raw in ws:
                 m = json.loads(raw)
@@ -477,9 +520,20 @@ class FlowTape:
                         elif etype == "TimeAndSale":
                             self.ingest_print(item, now)
 
-                if time.monotonic() > deadline:
-                    log.info("Order flow : renouvellement de l'univers")
+                now_mono = time.monotonic()
+                if now_mono > deadline:
+                    log.info("Order flow : renouvellement périodique de l'univers")
                     return
+                # Recentrage anticipé : ne se vérifie qu'après souscription (le
+                # centre n'a de sens qu'une fois la fenêtre en place) et au plus
+                # une fois toutes les DRIFT_CHECK_S.
+                if subscribed and now_mono > next_drift_check:
+                    next_drift_check = now_mono + DRIFT_CHECK_S
+                    derive = self._drifted()
+                    if derive is not None:
+                        log.info("Order flow : %s a dérivé hors fenêtre — "
+                                 "recentrage de l'univers", derive)
+                        return
 
 
 TAPE = FlowTape()
