@@ -15,7 +15,7 @@ from datetime import UTC, datetime, time
 import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from . import backup, flowtape, idxopt, metrics, store
+from . import backup, flowtape, idxopt, metrics, rates, store
 from .config import SETTINGS, UNDERLYINGS
 from .ingest import ChainSnapshot, fetch_chain, fetch_index_spot
 from .metrics import ET, SummaryMetrics
@@ -432,7 +432,14 @@ def start_scheduler() -> BackgroundScheduler:
     # (archives Databento de plus de 100 Mo). Sans rclone configuré, l'appel
     # journalise et se retire.
     sched.add_job(backup.run, "cron", day_of_week="mon-fri", hour=16, minute=30)
+    # Taux sans risque : le SOFR de la veille est publié ~8h ET, on le récupère
+    # à 8h15 pour la journée (cf. gex/rates). Le week-end reprend le dernier
+    # ouvré, ce qui convient.
+    sched.add_job(rates.refresh, "cron", day_of_week="mon-fri", hour=8, minute=15)
     sched.start()
+    # Premier chargement du taux au démarrage (dans un thread : ne pas bloquer
+    # le lancement sur un appel réseau ; repli sur la constante si indisponible).
+    threading.Thread(target=rates.refresh, daemon=True).start()
     # Premier pull immédiat (même hors marché : affiche le dernier état connu).
     threading.Thread(target=pull_all, kwargs={"force": True}, daemon=True).start()
     # Idem pour NQ/ES natifs : sans cet appel, ils resteraient invisibles dans

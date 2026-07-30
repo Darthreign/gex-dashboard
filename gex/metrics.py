@@ -15,8 +15,8 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-from . import greeks
-from .config import CONTRACT_MULTIPLIER, RISK_FREE_RATE, SETTINGS
+from . import greeks, rates
+from .config import CONTRACT_MULTIPLIER, SETTINGS
 from .ingest import ChainSnapshot
 
 ET = ZoneInfo("America/New_York")
@@ -52,8 +52,9 @@ def enrich(snapshot: ChainSnapshot, now_et: datetime | None = None) -> pd.DataFr
     iv = df["iv"].to_numpy()
     valid = iv > 1e-4
 
-    g = np.where(valid, greeks.gamma(s, df["strike"], t, RISK_FREE_RATE, np.where(valid, iv, 1.0)), df["gamma_cboe"])
-    d_call = greeks.call_delta(s, df["strike"], t, RISK_FREE_RATE, np.where(valid, iv, 1.0))
+    r = rates.current_rate()
+    g = np.where(valid, greeks.gamma(s, df["strike"], t, r, np.where(valid, iv, 1.0)), df["gamma_cboe"])
+    d_call = greeks.call_delta(s, df["strike"], t, r, np.where(valid, iv, 1.0))
     is_call = (df["type"] == "C").to_numpy()
     d = np.where(valid, np.where(is_call, d_call, d_call - 1.0), df["delta_cboe"])
 
@@ -109,8 +110,9 @@ def add_second_order(df: pd.DataFrame, spot: float) -> pd.DataFrame:
     iv = np.where(valid, d["iv"].to_numpy(), 1.0)
     t = d["t_years"].to_numpy()
     k = d["strike"].to_numpy()
-    v = greeks.vanna(spot, k, t, RISK_FREE_RATE, iv)
-    c = greeks.charm_per_day(spot, k, t, RISK_FREE_RATE, iv)
+    r = rates.current_rate()
+    v = greeks.vanna(spot, k, t, r, iv)
+    c = greeks.charm_per_day(spot, k, t, r, iv)
     v = np.where(valid, v, 0.0)
     c = np.where(valid, c, 0.0)
     sign = np.where((d["type"] == "C").to_numpy(), 1.0, -1.0)
@@ -170,7 +172,7 @@ def gamma_profile(df: pd.DataFrame, spot: float, weight_col: str = "open_interes
     iv = d["iv"].to_numpy()[:, None]
     oi = d[weight_col].to_numpy()[:, None]
     sign = np.where((d["type"] == "C").to_numpy()[:, None], 1.0, -1.0)
-    g = greeks.gamma(grid[None, :], k, t, RISK_FREE_RATE, iv)
+    g = greeks.gamma(grid[None, :], k, t, rates.current_rate(), iv)
     profile = (sign * g * oi * CONTRACT_MULTIPLIER * grid[None, :] ** 2 * 0.01).sum(axis=0)
     return grid, profile
 
@@ -197,7 +199,7 @@ def gex_at_spot(df: pd.DataFrame, ref_spot: float,
     if d.empty:
         return pd.Series(dtype=float)
     g = greeks.gamma(ref_spot, d["strike"].to_numpy(), d["t_years"].to_numpy(),
-                     RISK_FREE_RATE, d["iv"].to_numpy())
+                     rates.current_rate(), d["iv"].to_numpy())
     sign = np.where((d["type"] == "C").to_numpy(), 1.0, -1.0)
     gex = (sign * g * d[weight_col].to_numpy()
            * CONTRACT_MULTIPLIER * ref_spot ** 2 * 0.01)
@@ -311,7 +313,7 @@ def futures_basis(df: pd.DataFrame, spot: float, today: date | None = None) -> f
         if cmid <= 0 or pmid <= 0:
             continue
         t = calls.loc[k, "t_years"]
-        fwds.append((cmid - pmid) * np.exp(RISK_FREE_RATE * t) + k)
+        fwds.append((cmid - pmid) * np.exp(rates.current_rate() * t) + k)
     if len(fwds) < 5:
         return None
     basis = float(np.median(fwds)) - spot

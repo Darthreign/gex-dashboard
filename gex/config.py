@@ -16,7 +16,10 @@ def _default_data_dir() -> Path:
 
 DATA_DIR = _default_data_dir()
 
-# Taux sans risque annualisé utilisé dans Black-Scholes (approx T-bills 3M).
+# Taux sans risque annualisé, REPLI uniquement : le calcul live charge le SOFR
+# du jour via gex/rates (current_rate). Cette constante ne sert plus que si
+# l'API NY Fed est injoignable, et pour la reconstruction historique
+# (backfill), où le taux du jour serait anachronique.
 RISK_FREE_RATE = 0.045
 
 # Multiplicateur de contrat (SPX, NDX, SPY, QQQ : 100).

@@ -37,7 +37,7 @@ import pandas as pd
 import requests
 
 from . import greeks, store
-from .config import RISK_FREE_RATE
+from . import rates
 from .metrics import ET, YEAR_SECONDS, seconds_to_expiry
 from .rtquote import QUOTES, decode_compact_feed_data, feed_setup_message, quote_token
 
@@ -373,8 +373,9 @@ def enrich_native(chain: pd.DataFrame, raw: dict[str, dict], spot: float,
     valid = df["iv"].to_numpy() > 1e-4
     iv = np.where(valid, df["iv"].to_numpy(), 1.0)
     is_call = (df["type"] == "C").to_numpy()
-    g = np.where(valid, greeks.gamma(spot, df["strike"].to_numpy(), t, RISK_FREE_RATE, iv), 0.0)
-    dcall = greeks.call_delta(spot, df["strike"].to_numpy(), t, RISK_FREE_RATE, iv)
+    r = rates.current_rate()
+    g = np.where(valid, greeks.gamma(spot, df["strike"].to_numpy(), t, r, iv), 0.0)
+    dcall = greeks.call_delta(spot, df["strike"].to_numpy(), t, r, iv)
     d = np.where(valid, np.where(is_call, dcall, dcall - 1.0), 0.0)
 
     df["gamma_bs"] = g
