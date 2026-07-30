@@ -312,3 +312,79 @@ def test_build_universe_fixe_le_centre(monkeypatch):
     t._build_universe()
     assert t._center.get("SPX") == 7400.0
     assert "OBSOLETE" not in t._center      # remplacé, pas fusionné
+
+
+# --- Tape : transactions individuelles ---
+
+@pytest.mark.parametrize("sym,strike,typ", [
+    (".SPXW260729C7400", 7400.0, "C"),
+    (".SPXW260729P7350", 7350.0, "P"),
+    ("./EWN26C7500:XCME", 7500.0, "C"),
+    ("./Q5CN26P27960:XCME", 27960.0, "P"),
+])
+def test_strike_lu_dans_le_symbole(sym, strike, typ):
+    from gex.flowtape import strike_of
+    assert strike_of(sym) == strike
+
+
+def _tape_prints() -> FlowTape:
+    t = FlowTape()
+    t._by_stream = {".SPXW260729C7400": "SPX", ".SPXW260729P7350": "SPX"}
+    t.ingest_print(_print(".SPXW260729C7400", "BUY", 5, price=20.0), now=1000.0)
+    t.ingest_print(_print(".SPXW260729P7350", "SELL", 50, price=3.0), now=1001.0)
+    t.ingest_print(_print(".SPXW260729C7400", "BUY", 1, price=21.0, spread=True), now=1002.0)
+    return t
+
+
+def test_recent_prints_plus_recent_dabord():
+    t = _tape_prints()
+    rows = t.recent_prints("SPX")
+    assert [r["t"] for r in rows] == [1002.0, 1001.0, 1000.0]
+    assert rows[0]["strike"] == 7400.0 and rows[0]["type"] == "C"
+
+
+def test_recent_prints_filtre_par_taille():
+    """Le firehose est illisible sans filtre : min_size isole les blocs."""
+    t = _tape_prints()
+    gros = t.recent_prints("SPX", min_size=10)
+    assert [r["size"] for r in gros] == [50.0]
+
+
+def test_recent_prints_peut_masquer_les_combos():
+    t = _tape_prints()
+    sans = t.recent_prints("SPX", include_combos=False)
+    assert all(not r["combo"] for r in sans)
+    assert len(sans) == 2
+    # combo bien présent quand on ne filtre pas
+    assert any(r["combo"] for r in t.recent_prints("SPX"))
+
+
+def test_recent_prints_notional_en_dollars():
+    """Le notionnel (prix×taille×mult) classe les blocs par poids réel, pas par
+    seul nombre de contrats."""
+    t = _tape_prints()
+    vente = next(r for r in t.recent_prints("SPX") if r["side"] == "SELL")
+    assert vente["notional"] == pytest.approx(3.0 * 50 * 100)   # indice mult 100
+
+
+def test_recent_prints_cote_indetermine_marque():
+    t = FlowTape()
+    t._by_stream = {".SPXW260729C7400": "SPX"}
+    t.ingest_print(_print(".SPXW260729C7400", "UNKNOWN", 3, price=5.0), now=1.0)
+    assert t.recent_prints("SPX")[0]["side"] == "?"
+
+
+def test_recent_prints_borne_au_tampon():
+    from gex.flowtape import PRINT_BUFFER
+    t = FlowTape()
+    t._by_stream = {".SPXW260729C7400": "SPX"}
+    for i in range(PRINT_BUFFER + 50):
+        t.ingest_print(_print(".SPXW260729C7400", "BUY", 1, price=1.0), now=float(i))
+    # jamais plus que le tampon, et ce sont les plus RÉCENTS qui restent
+    rows = t.recent_prints("SPX", limit=PRINT_BUFFER + 100)
+    assert len(rows) == PRINT_BUFFER
+    assert rows[0]["t"] == float(PRINT_BUFFER + 49)
+
+
+def test_recent_prints_symbole_vide():
+    assert FlowTape().recent_prints("SPX") == []

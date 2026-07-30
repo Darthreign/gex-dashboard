@@ -139,3 +139,13 @@ def test_scope_reste_en_lecture_seule():
     """Garde-fou : ce projet n'exécute pas d'ordres. Un jeton sans le scope
     trade ne peut pas mal trader, même en cas de bug."""
     assert tt_auth.SCOPE == "read"
+
+
+def test_fmt_notional_jamais_zero_k():
+    """Un petit ticket vaut quelques centaines de dollars, pas « 0 k$ »."""
+    from gex.app import _fmt_notional
+    assert _fmt_notional(370) == "370 $"
+    assert _fmt_notional(9500) == "10 k$"
+    assert _fmt_notional(2_300_000) == "2.3 M$"
+    assert _fmt_notional(0) == "—"
+    assert _fmt_notional(None) == "—"

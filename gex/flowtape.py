@@ -40,6 +40,7 @@ import json
 import logging
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 import requests
@@ -91,6 +92,14 @@ RECENTER_FRACTION = 0.5
 DRIFT_CHECK_S = 5.0
 
 INDEX_CHAIN_URL = "https://api.tastyworks.com/option-chains/{symbol}/nested"
+
+# Transactions individuelles gardées PAR sous-jacent pour l'affichage du Tape,
+# en plus de l'agrégation en barres. Un tampon par symbole (et non global)
+# pour qu'un marché très actif — SPX à ~30 prints/s — n'évince pas les
+# transactions d'un marché plus lent comme NQ. 500 prints couvrent largement
+# ce qu'un œil peut suivre, une fois filtré par taille ; c'est de la mémoire
+# volatile, jamais écrite sur disque (contrairement aux barres).
+PRINT_BUFFER = 500
 
 
 @dataclass
@@ -167,6 +176,26 @@ def option_type_of(streamer_symbol: str) -> str | None:
     return None
 
 
+def strike_of(streamer_symbol: str) -> float | None:
+    """Strike lu dans le symbole streamer, pour l'affichage du Tape.
+
+    Même logique que `option_type_of` : on repère le C/P qui précède les
+    chiffres du strike, et on lit le nombre qui suit. Couvre les deux
+    conventions — `.SPXW260729C7400` (OPRA) -> 7400 et `./EWN26C7500:XCME`
+    (CME) -> 7500. Renvoie None si le format ne s'y prête pas plutôt que de
+    risquer un strike faux.
+    """
+    core = streamer_symbol.split(":")[0]
+    for i in range(len(core) - 1, -1, -1):
+        if core[i] in ("C", "P") and i + 1 < len(core) and core[i + 1].isdigit():
+            reste = core[i + 1:]
+            try:
+                return float(reste)
+            except ValueError:
+                return None
+    return None
+
+
 def multiplier_of(symbol: str) -> float:
     """Multiplicateur $/point du contrat d'option.
 
@@ -232,6 +261,10 @@ class FlowTape:
     # de quelques dixièmes de pour cent ne change pas la lecture d'un flux
     # cumulé, et le rafraîchir à chaque print coûterait un verrou par message.
     _spot: dict[str, float] = field(default_factory=dict)
+    # Transactions récentes par sous-jacent (tampon circulaire) pour le Tape.
+    # Distinct de l'agrégation en barres : ici on garde le détail par print,
+    # là on cumule. Volatil, jamais persisté.
+    _prints: dict[str, deque] = field(default_factory=dict)
     # spot autour duquel la fenêtre de souscription courante a été centrée. On
     # y compare le spot LIVE pour décider d'un recentrage : `_spot` peut être
     # figé au spot de construction, `_center` l'est délibérément — c'est le
@@ -281,6 +314,11 @@ class FlowTape:
 
             bar.prints += 1
             size = float(size)
+
+            # Tape : on garde la transaction TELLE QUELLE avant tout filtrage
+            # d'agrégation — combos et côté indéterminé compris, marqués pour
+            # que le lecteur les voie plutôt qu'ils disparaissent en silence.
+            self._record_print(symbol, stream, item, price, size, now)
 
             # Jambe de combo : comptée à part. La classer en directionnel
             # fausserait le flux net (cf. docstring du module).
@@ -363,6 +401,54 @@ class FlowTape:
                     bar.net_gamma_calls += g
                 elif typ == "P":
                     bar.net_gamma_puts += g
+
+    def _record_print(self, symbol: str, stream: str, item: dict,
+                      price, size: float, now: float) -> None:
+        """Ajoute une transaction au tampon du Tape (appelé sous `self.lock`).
+
+        `notional` = prix × taille × multiplicateur : le vrai poids d'un print
+        en dollars, qui permet de classer les blocs autrement que par le seul
+        nombre de contrats (10 lots à 50 $ pèsent plus que 40 lots à 2 $).
+        """
+        side = item.get("aggressorSide")
+        px = float(price) if isinstance(price, (int, float)) and price == price else None
+        notional = (px * size * multiplier_of(symbol)) if px is not None else None
+        buf = self._prints.get(symbol)
+        if buf is None:
+            buf = self._prints[symbol] = deque(maxlen=PRINT_BUFFER)
+        buf.append({
+            "t": now,
+            "symbol": symbol,
+            "strike": strike_of(stream or ""),
+            "type": option_type_of(stream or ""),
+            "price": px,
+            "size": size,
+            "side": side if side in ("BUY", "SELL") else "?",
+            "notional": notional,
+            "combo": bool(item.get("spreadLeg")),
+        })
+
+    def recent_prints(self, symbol: str, min_size: float = 0.0,
+                      include_combos: bool = True, limit: int = 60) -> list[dict]:
+        """Dernières transactions d'un sous-jacent, les plus récentes d'abord.
+
+        `min_size` isole les blocs (le firehose est illisible sans filtre) ;
+        `include_combos=False` masque les jambes de combos, qui ne sont pas
+        directionnelles. Renvoie une COPIE — l'appelant (un callback Dash)
+        n'accède jamais au tampon vivant.
+        """
+        with self.lock:
+            buf = list(self._prints.get(symbol, ()))
+        out = []
+        for rec in reversed(buf):
+            if rec["size"] < min_size:
+                continue
+            if rec["combo"] and not include_combos:
+                continue
+            out.append(dict(rec))
+            if len(out) >= limit:
+                break
+        return out
 
     def ingest_greeks(self, item: dict) -> None:
         """Mémorise delta ET gamma courants d'un contrat (événement Greeks).

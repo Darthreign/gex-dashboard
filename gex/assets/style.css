@@ -577,3 +577,28 @@ body {
   color: var(--ok);
   margin-right: 4px;
 }
+
+/* --- Tape : tableau de transactions en direct --- */
+.tape-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.tape-table th {
+  text-align: left;
+  padding: 6px 10px;
+  color: var(--muted);
+  font-weight: 500;
+  border-bottom: 1px solid var(--grid);
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+}
+.tape-td {
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--grid);
+  white-space: nowrap;
+}
+.tape-mono { font-variant-numeric: tabular-nums; }
+.tape-num { text-align: right; }
+.tape-table tr:hover td { background: var(--surface-2); }

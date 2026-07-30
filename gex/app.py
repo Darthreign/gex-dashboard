@@ -63,7 +63,7 @@ TAB_SELECTED = {"backgroundColor": "#1a1a19", "color": "#ffffff",
                 "border": "1px solid #2c2c2a", "borderTop": "2px solid #3987e5",
                 "padding": "8px 14px", "fontSize": "13px", "fontWeight": "600"}
 HINT_STYLE = {"color": "#898781", "fontSize": "11px", "marginBottom": "8px"}
-TABS = ("main", "profile", "greeks2", "heat", "pos")
+TABS = ("main", "profile", "greeks2", "heat", "pos", "tape")
 
 
 def to_local(ts: pd.Series) -> pd.Series:
@@ -625,6 +625,67 @@ def flow_source(symbol: str, day: str, dx_cols: tuple[str, ...]):
     if not tape.empty and all(c in tape.columns for c in dx_cols):
         return tape.sort_values("timestamp"), "dxfeed"
     return store.load_flows(symbol, day), "cboe"
+
+
+def _fmt_notional(v) -> str:
+    """Notionnel en $ / k$ / M$ selon l'ordre de grandeur, sans jamais afficher
+    « 0 k$ » : un petit ticket vaut quelques centaines de dollars, pas zéro."""
+    if not v:
+        return "—"
+    if v >= 1e6:
+        return f"{v / 1e6:.1f} M$"
+    if v >= 1e3:
+        return f"{v / 1e3:.0f} k$"
+    return f"{v:.0f} $"
+
+
+def tape_table(symbol: str, lang: str, min_size: float = 0.0,
+               include_combos: bool = True) -> html.Div:
+    """Tableau des dernières transactions du sous-jacent, les plus récentes en
+    haut (cf. flowtape.recent_prints).
+
+    Le côté agresseur colore la ligne : vert = acheteur, rouge = vendeur —
+    la même sémantique que partout dans le tableau. Les jambes de combos sont
+    grisées et signalées, jamais fondues dans le flux directionnel.
+    """
+    from .flowtape import TAPE
+
+    rows = TAPE.recent_prints(symbol, min_size=min_size,
+                              include_combos=include_combos, limit=60)
+    if not rows:
+        etat, _ = TAPE.status()
+        msg = (t(lang, "tape_empty_off") if etat == "off"
+               else t(lang, "tape_empty_wait"))
+        return html.Div(msg, className="hint")
+
+    entete = [t(lang, k) for k in ("tape_col_time", "tape_col_contract",
+                                   "tape_col_side", "tape_col_size",
+                                   "tape_col_price", "tape_col_notional")]
+    trs = [html.Tr([html.Th(h) for h in entete])]
+    for r in rows:
+        achat = r["side"] == "BUY"
+        vente = r["side"] == "SELL"
+        couleur = C["pos"] if achat else C["neg"] if vente else C["muted"]
+        contrat = (f"{int(r['strike'])}{r['type']}"
+                   if r["strike"] is not None and r["type"] else "—")
+        side_txt = ("ACHAT" if achat else "VENTE" if vente else "?")
+        heure = datetime.fromtimestamp(r["t"], tz=ET).strftime("%H:%M:%S")
+        notio = _fmt_notional(r["notional"])
+        prix = f"{r['price']:.2f}" if r["price"] is not None else "—"
+        style = {"color": couleur}
+        if r["combo"]:
+            style = {"color": C["muted"], "opacity": "0.65"}
+        trs.append(html.Tr([
+            html.Td(heure, className="tape-td tape-mono"),
+            html.Td([contrat, html.Span(" ⛓", title=t(lang, "tape_combo"))]
+                    if r["combo"] else contrat, className="tape-td"),
+            html.Td(side_txt, className="tape-td", style={"color": couleur,
+                                                          "fontWeight": "600"}),
+            html.Td(f"{int(r['size'])}", className="tape-td tape-mono tape-num"),
+            html.Td(prix, className="tape-td tape-mono tape-num"),
+            html.Td(notio, className="tape-td tape-mono tape-num"),
+        ], style=style))
+    return html.Table(trs, className="tape-table")
 
 
 def tape_fig(symbol: str, lang: str, day: str | None = None,
@@ -1312,7 +1373,23 @@ def create_app() -> Dash:
                 dcc.Graph(config=GRAPH_CONFIG, id="oi-change"),
             ]),
 
+            html.Div(id="pane-tape", children=[
+                html.Div(id="tape-hint", className="hint"),
+                html.Div([
+                    html.Span(id="lbl-tape-size", className="ctl-label"),
+                    dcc.RadioItems(id="tape-min-size", className="seg", inline=True,
+                                   value=0),
+                    dcc.Checklist(id="tape-combos", className="check", inline=True,
+                                  value=["combos"]),
+                ], className="daybar"),
+                # Tableau reconstruit à chaque tick — pas un dcc.Graph : une
+                # liste de transactions se lit comme un tableau, pas un tracé.
+                html.Div(id="tape-table"),
+            ]),
+
             dcc.Interval(id="tick", interval=SETTINGS.flow_interval_s * 1000),
+            # le Tape doit défiler vivant, pas au rythme des pulls (60 s)
+            dcc.Interval(id="tape-tick", interval=2000),
             # le voyant du flux a son propre rythme : une déconnexion doit se
             # voir tout de suite, pas au prochain pull (60 s)
             dcc.Interval(id="rt-tick", interval=5000),
@@ -1397,7 +1474,9 @@ def create_app() -> Dash:
          Output("lbl-gflow-series", "children"), Output("gflow-series", "options"),
          Output("lbl-tape-series", "children"), Output("tape-series", "options"),
          Output("tape-note", "children"),
-         Output("heat-levels-label", "children"), Output("heat-levels", "options")],
+         Output("heat-levels-label", "children"), Output("heat-levels", "options"),
+         Output("tape-hint", "children"), Output("lbl-tape-size", "children"),
+         Output("tape-min-size", "options"), Output("tape-combos", "options")],
         [Input("lang", "value"), Input("symbol", "value")],
     )
     def apply_lang(lang, symbol):
@@ -1427,6 +1506,13 @@ def create_app() -> Dash:
             opts = [{"label": native_label, "value": symbol},
                     {"label": "ES", "value": "ES"},
                     {"label": "NQ", "value": "NQ"}]
+        # seuils de taille : Tout, puis des paliers qui isolent progressivement
+        # les blocs. En contrats — la même unité que la colonne « taille ».
+        tape_size_opts = [{"label": t(lang, "tape_size_all"), "value": 0},
+                          {"label": "≥ 10", "value": 10},
+                          {"label": "≥ 50", "value": 50},
+                          {"label": "≥ 100", "value": 100}]
+        tape_combos_opts = [{"label": t(lang, "tape_show_combos"), "value": "combos"}]
         return (bucket_opts, majors_opts, t(lang, "flow_day_label"),
                 t(lang, "last_session"), t(lang, "footer"), opts,
                 t(lang, "app_title"),
@@ -1434,7 +1520,9 @@ def create_app() -> Dash:
                 t(lang, "gflow_series_label"), gflow_series_opts,
                 t(lang, "tape_series_label"), tape_series_opts,
                 t(lang, "tape_note"),
-                t(lang, "heat_levels_label"), heat_levels_opts)
+                t(lang, "heat_levels_label"), heat_levels_opts,
+                t(lang, "tape_hint"), t(lang, "tape_size_label"),
+                tape_size_opts, tape_combos_opts)
 
     @app.callback(
         [Output("brand-sub", "children"), Output("rt-badge", "style"),
@@ -1736,6 +1824,20 @@ def create_app() -> Dash:
         chg = metrics.oi_change(prev_df, df)
         return (oi_change_fig(chg, snap.spot, lang, prev_day, window, xf),
                 t(lang, "pos_hint"))
+
+    @app.callback(
+        Output("tape-table", "children"),
+        [Input("tape-tick", "n_intervals"), Input("tab", "value"),
+         Input("symbol", "value"), Input("tape-min-size", "value"),
+         Input("tape-combos", "value"), Input("lang", "value")],
+    )
+    def refresh_tape(_, tab, symbol, min_size, combos, lang):
+        # ne se recalcule que lorsque l'onglet est ouvert : inutile de
+        # reconstruire 60 lignes toutes les 2 s en arrière-plan
+        if tab != "tape":
+            raise PreventUpdate
+        return tape_table(symbol, lang, min_size=float(min_size or 0),
+                          include_combos=bool(combos))
 
     @app.callback(
         [Output("flow-day", "options"), Output("flow-day", "value")],
