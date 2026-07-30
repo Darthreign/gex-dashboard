@@ -23,7 +23,15 @@ import requests
 
 AUTH_URL = "https://my.tastytrade.com/auth.html"
 TOKEN_URL = "https://api.tastyworks.com/oauth/token"
-REDIRECT_URI = "https://localhost:8050/oauth/callback"
+# HTTP et non HTTPS : le dashboard sert en clair sur 127.0.0.1, donc c'est la
+# SEULE forme que son navigateur puisse réellement atteindre. tastytrade
+# n'exige HTTPS que pour les URI publiques et accepte http sur localhost, ce
+# qui permet de récupérer le code automatiquement (cf. gex/tt_web.py) au lieu
+# de le faire recopier depuis une page d'erreur.
+REDIRECT_URI = "http://localhost:8050/oauth/callback"
+# Lecture seule, volontairement : ce projet n'exécute pas d'ordres et n'a
+# aucune raison de demander le scope "trade" (cf. README, « analyse
+# uniquement »). Un jeton qui ne peut pas trader ne peut pas mal trader.
 SCOPE = "read"
 
 
@@ -52,14 +60,51 @@ def credentials() -> tuple[str, str]:
     return cid, secret
 
 
-def authorize_url(client_id: str) -> str:
+def authorize_url(client_id: str, state: str | None = None) -> str:
+    """URL d'autorisation à ouvrir dans le navigateur.
+
+    `state` : jeton anti-CSRF, renvoyé tel quel par tastytrade sur la
+    redirection. Le vérifier empêche qu'une page tierce fasse aboutir SON code
+    d'autorisation sur notre callback — ce qui enregistrerait le jeton de
+    quelqu'un d'autre à la place du tien.
+    """
     params = {
         "client_id": client_id,
         "redirect_uri": REDIRECT_URI,
         "response_type": "code",
         "scope": SCOPE,
     }
+    if state:
+        params["state"] = state
     return f"{AUTH_URL}?{urllib.parse.urlencode(params)}"
+
+
+def store_refresh(token: str) -> str:
+    """Enregistre le refresh token là où `rtquote._env` sait déjà le lire.
+
+    Sur Windows : variable d'environnement utilisateur (HKCU\\Environment),
+    c'est-à-dire exactement ce que faisait `setx` manuellement — aucun nouveau
+    mécanisme, aucun fichier de secret ajouté au dépôt. La valeur est aussi
+    posée dans `os.environ` du processus courant, sinon le dashboard ne la
+    verrait qu'après redémarrage (une session héritant de son environnement au
+    lancement).
+
+    Renvoie une phrase décrivant ce qui a été fait, à afficher à l'utilisateur.
+    """
+    os.environ["TT_REFRESH"] = token
+    if sys.platform != "win32":
+        return ("Jeton actif pour cette session. Pour le rendre permanent, "
+                'ajoute TT_REFRESH="…" à ton profil shell.')
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0,
+                            winreg.KEY_SET_VALUE) as k:
+            winreg.SetValueEx(k, "TT_REFRESH", 0, winreg.REG_SZ, token)
+        return "Jeton enregistré (variable utilisateur TT_REFRESH)."
+    except OSError as exc:
+        return (f"Jeton actif pour cette session, mais non enregistré ({exc}). "
+                "Il faudra se reconnecter au prochain démarrage.")
 
 
 def exchange_code(client_id: str, secret: str, code: str) -> dict:

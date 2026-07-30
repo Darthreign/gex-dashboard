@@ -110,6 +110,7 @@ TR: dict[str, dict[str, str]] = {
         # spot temps réel actif : les CHAÎNES restent délayées, seul le prix
         # courant est en direct — la nuance doit rester lisible
         "brand_sub_rt": "SPX · NDX · SPY · QQQ — spot temps réel · chaînes CBOE delayed",
+        "tt_connect": "Connecter tastytrade",
         "rt_connected": "Spot temps réel actif",
         "rt_degraded": "Flux dégradé — cotations en retard, repli sur le spot CBOE",
         "rt_disconnected": "Flux déconnecté — spot CBOE delayed utilisé",
@@ -271,6 +272,7 @@ TR: dict[str, dict[str, str]] = {
         "unit_futures": "Futures",
         "brand_sub": "SPX · NDX · SPY · QQQ — CBOE delayed data",
         "brand_sub_rt": "SPX · NDX · SPY · QQQ — real-time spot · CBOE delayed chains",
+        "tt_connect": "Connect tastytrade",
         "rt_connected": "Real-time spot active",
         "rt_degraded": "Feed degraded — quotes lagging, falling back to CBOE spot",
         "rt_disconnected": "Feed disconnected — using CBOE delayed spot",

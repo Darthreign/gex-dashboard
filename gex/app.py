@@ -18,6 +18,7 @@ from dash.exceptions import PreventUpdate
 
 from . import metrics, scales, store
 from .api import register_api
+from .tt_web import connection_status, register_oauth
 from .config import SETTINGS, UNDERLYINGS, targets
 from .i18n import LANGS, regime_text, t, wall_labels
 from .metrics import ET, EXPIRY_BUCKETS
@@ -1200,6 +1201,13 @@ def create_app() -> Dash:
                               html.Span(id="rt-label")],
                              id="rt-badge", className="rt-badge",
                              style={"display": "none"}),
+                    # Connexion courtier : lien direct vers la route OAuth
+                    # (cf. gex/tt_web.py). Masqué une fois connecté — un bouton
+                    # « Connecter » affiché en permanence ferait douter de
+                    # l'état réel de la connexion.
+                    html.A(id="tt-connect", className="linkbtn",
+                           href="/oauth/start", children="Connecter tastytrade",
+                           style={"display": "none"}),
                 ], style={"display": "flex", "gap": "10px", "flexWrap": "wrap",
                           "alignItems": "center"}),
             ], className="topbar-row"),
@@ -1431,7 +1439,9 @@ def create_app() -> Dash:
     @app.callback(
         [Output("brand-sub", "children"), Output("rt-badge", "style"),
          Output("rt-badge", "className"), Output("rt-badge", "title"),
-         Output("rt-label", "children")],
+         Output("rt-label", "children"),
+         Output("tt-connect", "style"), Output("tt-connect", "children"),
+         Output("tt-connect", "title")],
         [Input("rt-tick", "n_intervals"), Input("lang", "value")],
     )
     def rt_status(_, lang):
@@ -1441,16 +1451,28 @@ def create_app() -> Dash:
         inutile d'exposer un voyant rouge permanent pour une fonction que
         l'utilisateur n'a pas demandée.
         """
+        # Bouton de connexion : proposé tant que le compte n'est pas
+        # utilisable, caché dès qu'il l'est.
+        etat_tt, detail_tt = connection_status()
+        if etat_tt == "connecte":
+            bouton = ({"display": "none"}, "", "")
+        elif etat_tt == "deconnecte":
+            bouton = ({}, t(lang, "tt_connect"), detail_tt)
+        else:
+            # identifiants d'application absents : rien à autoriser encore,
+            # on affiche l'info sans lien cliquable trompeur
+            bouton = ({"display": "none"}, "", detail_tt)
+
         state, detail = QUOTES.status(market_open=market_is_open())
         if state == "off":
             return (t(lang, "brand_sub"), {"display": "none"},
-                    "rt-badge", "", "")
+                    "rt-badge", "", "", *bouton)
         key = {"connected": "rt_connected", "degraded": "rt_degraded"}.get(
             state, "rt_disconnected")
         tip = t(lang, key) + (f" ({detail})" if detail else "")
         # le sous-titre ne promet le temps réel que si le flux le tient
         sub = t(lang, "brand_sub_rt" if state == "connected" else "brand_sub")
-        return (sub, {}, f"rt-badge rt-{state}", tip, "dxFeed")
+        return (sub, {}, f"rt-badge rt-{state}", tip, "dxFeed", *bouton)
 
     @app.callback(
         [Output("native-banner", "children"), Output("native-banner", "style"),
@@ -1742,5 +1764,6 @@ def create_app() -> Dash:
         return today if today in days else (days[-1] if days else None)
 
     register_api(app)
+    register_oauth(app)
 
     return app
