@@ -149,3 +149,30 @@ def test_fmt_notional_jamais_zero_k():
     assert _fmt_notional(2_300_000) == "2.3 M$"
     assert _fmt_notional(0) == "—"
     assert _fmt_notional(None) == "—"
+
+
+def test_apply_user_zoom_conserve_la_plage_manuelle():
+    """La heatmap se régénère sur tick : un zoom manuel de l'axe des prix doit
+    survivre au rafraîchissement (cf. _apply_user_zoom)."""
+    from gex.app import _apply_user_zoom
+    lay = {"yaxis": {}, "xaxis": {"range": [0, 1]}}
+    _apply_user_zoom(lay, {"yaxis.range[0]": 7360.6, "yaxis.range[1]": 7509.4})
+    assert lay["yaxis"]["range"] == [7360.6, 7509.4]
+    assert lay["yaxis"]["autorange"] is False
+
+
+def test_apply_user_zoom_double_clic_repart_en_auto():
+    """Un double-clic renvoie axis.autorange=true : on ne fige aucune plage,
+    la vue complète revient."""
+    from gex.app import _apply_user_zoom
+    lay = {"yaxis": {}, "xaxis": {}}
+    _apply_user_zoom(lay, {"yaxis.autorange": True})
+    assert "range" not in lay["yaxis"]
+
+
+def test_apply_user_zoom_sans_interaction_ne_touche_rien():
+    from gex.app import _apply_user_zoom
+    lay = {"yaxis": {"title": "x"}, "xaxis": {"range": [0, 1]}}
+    _apply_user_zoom(lay, None)
+    assert lay["yaxis"] == {"title": "x"}
+    assert lay["xaxis"]["range"] == [0, 1]

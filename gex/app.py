@@ -352,9 +352,29 @@ def available_flow_days(symbol: str) -> list[str]:
     return sorted(p.stem for p in root.glob("*.parquet"))
 
 
+def _apply_user_zoom(lay: dict, relayout: dict | None) -> None:
+    """Réapplique un zoom d'axe fait à la souris, lu dans `relayoutData`.
+
+    La heatmap se régénère sur `tick` : sans cela, chaque rafraîchissement
+    remettrait l'échelle des prix à sa vue complète. On ne touche qu'aux axes
+    que l'utilisateur a RÉELLEMENT bougés — une plage explicite dans
+    relayoutData —, et un double-clic (qui renvoie `axis.autorange: true`)
+    laisse repartir en automatique, comme attendu.
+    """
+    if not relayout:
+        return
+    for axe in ("yaxis", "xaxis"):
+        lo = relayout.get(f"{axe}.range[0]")
+        hi = relayout.get(f"{axe}.range[1]")
+        if lo is not None and hi is not None:
+            lay[axe]["range"] = [lo, hi]
+            lay[axe]["autorange"] = False
+
+
 def heatmap_fig(symbol: str, lang: str, day: str | None = None,
                 window: float = 0.04, xf=None, unit: str | None = None,
-                levels_shown: list[str] | None = None) -> go.Figure:
+                levels_shown: list[str] | None = None,
+                relayout: dict | None = None) -> go.Figure:
     """Profil de gamma en barres + parcours du prix, sur un axe de prix commun.
 
     Deux échelles horizontales partagent l'axe vertical des prix : les barres
@@ -478,6 +498,12 @@ def heatmap_fig(symbol: str, lang: str, day: str | None = None,
     lay["barmode"] = "overlay"
     lay["yaxis"]["title"] = dict(text=t(lang, "heat_axis_strike"),
                                  font=dict(color=C["muted"]))
+    # Déverrouille l'axe des prix : le montage à deux axes X superposés le
+    # passait en fixedrange automatiquement, ce qui empêchait TOUT zoom
+    # vertical (la molette ne bougeait que l'horizontale). Explicitement à
+    # False, on peut resserrer la fenêtre de prix à la molette ou en glissant
+    # sur l'axe — et _apply_user_zoom rend ce zoom persistant.
+    lay["yaxis"]["fixedrange"] = False
     lay["xaxis"]["title"] = dict(text=t(lang, "heat_axis_time"),
                                  font=dict(color=C["muted"]))
     # Type déclaré explicitement : les seules traces portant des données sont
@@ -496,6 +522,10 @@ def heatmap_fig(symbol: str, lang: str, day: str | None = None,
     # niveau ne doit pas recadrer) et la langue, mais inclut symbole/jour/
     # échelle/fenêtre, où un recadrage automatique EST voulu.
     lay["uirevision"] = f"{symbol}-{day}-{unit}-{window}"
+    # Réapplique le zoom manuel courant (cf. _apply_user_zoom). Placé APRÈS la
+    # plage de séance par défaut : si l'utilisateur a resserré, sa fenêtre
+    # prime ; sinon on garde la vue complète de la séance.
+    _apply_user_zoom(lay, relayout)
     # axe des barres en haut, superposé à l'axe temps
     lay["xaxis2"] = dict(overlaying="x", side="top", showgrid=False,
                          zeroline=True, zerolinecolor=C["axis"],
@@ -1803,13 +1833,20 @@ def create_app() -> Dash:
         [Input("tick", "n_intervals"), Input("tab", "value"), Input("symbol", "value"),
          Input("window", "value"), Input("lang", "value"), Input("unit", "value"),
          Input("heat-day", "value"), Input("heat-levels", "value")],
+        State("heatmap", "relayoutData"),
     )
-    def refresh_heatmap(_, tab, symbol, window, lang, unit, day, levels_shown):
+    def refresh_heatmap(_, tab, symbol, window, lang, unit, day, levels_shown, relayout):
         # onglet masqué : ne pas relire une quarantaine de fichiers pour rien
         if tab != "heat":
             raise PreventUpdate
+        # Un zoom manuel n'est conservé que sur un simple rafraîchissement ou un
+        # changement de niveaux/langue. Dès que le CONTEXTE change (symbole,
+        # jour, échelle, fenêtre), le zoom d'avant n'a plus de sens — il portait
+        # sur une autre plage de prix — donc on repart de la vue complète.
+        reset = ctx.triggered_id in ("symbol", "window", "unit", "heat-day")
         xf, _, _ = _transform_for(symbol, unit)
-        return (heatmap_fig(symbol, lang, day, window, xf, unit, levels_shown),
+        return (heatmap_fig(symbol, lang, day, window, xf, unit, levels_shown,
+                            relayout=None if reset else relayout),
                 t(lang, "heat_hint"))
 
     @app.callback(
