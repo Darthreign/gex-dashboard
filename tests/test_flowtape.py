@@ -220,3 +220,32 @@ def test_row_porte_la_provenance():
     t.ingest_print(_print(".SPXW260729C7400", "BUY", 5), now=60.0)
     row = t.bars["SPX"].as_row("SPX", "2026-07-29 10:00")
     assert row["source"] == "dxfeed"
+
+
+def test_repli_cboe_si_la_colonne_dxfeed_manque(tmp_path, monkeypatch):
+    """Le choix de source se fait colonne par colonne, pas sur l'existence du
+    fichier. Une journée collectée avant l'ajout d'une mesure a bien un
+    fichier tape/, mais sans la colonne : sans ce test, le graphique recevait
+    le tableau dxFeed puis y cherchait des colonnes CBOE et s'affichait VIDE
+    (constaté le 2026-07-30 sur le gamma échangé)."""
+    import pandas as pd
+
+    from gex import store
+    from gex.app import flow_source
+    from gex.config import SETTINGS
+
+    monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
+    ts = pd.Timestamp("2026-07-29 10:00")
+    # tape SANS les colonnes de gamma (ancien schéma)
+    store.append_tape("SPX", [{"timestamp": ts, "net_delta": 1.0,
+                               "source": "dxfeed"}], ts)
+    store.append_daily("flows", "SPX", {"timestamp": ts, "gflow_calls": 2.0,
+                                        "gflow_puts": -1.0, "source": "cboe"}, ts)
+
+    d, src = flow_source("SPX", "2026-07-29", ("net_gamma_calls", "net_gamma_puts"))
+    assert src == "cboe", "colonne absente -> repli, pas un tableau inexploitable"
+    assert "gflow_calls" in d.columns
+
+    d2, src2 = flow_source("SPX", "2026-07-29", ("net_delta",))
+    assert src2 == "dxfeed"      # celle-là est bien présente
+    assert "net_delta" in d2.columns

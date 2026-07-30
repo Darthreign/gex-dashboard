@@ -11,6 +11,7 @@ L'onglet le plus visuel : il superpose **le prix réel** et **la structure de ga
 - **Séance** : choisit le jour à afficher (les jours disponibles sont ceux où au moins une chaîne d'options a été enregistrée).
 - **Niveaux** : une liste à cocher pour choisir quelles lignes horizontales afficher (Gamma Flip, HVL, Call Wall, Put Support, 1D Min/Max, Murs GEX) — décoche celles qui ne t'intéressent pas pour alléger le graphique.
 
+<a id="heatmap"></a>
 ## Le graphique
 
 - **Les barres horizontales** (axe du haut, en $Bn) : le gamma par strike, exactement comme sur la Vue principale, mais avec **deux pondérations superposées** — les barres épaisses utilisent l'*open interest* (les positions déjà installées), les barres fines le *volume du jour* (ce qui se traite maintenant). Un strike fin en OI mais épais en volume est un niveau qui **prend de l'importance en cours de séance**, alors qu'il n'existait pas la veille.

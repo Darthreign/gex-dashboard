@@ -75,6 +75,48 @@ def to_local(ts: pd.Series) -> pd.Series:
     )
 
 
+# --- Titres cliquables vers le guide -------------------------------------
+# Chaque titre de graphique renvoie à l'ancre correspondante du guide sur
+# GitHub. Plotly rend un sous-ensemble de HTML dans les titres, dont <a> :
+# aucun composant supplémentaire n'est nécessaire.
+#
+# Les ancres sont posées EXPLICITEMENT dans les .md (<a id="..."></a>) plutôt
+# que déduites du texte des titres : GitHub dérive ses ancres du libellé, donc
+# reformuler un titre casserait silencieusement le lien — et nos titres sont
+# traduits, ce qui donnerait deux ancres différentes pour un même graphique.
+GUIDE_URL = ("https://github.com/Darthreign/gex-dashboard/blob/main/docs/guide/"
+             "{page}#{anchor}")
+GUIDE_ANCHORS: dict[str, tuple[str, str]] = {
+    "gex_strike": ("1-vue-principale.md", "gex-par-strike"),
+    "dex_strike": ("1-vue-principale.md", "dex-par-strike"),
+    "flow": ("1-vue-principale.md", "flux-delta"),
+    "gflow": ("1-vue-principale.md", "gamma-echange"),
+    "tape": ("1-vue-principale.md", "order-flow-signe"),
+    "history": ("1-vue-principale.md", "historique"),
+    "spot_zg": ("1-vue-principale.md", "spot-vs-flip"),
+    "smile": ("1-vue-principale.md", "skew-iv"),
+    "profile": ("2-gamma-profile.md", "profil"),
+    "vex": ("3-vanna-charm.md", "vanna"),
+    "cex": ("3-vanna-charm.md", "charm"),
+    "heat": ("4-heatmap.md", "heatmap"),
+    "pos": ("5-positionnement.md", "positionnement"),
+}
+
+
+def guided(title: str, key: str) -> str:
+    """Titre enrichi d'un lien vers la section du guide qui l'explique.
+
+    Renvoie le titre nu si la clé est inconnue : un lien manquant ne doit
+    jamais faire disparaître un titre.
+    """
+    entry = GUIDE_ANCHORS.get(key)
+    if entry is None:
+        return title
+    page, anchor = entry
+    url = GUIDE_URL.format(page=page, anchor=anchor)
+    return f'<a href="{url}" target="_blank" style="color:inherit">{title} ↗</a>'
+
+
 def base_layout(title: str, height: int = 420) -> dict:
     return dict(
         title=dict(text=title, font=dict(size=13, color=C["ink"], family=FONT),
@@ -325,7 +367,7 @@ def heatmap_fig(symbol: str, lang: str, day: str | None = None,
     niveau qui prend de l'importance en séance.
     """
     day = day or datetime.now(ET).strftime("%Y-%m-%d")
-    title = t(lang, "heat_title", day=day)
+    title = guided(t(lang, "heat_title", day=day), "heat")
     xf = xf or (lambda v: v)
     levels_shown = (levels_shown if levels_shown is not None
                     else ["zero_gamma", "call_wall", "put_support"])
@@ -522,9 +564,9 @@ def gamma_flow_fig(symbol: str, lang: str, day: str | None = None,
     feed. On mesure l'activité pondérée par le gamma, pas un flux signé.
     """
     day = day or datetime.now(ET).strftime("%Y-%m-%d")
-    flows, src = flow_source(symbol, day)
-    signe = src == "dxfeed" and "net_gamma_calls" in getattr(flows, "columns", [])
-    title = t(lang, "gflow_title_signed" if signe else "gflow_title")
+    flows, src = flow_source(symbol, day, ("net_gamma_calls", "net_gamma_puts"))
+    signe = src == "dxfeed"
+    title = guided(t(lang, "gflow_title_signed" if signe else "gflow_title"), "gflow")
     col_c, col_p = ("net_gamma_calls", "net_gamma_puts") if signe else ("gflow_calls", "gflow_puts")
     if flows.empty or col_c not in flows.columns:
         # colonnes absentes = journée collectée avant l'ajout de cette mesure
@@ -555,7 +597,7 @@ def gamma_flow_fig(symbol: str, lang: str, day: str | None = None,
     return fig
 
 
-def flow_source(symbol: str, day: str):
+def flow_source(symbol: str, day: str, dx_cols: tuple[str, ...]):
     """(données, source) pour les graphiques de flux, selon UNE règle unique :
     dxFeed s'il est disponible, CBOE sinon.
 
@@ -565,6 +607,13 @@ def flow_source(symbol: str, day: str):
     source) ; `flows/` le proxy Δvolume×δ calculé sur CBOE, non signé et
     délayé de 15 min.
 
+    `dx_cols` : les colonnes dont l'appelant a BESOIN côté dxFeed. Le choix se
+    fait sur leur présence, pas sur la seule existence du fichier — une
+    journée collectée avant l'ajout d'une mesure a bien un fichier `tape/`,
+    mais sans la colonne. Sans ce test, le graphique recevait le tableau
+    dxFeed puis y cherchait des colonnes CBOE, et s'affichait VIDE (constaté
+    sur les captures du guide, sur le gamma échangé du 2026-07-29).
+
     ⚠️ Les deux ne couvrent PAS le même périmètre : le proxy CBOE porte sur
     toute la chaîne, le flux signé sur la fenêtre souscrite par flowtape
     (±1,5 %, 2 échéances). Les amplitudes ne sont donc pas comparables d'une
@@ -572,7 +621,7 @@ def flow_source(symbol: str, day: str):
     titre du graphique le dise au lieu de le laisser deviner.
     """
     tape = store.load_tape(symbol, day)
-    if not tape.empty:
+    if not tape.empty and all(c in tape.columns for c in dx_cols):
         return tape.sort_values("timestamp"), "dxfeed"
     return store.load_flows(symbol, day), "cboe"
 
@@ -592,7 +641,7 @@ def tape_fig(symbol: str, lang: str, day: str | None = None,
     """
     day = day or datetime.now(ET).strftime("%Y-%m-%d")
     tape = store.load_tape(symbol, day)
-    title = t(lang, "tape_title")
+    title = guided(t(lang, "tape_title"), "tape")
     if tape.empty:
         return empty_fig(t(lang, "no_tape_day", day=day), title)
     series = series if series is not None else ["net", "calls", "puts"]
@@ -631,10 +680,13 @@ def tape_fig(symbol: str, lang: str, day: str | None = None,
                                        f" {t(lang, 'unit_contracts')}<extra></extra>"))
     lay = with_legend(base_layout(title, height=340))
     lay["yaxis"]["title"] = dict(text=axis, font=dict(color=C["muted"]))
+    # marge droite élargie : sans elle le titre du second axe se dessine
+    # PAR-DESSUS les courbes (constaté sur les captures du guide)
+    lay["margin"]["r"] = 64
     lay["yaxis2"] = dict(overlaying="y", side="right", showgrid=False,
                          zeroline=False, tickfont=dict(color=C["muted"]),
                          title=dict(text=t(lang, "axis_tape"),
-                                    font=dict(color=C["muted"])))
+                                    font=dict(color=C["muted"]), standoff=8))
     fig.update_layout(**lay)
     fig.add_hline(y=0, line_color=C["axis"], line_width=1)
     return fig
@@ -642,9 +694,9 @@ def tape_fig(symbol: str, lang: str, day: str | None = None,
 
 def flow_fig(symbol: str, lang: str, day: str | None = None) -> go.Figure:
     day = day or datetime.now(ET).strftime("%Y-%m-%d")
-    flows, src = flow_source(symbol, day)
-    signe = src == "dxfeed" and "net_delta" in getattr(flows, "columns", [])
-    title = t(lang, "flow_title_signed" if signe else "flow_title")
+    flows, src = flow_source(symbol, day, ("net_delta",))
+    signe = src == "dxfeed"
+    title = guided(t(lang, "flow_title_signed" if signe else "flow_title"), "flow")
     col = "net_delta" if signe else "flow_total"
     if flows.empty or col not in flows.columns:
         return empty_fig(t(lang, "no_flow_day", day=day), title)
@@ -672,7 +724,7 @@ def flow_fig(symbol: str, lang: str, day: str | None = None) -> go.Figure:
 
 
 def history_fig(symbol: str, lang: str) -> go.Figure:
-    title = t(lang, "hist_title")
+    title = guided(t(lang, "hist_title"), "history")
     hist = store.load_history(symbol)
     if hist.empty or len(hist) < 2:
         return empty_fig(t(lang, "not_enough_history"), title)
@@ -689,7 +741,7 @@ def history_fig(symbol: str, lang: str) -> go.Figure:
 
 
 def spot_zg_fig(symbol: str, lang: str) -> go.Figure:
-    title = t(lang, "spotzg_title")
+    title = guided(t(lang, "spotzg_title"), "spot_zg")
     hist = store.load_history(symbol)
     if hist.empty or len(hist) < 2:
         return empty_fig(t(lang, "not_enough_history"), title)
@@ -709,7 +761,7 @@ def spot_zg_fig(symbol: str, lang: str) -> go.Figure:
 
 
 def smile_fig(df: pd.DataFrame, spot: float, lang: str) -> go.Figure:
-    title = t(lang, "smile_title")
+    title = guided(t(lang, "smile_title"), "smile")
     d = df[(df["iv"] > 0.01) & (df["open_interest"] > 0)
            & df["strike"].between(spot * 0.85, spot * 1.15)]
     # IV OTM : puts sous le spot, calls au-dessus (le smile standard)
@@ -736,7 +788,7 @@ def profile_fig(df: pd.DataFrame, spot: float, zg: float | None, lang: str,
                 window: float, xf=None) -> go.Figure:
     """Courbe de GEX net en fonction d'un spot hypothétique."""
     xf = xf or (lambda v: v)
-    title = t(lang, "profile_title")
+    title = guided(t(lang, "profile_title"), "profile")
     res = metrics.gamma_profile(df, spot, range_pct=window, steps=201)
     if res is None:
         return empty_fig(t(lang, "no_data_window"), title)
@@ -775,7 +827,7 @@ def profile_fig(df: pd.DataFrame, spot: float, zg: float | None, lang: str,
 def profile_by_expiry_fig(df: pd.DataFrame, spot: float, lang: str,
                           window: float, xf=None) -> go.Figure:
     """Profil décomposé par bucket d'échéance : ce que pèse le 0DTE seul."""
-    title = t(lang, "profile_by_exp")
+    title = guided(t(lang, "profile_by_exp"), "profile")
     xf = xf or (lambda v: v)
     today = datetime.now(ET).date()
     fig = go.Figure()
@@ -830,7 +882,7 @@ def second_order_fig(df: pd.DataFrame, spot: float, col: str, title: str,
 def oi_change_fig(chg: pd.DataFrame, spot: float, lang: str, prev_day: str,
                   window: float, xf=None) -> go.Figure:
     """Variation d'OI par strike, calls et puts distingués (identité, pas polarité)."""
-    title = t(lang, "pos_title", day=prev_day)
+    title = guided(t(lang, "pos_title", day=prev_day), "pos")
     xf = xf or (lambda v: v)
     if chg.empty:
         return empty_fig(t(lang, "pos_no_prev"), title)
@@ -1491,8 +1543,8 @@ def create_app() -> Dash:
             return (
                 levels_strip(None, lang),
 
-                empty_fig(wait, t(lang, "gex_title", bucket=bucket_label)),
-                empty_fig(wait, t(lang, "dex_title", bucket=bucket_label)),
+                empty_fig(wait, guided(t(lang, "gex_title", bucket=bucket_label), "gex_strike")),
+                empty_fig(wait, guided(t(lang, "dex_title", bucket=bucket_label), "dex_strike")),
                 empty_fig(wait, t(lang, "flow_title")),
                 empty_fig(wait, t(lang, "gflow_title")),
                 empty_fig(wait, t(lang, "tape_title")),
@@ -1530,11 +1582,11 @@ def create_app() -> Dash:
         return (
             levels_strip(levels, lang, hvl, zg, xf, note, keys),
             _pin(exposure_fig(sel, snap.spot, zg, "gex",
-                              t(lang, "gex_title", bucket=bucket_label), lang,
+                              guided(t(lang, "gex_title", bucket=bucket_label), "gex_strike"), lang,
                               levels=levels, hvl=hvl, window=window, xf=xf,
                               keys=keys), rev),
             _pin(exposure_fig(sel, snap.spot, zg, "dex",
-                              t(lang, "dex_title", bucket=bucket_label), lang,
+                              guided(t(lang, "dex_title", bucket=bucket_label), "dex_strike"), lang,
                               hvl=hvl, window=window, xf=xf, keys=keys,
                               level_set="regime"), rev),
             _pin(flow_fig(symbol, lang, flow_day), f"{symbol}-{flow_day}"),
@@ -1607,8 +1659,8 @@ def create_app() -> Dash:
             card(t(lang, "cex_card"), f"{sel['cex'].sum() / 1e9:+.2f} $Bn",
                  t(lang, "cex_title").split("(")[-1].rstrip(")")),
         ]
-        return (second_order_fig(sel, snap.spot, "vex", t(lang, "vex_title"), window, xf),
-                second_order_fig(sel, snap.spot, "cex", t(lang, "cex_title"), window, xf),
+        return (second_order_fig(sel, snap.spot, "vex", guided(t(lang, "vex_title"), "vex"), window, xf),
+                second_order_fig(sel, snap.spot, "cex", guided(t(lang, "cex_title"), "cex"), window, xf),
                 cards, t(lang, "vex_hint"))
 
     @app.callback(

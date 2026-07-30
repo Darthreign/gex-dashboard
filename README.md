@@ -36,14 +36,47 @@ put/call ratios, skew IV, et proxy de flux delta intraday.
 qui explique chaque nombre, pensé pour quelqu'un qui découvre le dashboard
 sans rien connaître aux options.
 
-## Source de données
+## Sources de données
 
-Endpoint delayed public CBOE (non documenté officiellement) :
+Le dashboard applique **une règle unique, partout** : la source temps réel si
+elle est disponible, la source gratuite sinon.
+
+| | CBOE (public) | dxFeed (compte courtier) |
+|---|---|---|
+| Compte requis | non | oui (gratuit avec le compte) |
+| Fraîcheur | **~15 min de retard** | temps réel |
+| Sens acheteur/vendeur | non observable | **fourni par la source** |
+| Redistribuable | oui | **non** — usage strictement personnel |
+
+**Sans compte courtier, rien d'essentiel ne manque** : tous les niveaux, tous
+les régimes et tous les graphiques fonctionnent sur la source publique. Seuls
+l'order flow signé et les bougies minute sur futures nécessitent un compte.
+
+### CBOE — source par défaut
+
+Endpoint delayed public (non documenté officiellement) :
 `https://cdn.cboe.com/api/global/delayed_quotes/options/_SPX.json` (indices
 préfixés `_`). Un GET ramène la chaîne complète — bid/ask, IV, open interest,
 volume, Greeks — plus le spot. **Délai ~15 min à la source**, régénéré ~toutes
 les 60 s (timestamp du feed en UTC). Sous-jacents suivis : SPX, NDX, SPY et
 QQQ (`gex/config.py`).
+
+### dxFeed — quand un compte courtier est configuré
+
+Ce que le temps réel change, mesuré plutôt que supposé : sur les mêmes strikes
+0DTE, dxFeed voyait **3 à 6 fois plus de volume** que CBOE au même instant,
+pour un open interest **identique au contrat près**. Ce n'est pas une source
+plus approximative, c'est la même sans le retard.
+
+- **Chaînes natives** SPX / NDX / SPY / QQQ (`gex/idxopt.py`) et NQ / ES
+  (`gex/futopt.py`) — les options sur future ont leur propre structure de
+  gamma, distincte de l'indice transposé.
+- **Order flow signé** (`gex/flowtape.py`) : chaque transaction porte son côté
+  agresseur, donné par la source. Aucune heuristique de classification.
+- **Spot temps réel** et bougies 1 min pour la Heatmap.
+
+⚠️ Ces données ne quittent jamais la machine : `gex/export.py` n'autorise à
+l'export que les lignes `source == "cboe"`.
 
 ## Installation
 
@@ -137,8 +170,13 @@ Il contient un chemin **Windows relatif** : sous macOS ou Linux, remplace la
 valeur de `command` par le chemin absolu vers `.venv/bin/python`, faute de
 quoi le serveur échoue sans message explicite.
 
-Outils exposés : `get_gex_summary`, `get_gex_by_strike` (murs de gamma),
+Outils exposés : `get_market_context` (synthèse : régime, murs les plus
+proches du spot, VIX), `get_gex_summary`, `get_gex_by_strike` (murs de gamma),
 `get_flow_delta`, `get_history`, `get_reports`, `get_log_tail`.
+
+Ces outils suivent la même règle de source que l'interface : ils répondent sur
+la chaîne native quand elle existe, sur CBOE sinon — pour éviter deux vérités
+différentes selon qu'on regarde l'écran ou qu'on interroge Claude.
 
 ## Fonctionnalités
 
@@ -150,7 +188,13 @@ Outils exposés : `get_gex_summary`, `get_gex_by_strike` (murs de gamma),
 - Historique GEX net & spot vs zero gamma (s'accumule automatiquement)
 - Backfill historique optionnel via Databento (`gex/backfill.py`, payant,
   devis affiché avant tout téléchargement)
+- **Order flow signé** sur options (compte courtier) : côté agresseur fourni
+  par la source, pondéré par le delta — une mesure d'impact de couverture, pas
+  un décompte de contrats. Jambes de combos isolées du flux net.
+- VIX en confluence, en direct si l'abonnement le permet, délayé sinon
 - Serveur MCP (`gex/mcp_server.py`) pour interroger les données depuis Claude
+- Titres de graphiques cliquables : chaque titre renvoie à la section du
+  [guide illustré](docs/guide/README.md) qui l'explique
 
 ## Backfill Databento (optionnel)
 
@@ -163,7 +207,11 @@ semaine (`--end` + `--daily-days 7`).
 
 ## Architecture
 
-- `gex/ingest.py` — fetch + parsing des chaînes (retry/backoff)
+- `gex/ingest.py` — fetch + parsing des chaînes CBOE (retry/backoff)
+- `gex/idxopt.py` — chaînes d'indice natives via dxFeed (temps réel)
+- `gex/futopt.py` — chaînes d'options sur future NQ/ES via dxFeed
+- `gex/flowtape.py` — order flow signé (TimeAndSale + Greeks)
+- `gex/rtquote.py` — spot temps réel et bougies 1 min
 - `gex/greeks.py` — Black-Scholes vectorisé (testé sur valeurs Hull)
 - `gex/metrics.py` — GEX/DEX par strike, zero gamma, P/C, flux delta
 - `gex/store.py` — Parquet : snapshots complets (10 min), flux (1 min), historique
@@ -197,7 +245,13 @@ inchangés. Signaler un bug ou proposer une amélioration aide tout autant.
 
 ## Limites connues
 
-- Données délayées 15 min — outil de lecture de structure, pas d'exécution.
+- **Sans compte courtier** : données délayées 15 min — outil de lecture de
+  structure, pas d'exécution. Avec un compte, le retard disparaît mais l'outil
+  reste un outil d'analyse : ni ordre, ni exécution, ni conseil.
+- L'order flow signé ne couvre que les strikes à ±1,5 % du spot sur les 2
+  échéances les plus proches (là où se traite l'essentiel). Ses amplitudes ne
+  sont donc pas comparables à celles du proxy CBOE, qui porte sur toute la
+  chaîne.
 - Endpoint CBOE non contractuel : le format peut changer (l'ingestion est
   isolée pour pouvoir brancher une autre source, ex. Tradier).
 - **SPY et QQQ** : ces ETF versent un dividende, or le calcul suppose un

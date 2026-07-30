@@ -6,12 +6,14 @@ Cet onglet va un cran plus loin que GEX/DEX : il montre deux effets plus subtils
 
 ![Vanna & Charm](../screenshots/onglet-vanna-charm.png)
 
+<a id="vanna"></a>
 ## Vanna Exposure
 
 La **Vanna** répond à la question : *"si la volatilité implicite (l'incertitude perçue par le marché) bouge d'un point, de combien le delta des dealers change-t-il ?"*
 
 Concrètement : la volatilité peut monter (panique, incertitude) ou descendre (calme) sans même que le prix bouge. Quand elle change, les dealers doivent re-couvrir leurs positions — c'est ce re-hedging que la Vanna mesure, par strike, en $M par point de volatilité.
 
+<a id="charm"></a>
 ## Charm Exposure
 
 La **Charm** mesure un effet purement **mécanique du temps qui passe** : à mesure qu'une option se rapproche de son échéance, son delta change tout seul, même si le prix et la volatilité ne bougent pas d'un centime. C'est le moteur classique des dérives de fin de séance ("*pinning*" ou glissades en fin de journée) — exprimée en $M de delta par jour écoulé.

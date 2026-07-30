@@ -10,6 +10,7 @@ Cet onglet répond à une question différente de la Vue principale : *"et si le
 
 Sur la Vue principale, le GEX est calculé **au prix actuel**. Ici, le dashboard fige tout le reste (la volatilité implicite, les échéances, les positions ouvertes) et ne fait varier **que le prix hypothétique** — pour dessiner comment le GEX net évoluerait si le marché montait ou descendait, sans qu'il ait besoin de vraiment bouger pour le savoir.
 
+<a id="profil"></a>
 ## Profil de GEX net selon le spot
 
 Le graphique du haut : une courbe qui montre le GEX net ($Bn par 1%) pour chaque prix hypothétique sur l'axe horizontal.

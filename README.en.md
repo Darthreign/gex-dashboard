@@ -29,14 +29,47 @@ A free, self-hosted alternative in the spirit of SpotGamma: rebuild the
 market structure metrics that options dealers' hedging creates — Gamma
 Exposure by strike, Gamma Flip (zero gamma), Call/Put Walls, delta flow.
 
-## Data source
+## Data sources
 
-CBOE public delayed endpoint (undocumented):
+One rule applies everywhere: **use the real-time source when available, the
+free one otherwise.**
+
+| | CBOE (public) | dxFeed (broker account) |
+|---|---|---|
+| Account required | no | yes (free with the account) |
+| Freshness | **~15 min delayed** | real time |
+| Aggressor side | not observable | **reported by the source** |
+| Redistributable | yes | **no** — strictly personal use |
+
+**Nothing essential is missing without a broker account**: every level, every
+regime and every chart works on the public source. Only signed order flow and
+1-minute futures candles require an account.
+
+### CBOE — default source
+
+Public delayed endpoint (undocumented):
 `https://cdn.cboe.com/api/global/delayed_quotes/options/_SPX.json`
 (indices prefixed with `_`). One GET returns the full chain — bid/ask, IV,
 open interest, volume, Greeks — plus spot. **~15 min delayed**, regenerated
 ~every 60 s (feed timestamps are UTC). Underlyings tracked: SPX, NDX, SPY and
 QQQ (`gex/config.py`).
+
+### dxFeed — when a broker account is configured
+
+What real time actually changes, measured rather than assumed: on the same
+0DTE strikes, dxFeed saw **3 to 6 times more volume** than CBOE at the same
+instant, for an open interest **identical to the contract**. Not a rougher
+source — the same one without the delay.
+
+- **Native chains** for SPX / NDX / SPY / QQQ (`gex/idxopt.py`) and NQ / ES
+  (`gex/futopt.py`) — futures options carry their own gamma structure,
+  distinct from the transposed index chain.
+- **Signed order flow** (`gex/flowtape.py`): every print carries its aggressor
+  side, reported by the source. No classification heuristic involved.
+- **Real-time spot** and 1-min candles for the Heatmap.
+
+⚠️ This data never leaves the machine: `gex/export.py` only ever exports rows
+where `source == "cboe"`.
 
 ## Installation
 
@@ -143,7 +176,13 @@ Tools exposed: `get_gex_summary`, `get_gex_by_strike` (gamma walls),
 - Net GEX & spot-vs-flip history (accumulates automatically while running)
 - Optional historical backfill via Databento (`gex/backfill.py`, paid,
   cost quote shown before any download)
+- **Signed options order flow** (broker account): aggressor side reported by
+  the source, delta-weighted — a hedging-impact measure, not a contract count.
+  Combo legs kept out of the net flow.
+- VIX in confluence, live when the subscription allows it, delayed otherwise
 - MCP server (`gex/mcp_server.py`) to query the data from Claude
+- Clickable chart titles: each one links to the section of the
+  [illustrated guide](docs/guide/README.md) that explains it
 - FR/EN interface (browser language auto-detected, manual toggle remembered)
 
 ## Computation conventions

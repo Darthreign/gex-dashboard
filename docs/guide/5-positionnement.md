@@ -10,6 +10,7 @@ Le dernier onglet répond à une question que les autres ne posent pas : *"qu'es
 
 Tous les autres graphiques du dashboard utilisent l'*open interest* (les positions ouvertes) tel qu'il est **aujourd'hui**. Mais l'open interest n'est publié qu'**une fois par jour**, le matin. Cet onglet compare deux photos — celle d'hier et celle d'aujourd'hui — pour isoler ce qui a été **réellement ouvert ou fermé** entre les deux, plutôt que le gamma résiduel de positions installées depuis longtemps.
 
+<a id="positionnement"></a>
 ## Le graphique
 
 Une barre par strike, séparée en deux couleurs :

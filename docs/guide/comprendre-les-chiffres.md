@@ -62,7 +62,29 @@ Ce cadre traduit en phrase les deux notions du début (GEX et DEX) combinées. I
 - **Bordure ambre** : régime accélérateur modéré (GEX négatif).
 - **Bordure rouge** : régime accélérateur **et** delta dealers marqué dans le même sens — les deux mécaniques s'additionnent, c'est la configuration la plus auto-entretenue.
 
+Le passage à la bordure rouge n'est pas une appréciation : il demande que le GEX net soit négatif **et** que l'exposition delta du jour figure dans le tiers supérieur de tout ce qui a été observé jusqu'ici sur ce sous-jacent (percentile 67). Tant que le dashboard n'a pas accumulé au moins 20 mesures, l'intensité n'est pas évaluée du tout et le cadre reste ambre — mieux vaut ne rien affirmer que de crier au loup sur trois points de comparaison.
+
 La dernière ligne en italique est un rappel volontairement répété : **ce n'est jamais un signal d'entrée**, seulement une lecture mécanique de ce que les dealers sont obligés de faire.
+
+---
+
+<a id="sources"></a>
+## D'où viennent les chiffres (et pourquoi ça compte)
+
+Le dashboard peut lire **deux sources** différentes, et il applique partout la même règle : **la source temps réel si elle est disponible, la source gratuite sinon.**
+
+| | CBOE (public, gratuit) | dxFeed (compte courtier) |
+|---|---|---|
+| Coût | aucun, aucun compte | inclus avec un compte courtier |
+| Fraîcheur | **délayée d'environ 15 minutes** | temps réel |
+| Sens acheteur/vendeur | pas observable (estimé) | **fourni par la source** |
+| Partageable | oui, données publiques | **non**, usage strictement personnel |
+
+**Ce que ça change concrètement.** Sur du 0DTE, quinze minutes sont énormes : lors d'une comparaison faite sur les mêmes strikes, la source temps réel voyait **3 à 6 fois plus de volume** que la source gratuite au même instant. L'open interest, lui, était identique au contrat près — ce n'est donc pas une donnée plus approximative, c'est la même sans le retard.
+
+**Sans compte courtier, rien ne manque de fondamental** : tous les niveaux, tous les régimes et tous les graphiques fonctionnent sur la source gratuite. Deux choses seulement n'existent pas : l'order flow signé (impossible à reconstituer sans le côté agresseur) et les vraies bougies minute sur les futures.
+
+💡 Le titre de chaque graphique indique la source réellement utilisée. Si tu vois « proxy » ou « délayé » dans un titre, c'est la source gratuite ; si tu vois « signé » ou « dxFeed », c'est le temps réel.
 
 ---
 
@@ -75,7 +97,7 @@ Cette bande de petites étiquettes liste les prix "importants" du jour, calculé
 | Niveau | Explication |
 |---|---|
 | **Gamma Flip** | Le prix où le GEX net change de signe (déjà vu dans les tuiles) |
-| **HVL** (*High Volume Level*) | Le même calcul que le Gamma Flip, mais pondéré par le **volume échangé aujourd'hui** plutôt que par les positions déjà installées la veille — utile pour voir si un nouveau niveau prend de l'importance en cours de séance |
+| **HVL** (*High Volume Level*) | Le même calcul que le Gamma Flip, mais pondéré par le **volume échangé aujourd'hui** plutôt que par les positions déjà installées la veille — utile pour voir si un nouveau niveau prend de l'importance en cours de séance. ⚠️ Avant l'ouverture, le volume affiché est encore celui de la **veille** (le compteur n'est remis à zéro qu'à la cloche) : le HVL d'avant-séance est donc celui d'hier, pas une prévision du jour |
 | **Call Wall** | Le strike (prix d'exercice) où le GEX des **calls** est le plus fort au-dessus du prix actuel — souvent une résistance, une zone où le marché a tendance à ralentir |
 | **Put Support** | Le strike où le GEX des **puts** est le plus fort en dessous du prix actuel — souvent un support |
 | **1D Min / 1D Max** | Une estimation statistique de l'amplitude de mouvement attendue sur 1 jour, déduite de la volatilité implicite des options — pas une limite dure, juste un ordre de grandeur |
@@ -90,6 +112,7 @@ Ces chiffres n'apparaissent que sur un onglet précis — voir le fichier du tab
 - **Vanna Exposure nette / Charm Exposure nette** (*onglet Vanna & Charm*) : deux grecques de second ordre. La Vanna mesure combien le delta des dealers changerait si la volatilité implicite bougeait d'un point ; la Charm mesure combien de delta est "grignoté" mécaniquement chaque jour qui passe, simplement parce que le temps s'écoule (moteur classique des dérives de fin de séance).
 - **Skew IV** (*onglet Vanna & Charm*) : la volatilité implicite (le prix de l'incertitude, en %) selon le strike, pour chaque échéance — en général en forme de "sourire" ou de pente, plus élevée loin du prix actuel.
 - **Flux delta options / Gamma échangé cumulé** (*onglet Vue principale*) : pas des positions installées, mais ce qui se **négocie en direct** aujourd'hui, en $M par minute puis cumulé sur la séance.
+- **Order flow signé cumulé** (*onglet Vue principale*, compte courtier requis) : le seul chiffre du dashboard qui sait **qui a pris l'initiative** de chaque transaction. Positif = les preneurs de liquidité achètent net, négatif = ils vendent net. Pondéré par le delta, donc exprimé en millions de dollars de sous-jacent — c'est une mesure d'**impact de couverture**, pas un décompte de contrats. Voir [l'explication détaillée](1-vue-principale.md#order-flow-signe), notamment sur son périmètre plus étroit que les autres graphiques.
 - **Variation d'open interest** (*onglet Positionnement*) : la différence de positions ouvertes entre la séance d'hier et celle d'aujourd'hui, par strike — l'open interest n'étant publié qu'une fois par jour, ce chiffre ne peut être comparé que d'un jour sur l'autre, jamais en intra-journée.
 
 ---
