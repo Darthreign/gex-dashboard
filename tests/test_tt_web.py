@@ -24,7 +24,14 @@ def client(monkeypatch):
 def _identifiants(monkeypatch, cid="cid", secret="sec", refresh=None):
     valeurs = {"TASTYTRADE_CLIENT_ID": cid, "TASTYTRADE_CLIENT_SECRET": secret,
                "TT_REFRESH": refresh}
-    monkeypatch.setattr("gex.rtquote._env", lambda n: valeurs.get(n))
+    lire = lambda n: valeurs.get(n)
+    # DEUX _env à patcher : rtquote._env (status, /oauth/start) ET tt_auth._env
+    # (credentials(), appelé dans le callback). Sans le second, le callback lit
+    # les VRAIES variables d'environnement — vert sur un poste où un compte
+    # tastytrade est configuré, rouge en CI (env vierge). Le test doit être
+    # hermétique.
+    monkeypatch.setattr("gex.rtquote._env", lire)
+    monkeypatch.setattr("gex.tt_auth._env", lire)
 
 
 def test_start_redirige_vers_tastytrade_avec_un_state(client, monkeypatch):
