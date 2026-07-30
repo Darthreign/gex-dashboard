@@ -96,10 +96,15 @@ INDEX_CHAIN_URL = "https://api.tastyworks.com/option-chains/{symbol}/nested"
 # Transactions individuelles gardées PAR sous-jacent pour l'affichage du Tape,
 # en plus de l'agrégation en barres. Un tampon par symbole (et non global)
 # pour qu'un marché très actif — SPX à ~30 prints/s — n'évince pas les
-# transactions d'un marché plus lent comme NQ. 500 prints couvrent largement
-# ce qu'un œil peut suivre, une fois filtré par taille ; c'est de la mémoire
-# volatile, jamais écrite sur disque (contrairement aux barres).
-PRINT_BUFFER = 500
+# transactions d'un marché plus lent comme NQ.
+#
+# Dimensionné pour que le FILTRE PAR BLOCS reste utile : à 500 prints, SPX ne
+# garde que ~16 s d'historique, et un bloc de 50+ contrats (rare sur du 0DTE
+# où la taille moyenne est ~2) n'y tombe presque jamais — le filtre ≥50
+# affichait alors un tableau vide en permanence. 5000 couvrent ~2-3 min sur
+# SPX, bien plus sur les marchés lents. Mémoire volatile, jamais persistée, de
+# petits dicts : négligeable même à 6 sous-jacents.
+PRINT_BUFFER = 5000
 
 
 @dataclass
