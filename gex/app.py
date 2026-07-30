@@ -488,6 +488,14 @@ def heatmap_fig(symbol: str, lang: str, day: str | None = None,
     # Fenêtre fixée sur la séance : sans cela, une journée peu fournie écrase
     # l'échelle sur quelques minutes et le graphique devient illisible.
     lay["xaxis"]["range"] = _session_range(day)
+    # Persistance de l'état d'interaction : la heatmap se régénère toutes les
+    # quelques secondes (callback sur `tick`). Sans uirevision, un zoom manuel
+    # sur l'axe des prix — pour resserrer la fenêtre — serait remis à zéro à
+    # chaque rafraîchissement. La clé garde le zoom tant que le CONTEXTE ne
+    # change pas ; elle exclut volontairement `levels_shown` (basculer un
+    # niveau ne doit pas recadrer) et la langue, mais inclut symbole/jour/
+    # échelle/fenêtre, où un recadrage automatique EST voulu.
+    lay["uirevision"] = f"{symbol}-{day}-{unit}-{window}"
     # axe des barres en haut, superposé à l'axe temps
     lay["xaxis2"] = dict(overlaying="x", side="top", showgrid=False,
                          zeroline=True, zerolinecolor=C["axis"],
