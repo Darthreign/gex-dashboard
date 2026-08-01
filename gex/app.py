@@ -6,6 +6,7 @@ Interface FR/EN (gex/i18n.py) ; termes de trading standards dans les deux.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -28,6 +29,8 @@ from .scheduler import STATE, market_is_open
 from .scheduler import native_index_key as scheduler_native_key
 
 # --- Palette (mode sombre, cf. skill dataviz) ---
+log = logging.getLogger(__name__)
+
 C = {
     "surface": "#1a1a19",
     "page": "#0d0d0d",
@@ -1259,6 +1262,99 @@ def build_cards(symbol: str, lang: str, xf=None, scale: str | None = None) -> li
     ]
 
 
+# --- Export d'un graphique en image (pour le bot Discord, etc.) -----------
+# Chaque graphique du dashboard doit pouvoir sortir en PNG à la demande, pas
+# seulement la heatmap : un ami qui demande « la courbe du Delta de NQ » doit
+# la recevoir comme n'importe quel autre. D'où ce dispatch unique par nom.
+CHART_NAMES = ("gex", "dex", "heatmap", "flow", "gflow", "tape", "history",
+               "spotzg", "smile", "profile", "profile_exp", "vanna", "charm", "oi")
+
+
+def _figure_for(symbol: str, name: str, lang: str = "fr") -> go.Figure | None:
+    """Reconstruit un graphique hors du contexte Dash, avec des réglages par
+    défaut (jour courant, fenêtre 4 %, échelle native). Renvoie None si le nom
+    est inconnu ou si les données manquent."""
+    if name not in CHART_NAMES:
+        return None
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    today_d = datetime.now(ET).date()
+    xf, _, _ = _transform_for(symbol, symbol)      # échelle native, sans transposition
+
+    # Graphiques qui lisent le disque directement (jour + réglages par défaut).
+    if name == "heatmap":
+        return heatmap_fig(symbol, lang, today, 0.04, xf, symbol, None)
+    if name == "flow":
+        return flow_fig(symbol, lang, today)
+    if name == "gflow":
+        return gamma_flow_fig(symbol, lang, today)
+    if name == "tape":
+        return tape_fig(symbol, lang, today)
+    if name == "history":
+        return history_fig(symbol, lang)
+    if name == "spotzg":
+        return spot_zg_fig(symbol, lang)
+
+    # Graphiques qui ont besoin de la chaîne enrichie courante.
+    st = chain_state(symbol)
+    with STATE.lock:
+        df, snap = st.enriched, st.snapshot
+    if df is None or snap is None:
+        return None
+    spot = snap.spot
+    zg = metrics.zero_gamma(df, spot)
+    sel = df[metrics.bucket_mask(df, "Tout", today_d)]
+    all_lbl = t(lang, "bucket_all")
+
+    if name == "gex":
+        levels = metrics.top_gex_levels(df, ref_spot=spot)
+        hvl = metrics.zero_gamma(df, spot, weight_col="volume")
+        keys = metrics.key_levels(df, spot, ref_spot=spot)
+        return exposure_fig(sel, spot, zg, "gex",
+                            t(lang, "gex_title", bucket=all_lbl), lang,
+                            levels=levels, hvl=hvl, xf=xf, keys=keys)
+    if name == "dex":
+        hvl = metrics.zero_gamma(df, spot, weight_col="volume")
+        keys = metrics.key_levels(df, spot, ref_spot=spot)
+        return exposure_fig(sel, spot, zg, "dex",
+                            t(lang, "dex_title", bucket=all_lbl), lang,
+                            hvl=hvl, xf=xf, keys=keys, level_set="regime")
+    if name == "smile":
+        return smile_fig(sel, spot, lang)
+    if name == "profile":
+        return profile_fig(df, spot, zg, lang, 0.08, xf)
+    if name == "profile_exp":
+        return profile_by_expiry_fig(df, spot, lang, 0.08, xf)
+    if name in ("vanna", "charm"):
+        sec = metrics.add_second_order(sel, spot)
+        col = "vex" if name == "vanna" else "cex"
+        title = t(lang, "vex_title" if name == "vanna" else "cex_title")
+        return second_order_fig(sec, spot, col, title, 0.04, xf)
+    if name == "oi":
+        prev = store.load_previous_snapshot(symbol, today)
+        if prev is None:
+            return None
+        prev_day, prev_df = prev
+        chg = metrics.oi_change(prev_df, df)
+        return oi_change_fig(chg, spot, lang, prev_day, 0.04, xf)
+    return None
+
+
+def chart_png(symbol: str, name: str, lang: str = "fr") -> bytes | None:
+    """PNG d'un graphique, ou None si indisponible. Fond opaque (le thème sombre
+    a un fond transparent par défaut, illisible dans Discord)."""
+    fig = _figure_for(symbol, name, lang)
+    if fig is None:
+        return None
+    fig.update_layout(paper_bgcolor=C["surface"], plot_bgcolor=C["surface"])
+    # Round-trip via l'encodeur JSON de Plotly : kaleido sérialise avec orjson,
+    # qui refuse les Timestamp pandas présents dans les bornes d'axe (heatmap,
+    # history fixent un `range` en Timestamps). L'encodeur Plotly les convertit
+    # proprement en chaînes ISO ; from_json reconstruit une figure sérialisable.
+    import plotly.io as pio
+    fig = pio.from_json(pio.to_json(fig))
+    return fig.to_image(format="png", width=1100, height=620, scale=2)
+
+
 def create_app() -> Dash:
     # assets/ vit dans le package (gex/assets) pour survivre à un pip install ;
     # Dash les sert dans tous les cas sous /assets.
@@ -1915,5 +2011,20 @@ def create_app() -> Dash:
 
     register_api(app)
     register_oauth(app)
+
+    @app.server.route("/api/v1/<symbol>/chart/<name>.png")
+    def _chart_png(symbol, name):
+        """Graphique en PNG à la demande — n'importe lequel, pas juste la
+        heatmap (cf. chart_png / CHART_NAMES). Consommé par le bot Discord."""
+        from flask import Response, request
+        lang = request.args.get("lang", "fr")
+        try:
+            png = chart_png(symbol.upper(), name.lower(), lang)
+        except Exception:  # noqa: BLE001 — un rendu qui échoue ne doit pas 500 salement
+            log.exception("Rendu PNG %s/%s", symbol, name)
+            png = None
+        if png is None:
+            return Response(f"graphique indisponible : {name}", status=404)
+        return Response(png, mimetype="image/png")
 
     return app

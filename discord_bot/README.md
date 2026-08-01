@@ -15,7 +15,14 @@ analyses dérivées.
   - `!etat` ou `!gamma` — le digest complet ;
   - `!gamma NQ` — les valeurs calculées d'un symbole (GEX net, DEX net, Zero
     Gamma) ;
-  - `!heatmap NQ` — *à venir* (image de la heatmap).
+  - **`!graph NQ heatmap`** — n'importe quel graphique en image, ou les
+    raccourcis directs :
+    - `!heatmap NQ`, `!gex NQ`, `!delta NQ` (Delta Exposure), `!flow NQ`
+      (order flow signé), `!skew SPX`, `!profile SPX`, `!vanna SPX`,
+      `!charm SPX`, `!history SPX`, `!positionnement SPX`.
+
+  **Tout graphique du dashboard peut sortir en image** — la même vue que tu
+  vois à l'écran.
 
 Le message est un **embed coloré** : vert (peu de risque) / orange (risqué) /
 rouge (déconseillé), exactement comme le verdict.
@@ -47,8 +54,12 @@ python bot.py
 ```
 
 Le **dashboard GEX doit tourner** sur la même machine (par défaut
-`http://127.0.0.1:8050`) : c'est lui qui calcule le digest, le bot ne fait que
-le relayer.
+`http://127.0.0.1:8050`) : c'est lui qui calcule le digest et rend les
+graphiques, le bot ne fait que les relayer.
+
+> Pour les commandes graphiques, le dashboard a besoin de **kaleido** (export
+> Plotly → PNG) : sur sa machine, `pip install ".[charts]"`. Sans lui, les
+> digests texte marchent quand même, seules les images sont indisponibles.
 
 ## Sécurité & licence
 

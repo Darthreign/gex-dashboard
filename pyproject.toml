@@ -42,6 +42,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3"]
+# Export des graphiques en PNG (endpoint /api/v1/<sym>/chart/<name>.png, utilisé
+# par le bot Discord). Optionnel : sans kaleido l'endpoint renvoie 404 proprement
+# et le reste du dashboard fonctionne. À installer sur la machine du dashboard
+# qui alimente le bot : pip install ".[charts]".
+charts = ["kaleido"]
 
 [project.urls]
 Homepage = "https://github.com/Darthreign/gex-dashboard"

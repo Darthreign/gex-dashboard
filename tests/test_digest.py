@@ -112,3 +112,18 @@ def test_pas_de_recommandation_directionnelle():
     txt = d.to_text().lower()
     for interdit in ("achète", "vends", "acheter", "vendre", "prends un", "pose un"):
         assert interdit not in txt
+
+
+# --- Export générique des graphiques ---
+
+def test_chart_names_uniques_et_non_vide():
+    from gex.app import CHART_NAMES
+    assert len(CHART_NAMES) >= 10
+    assert len(set(CHART_NAMES)) == len(CHART_NAMES)
+
+
+def test_figure_for_nom_inconnu_renvoie_none():
+    """Garde-fou : un nom de graphique inconnu ne rend rien (pas d'exception,
+    pas de kaleido). L'endpoint renverra 404."""
+    from gex.app import _figure_for
+    assert _figure_for("SPX", "pas-un-graphe") is None

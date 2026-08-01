@@ -25,6 +25,7 @@ Prérequis (à faire UNE fois, côté Discord) :
 from __future__ import annotations
 
 import datetime as dt
+import io
 import logging
 import os
 from zoneinfo import ZoneInfo
@@ -139,11 +140,64 @@ async def gamma(ctx: commands.Context, symbole: str | None = None) -> None:
     )
 
 
-@bot.command(name="heatmap")
-async def heatmap(ctx: commands.Context, symbole: str | None = None) -> None:
-    """`!heatmap NQ` — placeholder : la heatmap en image est un ajout à venir
-    (choix de rendu à trancher : export Plotly serveur vs capture navigateur)."""
-    await ctx.send("La heatmap en image arrive bientôt — méthode de rendu à choisir.")
+# Graphiques disponibles à la demande, en image. Nom de commande -> (nom du
+# graphique côté API, légende affichée). N'importe quel graphe du dashboard
+# peut sortir en PNG (cf. /api/v1/<sym>/chart/<name>.png).
+CHARTS = {
+    "heatmap": ("heatmap", "Heatmap — gamma par strike + parcours du prix"),
+    "gex": ("gex", "Gamma Exposure par strike"),
+    "delta": ("dex", "Delta Exposure par strike"),
+    "dex": ("dex", "Delta Exposure par strike"),
+    "flow": ("tape", "Order flow signé cumulé"),
+    "skew": ("smile", "Skew IV par échéance"),
+    "profile": ("profile", "Profil de GEX selon le spot"),
+    "vanna": ("vanna", "Vanna Exposure par strike"),
+    "charm": ("charm", "Charm Exposure par strike"),
+    "history": ("history", "GEX net — historique"),
+    "positionnement": ("oi", "Variation d'open interest vs veille"),
+}
+
+
+async def _send_chart(ctx: commands.Context, symbole: str, chart: str, legende: str) -> None:
+    """Récupère le PNG du dashboard et le poste en pièce jointe."""
+    sym = symbole.upper()
+    try:
+        r = requests.get(f"{DASHBOARD}/api/v1/{sym}/chart/{chart}.png", timeout=45)
+    except requests.RequestException:
+        await ctx.send("Dashboard injoignable pour l'instant.")
+        return
+    if r.status_code != 200 or r.content[:4] != b"\x89PNG":
+        await ctx.send(f"Graphique indisponible pour {sym} (pull pas encore fait ?).")
+        return
+    fichier = discord.File(io.BytesIO(r.content), filename=f"{sym}_{chart}.png")
+    await ctx.send(f"**{sym}** — {legende}", file=fichier)
+
+
+@bot.command(name="graph")
+async def graph(ctx: commands.Context, symbole: str | None = None,
+                nom: str | None = None) -> None:
+    """`!graph NQ heatmap` — n'importe quel graphique en image."""
+    if not symbole or not nom or nom.lower() not in CHARTS:
+        dispo = ", ".join(sorted(CHARTS))
+        await ctx.send(f"Usage : `!graph SYMBOLE NOM`. Graphiques : {dispo}.")
+        return
+    chart, legende = CHARTS[nom.lower()]
+    await _send_chart(ctx, symbole, chart, legende)
+
+
+def _make_chart_command(cmd_name: str, chart: str, legende: str):
+    @bot.command(name=cmd_name)
+    async def _cmd(ctx: commands.Context, symbole: str | None = None):
+        if not symbole:
+            await ctx.send(f"Usage : `!{cmd_name} SYMBOLE` (ex. `!{cmd_name} NQ`).")
+            return
+        await _send_chart(ctx, symbole, chart, legende)
+    return _cmd
+
+
+# Raccourcis directs : !heatmap NQ, !delta NQ, !flow NQ, !skew SPX, etc.
+for _name, (_chart, _leg) in CHARTS.items():
+    _make_chart_command(_name, _chart, _leg)
 
 
 @bot.event
