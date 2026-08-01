@@ -137,3 +137,24 @@ def register_api(app) -> None:
             "symbol": symbol, "spot": s.spot, "bucket": bucket,
             "rows": rows.to_dict(orient="records"),
         })
+
+    @server.route("/api/v1/digest")
+    def _digest():
+        """Verdict d'état du gamma prêt à diffuser (cf. gex/digest.py).
+
+        C'est ce qu'un bot Discord consomme : le texte, la couleur, et la
+        `signature` de régime (pour ne re-poster que sur un vrai changement).
+        Renvoie une analyse dérivée, jamais la chaîne brute.
+        """
+        from . import digest as digest_mod
+        d = digest_mod.current_digest()
+        return jsonify({
+            "header": d.header,
+            "lines": d.lines,
+            "vix_line": d.vix_line,
+            "verdict": d.verdict,
+            "color": d.color,
+            "discord_color": d.discord_color,
+            "text": d.to_text(),
+            "signature": list(d.signature),
+        })

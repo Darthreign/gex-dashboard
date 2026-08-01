@@ -7,3 +7,4 @@ logs/
 *.egg-info/
 build/
 dist/
+discord_bot/.env
