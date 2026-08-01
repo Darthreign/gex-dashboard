@@ -1,11 +1,11 @@
 """État du gamma condensé, pour diffusion partageable (bot Discord, page, API).
 
 Transforme les métriques par sous-jacent en un VERDICT qualitatif — la
-conclusion, pas la donnée brute. C'est ce qui permet de le diffuser sans
-redistribuer les chaînes dxFeed : « Gamma négatif sur SPX » est une analyse
-dérivée, pas le feed. Pour SPX/NDX/SPY/QQQ la source sous-jacente est de toute
-façon CBOE (publique) ; pour NQ/ES c'est un agrégat de signe, très loin de la
-chaîne.
+conclusion, pas la donnée brute. Les données viennent du flux dxFeed temps
+réel (compte courtier), sur TOUS les sous-jacents : c'est l'intérêt du projet.
+« Gamma négatif sur SPX » est une analyse que nous produisons, pas le feed —
+ce qui permet de la partager sans rediffuser les chaînes dxFeed (usage
+personnel du flux à respecter côté diffusion).
 
 Format calqué sur la demande (4 exemples du 2026-07-30) :
 - une ligne par état, regroupant les symboles qui le partagent :

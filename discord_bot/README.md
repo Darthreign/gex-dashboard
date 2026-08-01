@@ -65,6 +65,10 @@ graphiques, le bot ne fait que les relayer.
 
 - Le **token du bot** est un secret : variable d'environnement, jamais dans
   git.
-- Le bot ne diffuse **que des analyses dérivées** (signes, verdicts), jamais
-  les chaînes d'options. Pour SPX/NDX/SPY/QQQ la source est de toute façon
-  CBOE (publique) ; pour NQ/ES, un signe de gamma est très loin du feed brut.
+- Le bot ne diffuse **que nos analyses calculées** — signes, verdicts,
+  graphiques d'agrégats — jamais les chaînes d'options. Ces données viennent
+  du flux **dxFeed** (compte courtier) : c'est tout l'intérêt du projet, le
+  temps réel. Un signe de gamma ou une heatmap d'agrégats est une conclusion
+  que nous produisons, très loin du feed brut par contrat. À toi de rester
+  dans le cadre « usage personnel » de dxFeed : partage des conclusions, pas
+  une rediffusion du flux.
