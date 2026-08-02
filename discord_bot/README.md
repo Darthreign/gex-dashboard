@@ -15,6 +15,8 @@ analyses dérivées.
   - `!etat` ou `!gamma` — le digest complet ;
   - `!gamma NQ` — les valeurs calculées d'un symbole (GEX net, DEX net, Zero
     Gamma) ;
+  - `!niveaux NQ` (ou `!levels NQ`) — les **niveaux GEX en texte** : Gamma
+    Flip, HVL, Call Wall, Put Support, 1D min/max, et les 5 murs GEX ;
   - **`!graph NQ heatmap`** — n'importe quel graphique en image, ou les
     raccourcis directs :
     - `!heatmap NQ`, `!gex NQ`, `!delta NQ` (Delta Exposure), `!flow NQ`

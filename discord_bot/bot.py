@@ -151,6 +151,38 @@ async def gamma(ctx: commands.Context, symbole: str | None = None) -> None:
     )
 
 
+def _fmt(v, nd=0):
+    return f"{v:.{nd}f}" if isinstance(v, (int, float)) else "n/a"
+
+
+@bot.command(name="niveaux", aliases=["levels"])
+async def niveaux(ctx: commands.Context, symbole: str | None = None) -> None:
+    """`!niveaux NQ` — les niveaux GEX en texte (Gamma Flip, HVL, Call Wall,
+    Put Support, 1D min/max, murs GEX)."""
+    if not symbole:
+        await ctx.send("Usage : `!niveaux SYMBOLE` (ex. `!niveaux NQ`).")
+        return
+    sym = symbole.upper()
+    d = fetch(f"/api/v1/{sym}/levels")
+    if d is None:
+        await ctx.send(f"Pas de niveaux pour {sym} (pull pas encore fait ?).")
+        return
+    k = d.get("key_levels", {})
+    murs = " · ".join(
+        f"{w['strike']:.0f} ({w['gex'] / 1e9:+.2f} Bn "
+        f"{'call' if w['gex'] > 0 else 'put'})"
+        for w in d.get("gex_walls", [])
+    ) or "n/a"
+    lignes = [
+        f"**{sym}** — niveaux GEX · spot {_fmt(d.get('spot'))}",
+        f"Gamma Flip {_fmt(d.get('zero_gamma'))} · HVL {_fmt(d.get('hvl'))}",
+        f"Call Wall {_fmt(k.get('call_wall'))} · Put Support {_fmt(k.get('put_support'))}",
+        f"1D min/max : {_fmt(k.get('d1_min'))} – {_fmt(k.get('d1_max'))}",
+        f"Murs GEX : {murs}",
+    ]
+    await ctx.send("\n".join(lignes))
+
+
 # Graphiques disponibles à la demande, en image. Nom de commande -> (nom du
 # graphique côté API, légende affichée). N'importe quel graphe du dashboard
 # peut sortir en PNG (cf. /api/v1/<sym>/chart/<name>.png).
