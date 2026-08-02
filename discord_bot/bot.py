@@ -54,7 +54,9 @@ CHANNEL_ID = int(os.environ.get("DISCORD_CHANNEL_ID", "0"))
 DASHBOARD = os.environ.get("DASHBOARD_URL", "http://127.0.0.1:8050").rstrip("/")
 
 # Heures Paris des posts fixes (h, min). Modifiable sans toucher au reste.
-SCHEDULE = {(8, 30), (15, 25), (17, 30)}
+# 15h25 = juste avant l'open US (15h30 = 9h30 ET) ; 15h35 = mise à jour juste
+# après l'open.
+SCHEDULE = {(8, 30), (15, 25), (15, 35), (17, 30)}
 # Session US en heure de Paris (15h30 = 9h30 ET open ; ~22h = 16h ET close).
 SESSION_START, SESSION_END = dt.time(15, 30), dt.time(22, 0)
 

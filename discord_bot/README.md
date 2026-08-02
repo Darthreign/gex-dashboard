@@ -8,7 +8,7 @@ analyses dérivées.
 
 ## Ce qu'il fait
 
-- Poste l'état à **heures fixes** : 8h30 / 15h25 / 17h30 (Paris).
+- Poste l'état à **heures fixes** : 8h30 / 15h25 / 15h35 / 17h30 (Paris).
 - Poste aussi à **chaque changement de régime** pendant la session US (un
   symbole qui bascule Gamma +/− ou Delta +/−).
 - **Silencieux le week-end** : marché fermé = aucun post automatique. Les
