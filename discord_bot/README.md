@@ -46,10 +46,33 @@ rouge (déconseillé), exactement comme le verdict.
 cd discord_bot
 python -m venv .venv && .venv/Scripts/activate   # ou source .venv/bin/activate
 pip install -r requirements.txt
+```
 
-# renseigner les variables (cf. .env.example) — le token est un secret
-set DISCORD_BOT_TOKEN=...        # Windows
-set DISCORD_CHANNEL_ID=...
+Puis renseigner le token et l'ID du salon — **deux voies au choix** :
+
+**A. Fichier `.env`** (le plus simple, rien à toucher côté système) :
+
+```bash
+copy .env.example .env
+```
+
+…puis éditer `.env`. Le bot le lit automatiquement. Il est déjà gitignoré.
+
+**B. Variables d'environnement Windows** — en **User** (pas Système : un token
+perso ne doit pas être machine-wide), via PowerShell (`set` ne persiste pas) :
+
+```bash
+[Environment]::SetEnvironmentVariable("DISCORD_BOT_TOKEN", "ton-token", "User")
+```
+```bash
+[Environment]::SetEnvironmentVariable("DISCORD_CHANNEL_ID", "123456789012345678", "User")
+```
+
+Rouvrir un terminal ensuite (les variables sont lues au démarrage du process).
+
+Enfin :
+
+```bash
 python bot.py
 ```
 

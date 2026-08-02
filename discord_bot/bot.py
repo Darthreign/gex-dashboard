@@ -28,11 +28,22 @@ import datetime as dt
 import io
 import logging
 import os
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import discord
 import requests
 from discord.ext import commands, tasks
+
+# Charge un .env local s'il existe, pour ne pas avoir à toucher aux variables
+# d'environnement Windows. Optionnel : sans python-dotenv, on lit directement
+# os.environ (variables utilisateur/système), donc les deux voies marchent.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).with_name(".env"))
+except ImportError:
+    pass
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("gex-bot")
