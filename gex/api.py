@@ -42,10 +42,23 @@ def _summary_dict(symbol: str, s) -> dict:
     }
 
 
+def _preferred(symbol: str) -> str:
+    """Clé de STATE à lire : la chaîne native _RT si un compte est configuré et
+    qu'elle a un état, sinon le symbole de base — même règle que l'interface
+    (app.chain_state) pour que l'API montre ce que le dashboard montre."""
+    from .rtquote import credentials_present
+    if symbol in ("SPX", "NDX", "SPY", "QQQ") and credentials_present():
+        rt = STATE.get(f"{symbol}_RT")
+        with STATE.lock:
+            if rt.summary is not None:
+                return f"{symbol}_RT"
+    return symbol
+
+
 def _current_summary(symbol: str):
     """(summary, enriched) pour ce symbole, quelle que soit la source — cf.
     docstring du module sur la portée réelle de la licence."""
-    st = STATE.get(symbol)
+    st = STATE.get(_preferred(symbol))
     with STATE.lock:
         s, df = st.summary, st.enriched
     if s is None:
@@ -93,14 +106,29 @@ def register_api(app) -> None:
             return jsonify({"error": "indisponible (pas encore de premier pull)"}), 404
         levels = metrics.top_gex_levels(df, ref_spot=s.spot)
         keys = metrics.key_levels(df, s.spot, ref_spot=s.spot)
+        hvl = metrics.zero_gamma(df, s.spot, weight_col="volume")
+
+        # Transposition d'échelle optionnelle : ?scale=NQ exprime les niveaux
+        # NDX en prix NQ (cf. app._transform_for / le sélecteur d'unité). Utile
+        # quand on trade le future mais que les niveaux viennent de l'indice.
+        scale = request.args.get("scale")
+        xf = (lambda v: v)
+        if scale and scale.upper() != symbol:
+            from .app import _transform_for
+            xf, _, _ = _transform_for(symbol, scale.upper())
+
+        def _t(v):
+            return float(xf(v)) if isinstance(v, (int, float)) else v
+
         return jsonify({
             "symbol": symbol,
-            "spot": s.spot,
-            "zero_gamma": s.zero_gamma,
-            "hvl": metrics.zero_gamma(df, s.spot, weight_col="volume"),
-            "key_levels": keys,
+            "scale": (scale.upper() if scale else symbol),
+            "spot": _t(s.spot),
+            "zero_gamma": _t(s.zero_gamma),
+            "hvl": _t(hvl),
+            "key_levels": {k: _t(v) for k, v in keys.items()},
             "gex_walls": [
-                {"strike": float(r.strike), "gex": float(r.gex), "expiry": str(r.expiry)}
+                {"strike": _t(float(r.strike)), "gex": float(r.gex), "expiry": str(r.expiry)}
                 for r in levels.itertuples()
             ],
         })

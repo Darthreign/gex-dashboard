@@ -156,14 +156,19 @@ def _fmt(v, nd=0):
 
 
 @bot.command(name="niveaux", aliases=["levels"])
-async def niveaux(ctx: commands.Context, symbole: str | None = None) -> None:
-    """`!niveaux NQ` — les niveaux GEX en texte (Gamma Flip, HVL, Call Wall,
-    Put Support, 1D min/max, murs GEX)."""
+async def niveaux(ctx: commands.Context, symbole: str | None = None,
+                  echelle: str | None = None) -> None:
+    """`!niveaux NQ` — niveaux GEX en texte. `!niveaux NDX NQ` — niveaux NDX
+    TRANSPOSÉS en prix NQ (comme le sélecteur d'échelle du dashboard)."""
     if not symbole:
-        await ctx.send("Usage : `!niveaux SYMBOLE` (ex. `!niveaux NQ`).")
+        await ctx.send("Usage : `!niveaux SYMBOLE [ÉCHELLE]` "
+                       "(ex. `!niveaux NQ`, ou `!niveaux NDX NQ` pour transposer).")
         return
     sym = symbole.upper()
-    d = fetch(f"/api/v1/{sym}/levels")
+    path = f"/api/v1/{sym}/levels"
+    if echelle:
+        path += f"?scale={echelle.upper()}"
+    d = fetch(path)
     if d is None:
         await ctx.send(f"Pas de niveaux pour {sym} (pull pas encore fait ?).")
         return
@@ -173,8 +178,13 @@ async def niveaux(ctx: commands.Context, symbole: str | None = None) -> None:
         f"{'call' if w['gex'] > 0 else 'put'})"
         for w in d.get("gex_walls", [])
     ) or "n/a"
+    titre = f"**{sym}** — niveaux GEX"
+    sc = d.get("scale")
+    if sc and sc != sym:
+        titre += f" (échelle {sc})"
+    titre += f" · spot {_fmt(d.get('spot'))}"
     lignes = [
-        f"**{sym}** — niveaux GEX · spot {_fmt(d.get('spot'))}",
+        titre,
         f"Gamma Flip {_fmt(d.get('zero_gamma'))} · HVL {_fmt(d.get('hvl'))}",
         f"Call Wall {_fmt(k.get('call_wall'))} · Put Support {_fmt(k.get('put_support'))}",
         f"1D min/max : {_fmt(k.get('d1_min'))} – {_fmt(k.get('d1_max'))}",
