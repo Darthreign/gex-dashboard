@@ -11,6 +11,8 @@ analyses dérivées.
 - Poste l'état à **heures fixes** : 8h30 / 15h25 / 17h30 (Paris).
 - Poste aussi à **chaque changement de régime** pendant la session US (un
   symbole qui bascule Gamma +/− ou Delta +/−).
+- **Silencieux le week-end** : marché fermé = aucun post automatique. Les
+  commandes à la demande répondent quand même.
 - Répond aux commandes :
   - `!etat` ou `!gamma` — le digest complet ;
   - `!gamma NQ` — les valeurs calculées d'un symbole (GEX net, DEX net, Zero

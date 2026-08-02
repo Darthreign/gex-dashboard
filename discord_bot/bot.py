@@ -100,6 +100,11 @@ async def tick() -> None:
     """Boucle minute : poste aux heures fixes, et sur changement de régime."""
     global _last_signature
     now = dt.datetime.now(PARIS)
+    # Week-end : marché fermé, aucun post automatique. Les commandes à la
+    # demande (!niveaux, !gamma…) restent actives — « silencieux » ne veut pas
+    # dire « muet si on l'interroge ».
+    if now.weekday() >= 5:
+        return
     d = fetch("/api/v1/digest")
     if d is None:
         return
