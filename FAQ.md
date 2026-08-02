@@ -125,6 +125,53 @@ Parquet). Rien n'est envoyé nulle part — le dashboard n'écoute que sur
 
 ---
 
+## Partager le verdict — le bot Discord
+
+### Puis-je partager mes analyses avec des amis sans leur donner accès aux données ?
+
+Oui, c'est exactement le rôle du **bot Discord** livré dans `discord_bot/`. Il
+relaie dans un salon le **verdict** d'état du gamma — la conclusion, pas la
+donnée. Tes amis voient « Gamma négatif sur le Nasdaq, contrarien risqué »
+**sans compte courtier ni accès aux chaînes d'options**.
+
+Techniquement, le bot n'interroge que l'API locale du dashboard
+(`/api/v1/digest`), qui ne renvoie que des **analyses dérivées** : signes,
+verdict, couleur, et graphiques d'agrégats. Jamais le flux brut par contrat.
+C'est ce qui rend le partage compatible avec un flux sous licence personnelle —
+tu partages une conclusion que *tu* produis, pas une rediffusion.
+
+### Comment le bot décide-t-il la couleur du verdict ?
+
+Il ne compte pas les symboles à égalité. SPX, SPY et ES sont trois vues du même
+S&P 500 ; NDX, QQQ et NQ du même Nasdaq — les compter séparément reviendrait à
+compter trois fois le même sous-jacent. Le verdict raisonne donc par **famille
+indépendante** :
+
+- Chaque famille (**S&P** : SPX/SPY/ES — **Nasdaq** : NDX/QQQ/NQ) agrège
+  l'intensité de ses symboles avec des poids : **indice cash > ETF > future**.
+  Un future négatif ne renverse pas le signal de l'indice cash.
+- L'indice cash (SPX, NDX) est l'**indice principal** : s'il passe en *fort*
+  gamma négatif, toute sa famille l'est.
+- Couleur : 🔴 **rouge** si les 2 familles sont négatives ou une en fort
+  négatif · 🟠 **orange** si 1 famille négative ou VIX au-dessus du seuil ·
+  🟢 **vert** sinon.
+
+Le digest affiche aussi une **confiance** (forte / moyenne / faible) selon la
+couverture des données — un verdict appuyé sur les 3 symboles concordants d'une
+famille vaut mieux qu'un verdict sur un seul.
+
+### Quelles commandes le bot comprend-il ?
+
+`!help` (la liste), `!etat`/`!gamma` (le digest complet), `!gamma NQ` (les
+valeurs calculées d'un symbole), `!niveaux NQ` (les niveaux GEX en texte, avec
+transposition d'échelle : `!niveaux NDX NQ` sort les niveaux NDX en prix NQ), et
+n'importe quel graphique en image (`!heatmap NQ`, `!delta SPX`, `!vanna SPX`…).
+Il poste aussi tout seul à heures fixes et à chaque changement de régime en
+séance, en restant silencieux le week-end. Mise en place :
+[`discord_bot/README.md`](discord_bot/README.md).
+
+---
+
 ## Comprendre les indicateurs
 
 ### GEX (Gamma Exposure)

@@ -121,6 +121,52 @@ i.e. your own machine.
 
 ---
 
+## Sharing the verdict — the Discord bot
+
+### Can I share my analysis with friends without giving them the data?
+
+Yes — that is exactly what the **Discord bot** in `discord_bot/` is for. It
+relays the gamma-state **verdict** into a channel — the conclusion, not the
+data. Your friends see "Negative gamma on the Nasdaq, contrarian trading risky"
+**without a broker account or access to the option chains**.
+
+Technically, the bot only queries the dashboard's local API
+(`/api/v1/digest`), which returns **derived analysis** only: signs, verdict,
+color, and aggregate charts. Never the raw per-contract feed. That is what makes
+sharing compatible with a personally-licensed feed — you share a conclusion
+*you* produce, not a redistribution.
+
+### How does the bot decide the verdict color?
+
+It does not count symbols equally. SPX, SPY and ES are three views of the same
+S&P 500; NDX, QQQ and NQ of the same Nasdaq — counting them separately would
+count the same underlying three times. So the verdict reasons by **independent
+family**:
+
+- Each family (**S&P**: SPX/SPY/ES — **Nasdaq**: NDX/QQQ/NQ) aggregates its
+  symbols' intensity with weights: **cash index > ETF > future**. A negative
+  future does not override the cash index's signal.
+- The cash index (SPX, NDX) is the **primary index**: if it turns *strongly*
+  negative, its whole family does.
+- Color: 🔴 **red** if both families are negative or one is strongly negative ·
+  🟠 **orange** if one family is negative or VIX is above the threshold ·
+  🟢 **green** otherwise.
+
+The digest also shows a **confidence** level (high / medium / low) based on data
+coverage — a verdict backed by a family's three concordant symbols is worth more
+than one resting on a single symbol.
+
+### What commands does the bot understand?
+
+`!help` (the list), `!etat`/`!gamma` (the full digest), `!gamma NQ` (a symbol's
+computed values), `!niveaux NQ` (the GEX levels as text, with scale
+transposition: `!niveaux NDX NQ` outputs NDX levels in NQ prices), and any chart
+as an image (`!heatmap NQ`, `!delta SPX`, `!vanna SPX`…). It also posts on its
+own at fixed times and on every regime change during the session, staying silent
+on weekends. Setup: [`discord_bot/README.md`](discord_bot/README.md).
+
+---
+
 ## Understanding the indicators
 
 ### GEX (Gamma Exposure)

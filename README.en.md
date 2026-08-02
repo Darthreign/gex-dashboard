@@ -166,6 +166,30 @@ without a clear error message.
 Tools exposed: `get_gex_summary`, `get_gex_by_strike` (gamma walls),
 `get_flow_delta`, `get_history`, `get_reports`, `get_log_tail`.
 
+## Discord bot — sharing the verdict (optional)
+
+A separate, lightweight component ([`discord_bot/`](discord_bot/README.md))
+relays the gamma-state **verdict** into a Discord channel. Friends see your
+conclusion ("Negative gamma on the Nasdaq, contrarian trading risky") **without
+a broker account or access to the raw data**: the bot only queries the
+dashboard's local API (`/api/v1/digest`), which returns derived analysis only —
+never the option chains.
+
+- **Automatic posts** at fixed times (8:30 / 15:25 / 15:35 / 17:30 Paris) and on
+  every **regime change** during the US session. Silent on weekends.
+- **Verdict by family**: the regime is judged by independent asset class —
+  **S&P** (SPX/SPY/ES) and **Nasdaq** (NDX/QQQ/NQ) — not symbol by symbol, with
+  more weight on the cash index than the ETF than the future. Color: 🔴 both
+  families negative or one strongly negative · 🟠 one family negative or VIX
+  high · 🟢 otherwise. A **confidence** line reflects data coverage.
+- **On-demand commands**: `!etat`/`!gamma` (digest), `!gamma NQ` (computed
+  values), `!niveaux NQ` (GEX levels, transposable: `!niveaux NDX NQ`), any
+  chart as an image (`!heatmap NQ`, `!delta SPX`…) and `!help`.
+
+The bot only exposes computed conclusions: that is what makes them shareable
+without redistributing a personally-licensed feed. Setup in the
+[bot README](discord_bot/README.md).
+
 ## Features
 
 - GEX / DEX by strike (±2/4/10 % window), calls/puts breakdown on hover
@@ -181,6 +205,8 @@ Tools exposed: `get_gex_summary`, `get_gex_by_strike` (gamma walls),
   Combo legs kept out of the net flow.
 - VIX in confluence, live when the subscription allows it, delayed otherwise
 - MCP server (`gex/mcp_server.py`) to query the data from Claude
+- Optional Discord bot ([`discord_bot/`](discord_bot/README.md)) broadcasting the
+  gamma-state verdict (derived analysis only) — see above
 - Clickable chart titles: each one links to the section of the
   [illustrated guide](docs/guide/README.md) that explains it
 - FR/EN interface (browser language auto-detected, manual toggle remembered)

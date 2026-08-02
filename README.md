@@ -178,6 +178,31 @@ Ces outils suivent la même règle de source que l'interface : ils répondent su
 la chaîne native quand elle existe, sur CBOE sinon — pour éviter deux vérités
 différentes selon qu'on regarde l'écran ou qu'on interroge Claude.
 
+## Bot Discord — partager le verdict (optionnel)
+
+Un composant séparé et léger ([`discord_bot/`](discord_bot/README.md)) relaie
+dans un salon Discord le **verdict** d'état du gamma. Des amis voient ta
+conclusion (« Gamma négatif sur le Nasdaq, contrarien risqué ») **sans compte
+courtier ni accès aux données brutes** : le bot n'interroge que l'API locale du
+dashboard (`/api/v1/digest`), qui ne renvoie que des analyses dérivées — jamais
+les chaînes d'options.
+
+- **Posts automatiques** à heures fixes (8h30 / 15h25 / 15h35 / 17h30 Paris) et
+  à chaque **changement de régime** en séance US. Silencieux le week-end.
+- **Verdict par famille** : le régime est jugé par classe d'actifs indépendante
+  — **S&P** (SPX/SPY/ES) et **Nasdaq** (NDX/QQQ/NQ) — et non symbole par
+  symbole, avec un poids plus fort à l'indice cash qu'à l'ETF puis au future.
+  Couleur : 🔴 2 familles négatives ou une en fort négatif · 🟠 1 famille
+  négative ou VIX élevé · 🟢 sinon. Une ligne de **confiance** reflète la
+  couverture des données.
+- **Commandes à la demande** : `!etat`/`!gamma` (digest), `!gamma NQ` (valeurs
+  calculées), `!niveaux NQ` (niveaux GEX, transposables : `!niveaux NDX NQ`),
+  n'importe quel graphique en image (`!heatmap NQ`, `!delta SPX`…) et `!help`.
+
+Le bot n'expose que des conclusions calculées : c'est ce qui permet de les
+partager sans rediffuser un flux sous licence personnelle. Mise en place dans le
+[README du bot](discord_bot/README.md).
+
 ## Fonctionnalités
 
 - GEX / DEX par strike (fenêtre réglable ±2/4/10 %), calls/puts au survol
@@ -193,6 +218,8 @@ différentes selon qu'on regarde l'écran ou qu'on interroge Claude.
   un décompte de contrats. Jambes de combos isolées du flux net.
 - VIX en confluence, en direct si l'abonnement le permet, délayé sinon
 - Serveur MCP (`gex/mcp_server.py`) pour interroger les données depuis Claude
+- Bot Discord optionnel ([`discord_bot/`](discord_bot/README.md)) qui diffuse le
+  verdict d'état du gamma (analyses dérivées seulement) — voir plus haut
 - Titres de graphiques cliquables : chaque titre renvoie à la section du
   [guide illustré](docs/guide/README.md) qui l'explique
 

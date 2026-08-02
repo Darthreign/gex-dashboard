@@ -498,6 +498,58 @@ python -m venv .venv</pre>
   concentration, not aggressive direction.</span></p>
 </div></details>
 
+<h2 id="discord"><span data-lang="fr">Partager le verdict (bot Discord)</span><span data-lang="en">Sharing the verdict (Discord bot)</span></h2>
+<p class="lead">
+  <span data-lang="fr">Diffuser sa conclusion à des amis, sans leur donner accès aux données.</span>
+  <span data-lang="en">Broadcast your conclusion to friends, without giving them the data.</span>
+</p>
+
+<details><summary><span data-lang="fr">Partager mes analyses sans partager les données ?</span><span data-lang="en">Share my analysis without sharing the data?</span></summary>
+<div class="body">
+<p><span data-lang="fr">C'est le rôle du <strong>bot Discord</strong> livré dans <code>discord_bot/</code>. Il relaie
+  dans un salon le <strong>verdict</strong> d'état du gamma — la conclusion, pas la donnée. Tes amis voient
+  « Gamma négatif sur le Nasdaq, contrarien risqué » <strong>sans compte courtier ni accès aux chaînes
+  d'options</strong>.</span>
+  <span data-lang="en">That's what the <strong>Discord bot</strong> in <code>discord_bot/</code> is for. It relays
+  the gamma-state <strong>verdict</strong> into a channel — the conclusion, not the data. Friends see
+  "Negative gamma on the Nasdaq, contrarian trading risky" <strong>without a broker account or access to the
+  option chains</strong>.</span></p>
+<p class="note"><span data-lang="fr">Le bot n'interroge que l'API locale (<code>/api/v1/digest</code>), qui ne
+  renvoie que des <strong>analyses dérivées</strong> : signes, verdict, couleur, graphiques d'agrégats. Jamais
+  le flux brut par contrat — c'est ce qui rend le partage compatible avec un flux sous licence personnelle.</span>
+  <span data-lang="en">The bot only queries the local API (<code>/api/v1/digest</code>), which returns
+  <strong>derived analysis</strong> only: signs, verdict, color, aggregate charts. Never the raw per-contract
+  feed — that's what makes sharing compatible with a personally-licensed feed.</span></p>
+</div></details>
+
+<details><summary><span data-lang="fr">Comment la couleur du verdict est-elle décidée ?</span><span data-lang="en">How is the verdict color decided?</span></summary>
+<div class="body">
+<p><span data-lang="fr">Pas en comptant les symboles à égalité : SPX/SPY/ES sont trois vues du même S&amp;P 500,
+  NDX/QQQ/NQ du même Nasdaq. Le verdict raisonne par <strong>famille indépendante</strong>, chacune agrégeant
+  l'intensité de ses symboles avec des poids <strong>indice cash &gt; ETF &gt; future</strong>. L'indice cash
+  (SPX, NDX) est l'indice principal : s'il passe en fort négatif, sa famille l'est.</span>
+  <span data-lang="en">Not by counting symbols equally: SPX/SPY/ES are three views of the same S&amp;P 500,
+  NDX/QQQ/NQ of the same Nasdaq. The verdict reasons by <strong>independent family</strong>, each aggregating
+  its symbols' intensity with weights <strong>cash index &gt; ETF &gt; future</strong>. The cash index (SPX,
+  NDX) is primary: if it turns strongly negative, its family does.</span></p>
+<ul>
+<li><span data-lang="fr">🔴 <strong>Rouge</strong> : 2 familles négatives, ou une en fort négatif.</span>
+  <span data-lang="en">🔴 <strong>Red</strong>: both families negative, or one strongly negative.</span></li>
+<li><span data-lang="fr">🟠 <strong>Orange</strong> : 1 famille négative, ou VIX au-dessus du seuil.</span>
+  <span data-lang="en">🟠 <strong>Orange</strong>: one family negative, or VIX above the threshold.</span></li>
+<li><span data-lang="fr">🟢 <strong>Vert</strong> : sinon.</span>
+  <span data-lang="en">🟢 <strong>Green</strong>: otherwise.</span></li>
+</ul>
+<p><span data-lang="fr">Une ligne de <strong>confiance</strong> (forte / moyenne / faible) reflète la couverture
+  des données. Commandes à la demande : <code>!help</code>, <code>!etat</code>, <code>!gamma NQ</code>,
+  <code>!niveaux NDX NQ</code> (niveaux transposés), et n'importe quel graphique en image
+  (<code>!heatmap NQ</code>, <code>!delta SPX</code>…).</span>
+  <span data-lang="en">A <strong>confidence</strong> line (high / medium / low) reflects data coverage.
+  On-demand commands: <code>!help</code>, <code>!etat</code>, <code>!gamma NQ</code>,
+  <code>!niveaux NDX NQ</code> (transposed levels), and any chart as an image (<code>!heatmap NQ</code>,
+  <code>!delta SPX</code>…).</span></p>
+</div></details>
+
 <h2 id="limits"><span data-lang="fr">Limites connues</span><span data-lang="en">Known limitations</span></h2>
 <p class="lead">
   <span data-lang="fr">Assumées franchement — mieux vaut les connaître avant de s'appuyer dessus.</span>

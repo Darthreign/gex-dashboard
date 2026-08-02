@@ -14,6 +14,10 @@ Ensuite, un fichier par onglet, dans l'ordre où ils apparaissent sur le dashboa
 4. **[Heatmap](4-heatmap.md)** — le prix réel (en bougies) superposé à la structure de gamma.
 5. **[Positionnement](5-positionnement.md)** — ce qui a changé depuis hier, pas juste l'état du jour.
 
+## Partager le verdict avec des amis
+
+Un **bot Discord** optionnel ([`discord_bot/`](../../discord_bot/README.md)) peut diffuser dans un salon le **verdict** d'état du gamma — la conclusion en couleur (vert / orange / rouge), pas les données brutes. Tes amis le lisent **sans compte courtier ni accès aux chaînes d'options**. Le régime y est jugé par **famille** (S&P : SPX/SPY/ES — Nasdaq : NDX/QQQ/NQ), et le bot répond aussi à la demande (`!etat`, `!niveaux NQ`, `!heatmap NQ`, `!help`…). Détails et mise en place dans le [README du bot](../../discord_bot/README.md).
+
 ## Un rappel important
 
 Rien sur ce dashboard n'est un conseil en investissement ni un signal de trading — que ce soit un chiffre, une couleur ou une phrase du cadre "Lecture du régime". Ce sont des lectures **mécaniques** de la structure du marché d'options, pas des prédictions. Voir l'[avertissement complet](../../DISCLAIMER.md) avant toute utilisation.
