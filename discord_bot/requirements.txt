@@ -1,2 +1,3 @@
 discord.py>=2.4
 requests>=2.32
+python-dotenv>=1.0

@@ -52,9 +52,18 @@ python -m venv .venv && .venv/Scripts/activate   # ou source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Puis renseigner le token et l'ID du salon dans les **variables d'environnement
-Windows**, en scope **User** (pas Système : un token perso ne doit pas être
-machine-wide), via PowerShell — `set` ne persiste pas, `$env:` non plus :
+Puis renseigner le token et l'ID du salon — **deux voies au choix** :
+
+**A. Fichier `.env`** (le plus simple, rien à toucher côté système) :
+
+```bash
+copy .env.example .env
+```
+
+…puis éditer `.env`. Le bot le lit automatiquement. Il est déjà gitignoré.
+
+**B. Variables d'environnement Windows** — en **User** (pas Système : un token
+perso ne doit pas être machine-wide), via PowerShell (`set` ne persiste pas) :
 
 ```bash
 [Environment]::SetEnvironmentVariable("DISCORD_BOT_TOKEN", "ton-token", "User")
@@ -63,8 +72,9 @@ machine-wide), via PowerShell — `set` ne persiste pas, `$env:` non plus :
 [Environment]::SetEnvironmentVariable("DISCORD_CHANNEL_ID", "123456789012345678", "User")
 ```
 
-**Rouvre ensuite un terminal** — une variable persistante n'est lue qu'au
-démarrage d'un process, la fenêtre courante ne la verra pas. Enfin :
+Rouvrir un terminal ensuite (les variables sont lues au démarrage du process).
+
+Enfin :
 
 ```bash
 python bot.py
