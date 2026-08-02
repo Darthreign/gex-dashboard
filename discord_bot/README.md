@@ -14,11 +14,13 @@ analyses dérivées.
 - **Silencieux le week-end** : marché fermé = aucun post automatique. Les
   commandes à la demande répondent quand même.
 - Répond aux commandes :
+  - `!help` (ou `!aide`) — la liste des commandes, regroupées par thème ;
   - `!etat` ou `!gamma` — le digest complet ;
   - `!gamma NQ` — les valeurs calculées d'un symbole (GEX net, DEX net, Zero
     Gamma) ;
   - `!niveaux NQ` (ou `!levels NQ`) — les **niveaux GEX en texte** : Gamma
     Flip, HVL, Call Wall, Put Support, 1D min/max, et les 5 murs GEX ;
+  - `!niveaux NDX NQ` — les niveaux NDX **transposés en prix NQ** ;
   - **`!graph NQ heatmap`** — n'importe quel graphique en image, ou les
     raccourcis directs :
     - `!heatmap NQ`, `!gex NQ`, `!delta NQ` (Delta Exposure), `!flow NQ`
@@ -30,6 +32,35 @@ analyses dérivées.
 
 Le message est un **embed coloré** : vert (peu de risque) / orange (risqué) /
 rouge (déconseillé), exactement comme le verdict.
+
+## Comment se lit le verdict
+
+Le régime n'est **pas** jugé symbole par symbole (SPX, SPY, ES… sont trois vues
+d'un même S&P 500 ; NDX, QQQ, NQ d'un même Nasdaq — les compter à égalité
+reviendrait à compter trois fois le même sous-jacent). Il est jugé par
+**famille indépendante** :
+
+- **S&P** : SPX / SPY / ES · **Nasdaq** : NDX / QQQ / NQ.
+- Chaque famille agrège l'intensité de ses symboles avec des **poids** selon
+  l'importance du marché d'options : **indice cash ×3** (SPX, NDX) > **ETF ×2**
+  (SPY, QQQ) > **future ×1** (ES, NQ). Un future négatif ne renverse donc pas
+  le signal de l'indice cash.
+- L'**indice cash est l'indice principal** : s'il passe en *fort* gamma
+  négatif, toute sa famille l'est (« le cash index commande »).
+
+Couleur du verdict à partir des deux familles + le VIX :
+
+| Couleur | Condition |
+|---|---|
+| 🔴 Rouge | 2 familles négatives, **ou** une famille en fort négatif |
+| 🟠 Orange | 1 famille négative, **ou** VIX au-dessus du seuil |
+| 🟢 Vert | sinon |
+
+Le digest affiche aussi une **confiance** (forte / moyenne / faible) selon la
+couverture des données : *forte* = indice principal présent, les 3 symboles de
+la famille, signes concordants ; *faible* = indice cash manquant ou symboles
+qui se contredisent ; *moyenne* entre les deux. Deux verdicts identiques
+n'ont pas la même valeur selon les sources disponibles.
 
 ## Installation (une fois)
 

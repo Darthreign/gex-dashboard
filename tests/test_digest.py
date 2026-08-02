@@ -45,14 +45,28 @@ def test_exemple_1_vert():
     assert d.vix_line is None
 
 
-def test_exemple_2_orange_majorite_negative():
-    rows = [_row(s, -1e9, +1e9) for s in ("SPX", "SPY", "ES", "NQ")]
-    rows += [_row("QQQ", -1e9, -1e9), _row("NDX", -1e9, -1e9)]
+def test_orange_une_seule_famille_negative():
+    """UNE famille négative (Nasdaq) pendant que l'autre est positive (S&P)
+    → orange. Le S&P reste sain, donc pas rouge."""
+    rows = [_row(s, +1e9, +1e9) for s in ("SPX", "SPY", "ES")]     # S&P positif
+    rows += [_row("NDX", -1e9, -1e9), _row("QQQ", -1e9, -1e9),      # Nasdaq négatif
+             _row("NQ", -1e9, +1e9)]
     d = digest.build_digest(rows, vix=13.0)
     assert d.color == "orange"
     assert d.verdict == "Trading contrarient risqué sur session US."
-    # QQQ et NDX regroupés sur la ligne short
+    # NDX et QQQ (delta−) regroupés sur la ligne short
     assert any("Delta Négatif (Dealers short gamma) sur NDX et QQQ" in ln for ln in d.lines)
+
+
+def test_deux_familles_negatives_rouge():
+    """Les DEUX familles en gamma net négatif (sans même être 'fort') → rouge :
+    tout le marché est short gamma. (C'était 'orange' sous l'ancien comptage
+    par symbole ; le modèle par familles le juge plus sévèrement.)"""
+    rows = [_row(s, -1e9, +1e9) for s in ("SPX", "SPY", "ES", "NQ")]
+    rows += [_row("QQQ", -1e9, -1e9), _row("NDX", -1e9, -1e9)]
+    d = digest.build_digest(rows, vix=13.0)
+    assert d.color == "red"
+    assert "déconseillé" in d.verdict.lower()
 
 
 def test_exemple_3_rouge_fort_gamma_negatif():
@@ -112,6 +126,73 @@ def test_pas_de_recommandation_directionnelle():
     txt = d.to_text().lower()
     for interdit in ("achète", "vends", "acheter", "vendre", "prends un", "pose un"):
         assert interdit not in txt
+
+
+# --- Verdict par familles (S&P / Nasdaq) ---
+
+def test_indice_principal_fort_suffit_pour_rouge():
+    """SPX seul en FORT gamma négatif fait basculer toute la famille S&P en
+    fort négatif → rouge, même si SPY/ES sont positifs et le Nasdaq sain.
+    C'est le choix (a) : 'le cash index commande'."""
+    hist_fort = [-1e8] * 25
+    rows = [_row("SPX", -5e9, +1e9, hist=hist_fort),     # SPX fort négatif
+            _row("SPY", +1e9, +1e9), _row("ES", +1e9, +1e9)]
+    rows += [_row(s, +1e9, +1e9) for s in ("NDX", "QQQ", "NQ")]   # Nasdaq positif
+    d = digest.build_digest(rows, vix=12.0)
+    assert d.color == "red"
+
+
+def test_ponderation_famille_pas_dominee_par_le_future():
+    """NDX− (poids 3), QQQ− (2), NQ+ (1) : la famille reste négative, le future
+    NQ positif ne renverse pas le verdict de l'indice cash."""
+    rows = [_row(s, +1e9, +1e9) for s in ("SPX", "SPY", "ES")]    # S&P positif
+    rows += [_row("NDX", -1e9, +1e9), _row("QQQ", -1e9, +1e9), _row("NQ", +1e9, +1e9)]
+    d = digest.build_digest(rows, vix=12.0)
+    assert d.color == "orange"          # une seule famille (Nasdaq) négative
+    # inversement, si seul NQ est négatif (poids 1) et l'indice cash positif,
+    # la famille reste positive → pas d'orange.
+    rows2 = [_row(s, +1e9, +1e9) for s in ("SPX", "SPY", "ES", "NDX", "QQQ")]
+    rows2.append(_row("NQ", -1e9, +1e9))
+    assert digest.build_digest(rows2, vix=12.0).color == "green"
+
+
+def test_normalisation_symbole_manquant():
+    """Le score de famille est normalisé par les poids présents : NQ absent ne
+    change pas le verdict tiré de NDX/QQQ."""
+    complet = digest.build_digest(
+        [_row(s, +1e9, +1e9) for s in ("SPX", "SPY", "ES")] +
+        [_row("NDX", -1e9, +1e9), _row("QQQ", -1e9, +1e9), _row("NQ", -1e9, +1e9)],
+        vix=12.0)
+    sans_nq = digest.build_digest(
+        [_row(s, +1e9, +1e9) for s in ("SPX", "SPY", "ES")] +
+        [_row("NDX", -1e9, +1e9), _row("QQQ", -1e9, +1e9)],
+        vix=12.0)
+    assert complet.color == sans_nq.color == "orange"
+
+
+def test_confiance_forte_quand_famille_complete_et_concordante():
+    rows = [_row(s, +1e9, +1e9) for s in ("SPX", "SPY", "ES", "NDX", "QQQ", "NQ")]
+    d = digest.build_digest(rows, vix=12.0)
+    assert d.confidence == "forte"
+    assert "Confiance : Forte" in d.to_text()
+
+
+def test_confiance_faible_si_indice_principal_absent():
+    """Sans SPX ni NDX (indices cash), on n'a pas la référence → confiance
+    faible, même si des symboles sont présents."""
+    rows = [_row("SPY", +1e9, +1e9), _row("ES", +1e9, +1e9),
+            _row("QQQ", +1e9, +1e9), _row("NQ", +1e9, +1e9)]
+    d = digest.build_digest(rows, vix=12.0)
+    assert d.confidence == "faible"
+
+
+def test_confiance_faible_si_signes_contradictoires():
+    """Indice principal présent mais un pair le contredit en signe → la
+    confiance de cette famille tombe, et la globale suit (maillon faible)."""
+    rows = [_row(s, +1e9, +1e9) for s in ("SPX", "SPY", "ES", "NDX", "QQQ")]
+    rows.append(_row("NQ", -1e9, +1e9))          # NQ contredit le Nasdaq positif
+    d = digest.build_digest(rows, vix=12.0)
+    assert d.confidence == "faible"
 
 
 # --- Export générique des graphiques ---

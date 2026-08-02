@@ -7,10 +7,12 @@ dérivées — et les relaie dans un salon Discord. On peut donc le partager ave
 des amis sans qu'ils aient de compte courtier ni accès aux chaînes dxFeed.
 
 Ce qu'il fait :
-- poste l'état du gamma à heures fixes (8h30 / 15h25 / 17h30 Paris) ;
-- poste aussi à chaque CHANGEMENT DE RÉGIME pendant la session US (un symbole
-  qui bascule Gamma +/− ou Delta +/−) ;
-- répond à `!gamma [SYMBOLE]` (valeurs calculées) et `!etat` (digest complet).
+- poste l'état du gamma à heures fixes (8h30 / 15h25 / 15h35 / 17h30 Paris) ;
+- poste aussi à chaque CHANGEMENT DE RÉGIME pendant la session US (le verdict,
+  jugé par famille S&P / Nasdaq, qui bascule) ;
+- répond aux commandes : `!etat`/`!gamma` (digest complet), `!gamma SYM`
+  (valeurs calculées), `!niveaux SYM [ÉCHELLE]` (niveaux, transposables),
+  n'importe quel graphique en image (`!heatmap`, `!delta`…), et `!help`.
 
 Prérequis (à faire UNE fois, côté Discord) :
   1. https://discord.com/developers/applications -> New Application -> Bot
@@ -81,7 +83,9 @@ def _embed(d: dict) -> discord.Embed:
 
 intents = discord.Intents.default()
 intents.message_content = True        # nécessaire pour lire les commandes « ! »
-bot = commands.Bot(command_prefix="!", intents=intents)
+# help_command=None : on remplace le !help auto de discord.py par le nôtre, plus
+# lisible et regroupé par thème (cf. la commande `help` plus bas).
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 
 async def _post(d: dict) -> None:
@@ -258,6 +262,53 @@ def _make_chart_command(cmd_name: str, chart: str, legende: str):
 # Raccourcis directs : !heatmap NQ, !delta NQ, !flow NQ, !skew SPX, etc.
 for _name, (_chart, _leg) in CHARTS.items():
     _make_chart_command(_name, _chart, _leg)
+
+
+@bot.command(name="help", aliases=["aide", "commandes"])
+async def aide(ctx: commands.Context) -> None:
+    """`!help` — la liste des commandes, regroupées par thème."""
+    graphes = ", ".join(f"`!{n}`" for n in sorted(CHARTS))
+    e = discord.Embed(
+        title="Commandes du bot — état du gamma",
+        description="Le bot relaie le **verdict** calculé par le dashboard GEX "
+                    "(analyses dérivées, jamais la donnée brute).",
+        color=0x3498DB,
+    )
+    e.add_field(
+        name="📊 État & verdict",
+        value=("`!etat` — le digest complet (état par symbole, verdict "
+               "couleur, confiance).\n"
+               "`!gamma` — idem `!etat`.\n"
+               "`!gamma NQ` — les valeurs calculées d'un symbole (GEX net, "
+               "DEX net, Zero Gamma)."),
+        inline=False,
+    )
+    e.add_field(
+        name="🎯 Niveaux",
+        value=("`!niveaux NQ` (ou `!levels NQ`) — Gamma Flip, HVL, Call Wall, "
+               "Put Support, 1D min/max, murs GEX.\n"
+               "`!niveaux NDX NQ` — niveaux NDX **transposés en prix NQ**."),
+        inline=False,
+    )
+    e.add_field(
+        name="🖼️ Graphiques (image)",
+        value=(f"`!graph NQ heatmap` — n'importe quel graphique du dashboard.\n"
+               f"Raccourcis directs : {graphes}."),
+        inline=False,
+    )
+    e.add_field(
+        name="ℹ️ Comment se lit le verdict",
+        value=("Le régime est jugé par **famille** indépendante — **S&P** "
+               "(SPX/SPY/ES) et **Nasdaq** (NDX/QQQ/NQ) — et non symbole par "
+               "symbole. 🔴 2 familles négatives ou une en fort négatif · "
+               "🟠 1 famille négative ou VIX élevé · 🟢 sinon. La **confiance** "
+               "(forte/moyenne/faible) reflète la couverture des données."),
+        inline=False,
+    )
+    e.set_footer(text="Posté automatiquement à 8h30 / 15h25 / 15h35 / 17h30 "
+                      "(Paris) et à chaque changement de régime. Silencieux le "
+                      "week-end.")
+    await ctx.send(embed=e)
 
 
 @bot.event

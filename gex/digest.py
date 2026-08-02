@@ -13,7 +13,15 @@ Format calqué sur la demande (4 exemples du 2026-07-30) :
 - « Fort Gamma Négatif » quand le gamma net est dans la queue forte de son
   propre historique (même logique de percentile que metrics.regime_read) ;
 - ligne VIX si au-dessus du seuil ;
-- couleur (vert / orange / rouge) + verdict de trading contrarien.
+- couleur (vert / orange / rouge) + verdict de trading contrarien ;
+- ligne de confiance (forte / moyenne / faible) selon la couverture des données.
+
+Le VERDICT ne compte pas les symboles à égalité : il raisonne par FAMILLE
+indépendante (S&P : SPX/SPY/ES — Nasdaq : NDX/QQQ/NQ), car ce sont deux vues
+d'un même sous-jacent chacune. Chaque famille agrège l'intensité de ses
+symboles (poids indice cash > ETF > future) en un score, puis les deux familles
++ le VIX donnent la couleur (cf. _verdict). L'indice cash (SPX/NDX) est l'indice
+principal : s'il passe en fort négatif, sa famille l'est.
 
 Décodage du format utilisateur, vérifié cohérent sur les 8 lignes des
 exemples : le glose « (Dealers long/short gamma) » suit le signe du DELTA
@@ -41,10 +49,24 @@ SYMBOLS = ("SPX", "SPY", "NDX", "QQQ", "ES", "NQ")
 VIX_SEUIL = 17.0          # au-dessus : bascule au moins en orange + amplitude
 FORT_PERCENTILE = 0.67    # |net_gex| dans le tiers supérieur de son historique
 FORT_MIN_HISTORY = 20     # sans assez d'historique, pas de « Fort » deviné
-RED_FORT_COUNT = 2        # nb de « Fort Gamma Négatif » qui fait passer au rouge
 
 # Couleurs Discord (barre d'embed) — vert / orange / rouge.
 COLORS = {"green": 0x2ECC71, "orange": 0xE67E22, "red": 0xE74C3C}
+
+# Familles indépendantes. Le régime réel tient à DEUX classes d'actifs, pas à
+# six marchés : SPX/SPY/ES sont trois vues du même S&P 500 ; NDX/QQQ/NQ du même
+# Nasdaq. On les agrège par famille pour ne pas compter trois fois le même
+# sous-jacent. Poids = importance du marché d'options : indice cash > ETF >
+# future. L'indice cash est aussi l'« indice principal » (le vrai marché des
+# dealers) : s'il passe en fort négatif, toute la famille l'est.
+FAMILLES = {
+    "S&P":    {"principal": "SPX", "poids": {"SPX": 3, "SPY": 2, "ES": 1}},
+    "Nasdaq": {"principal": "NDX", "poids": {"NDX": 3, "QQQ": 2, "NQ": 1}},
+}
+# Repli quand l'indice principal est absent : score de famille sous ce seuil =
+# fort négative (échelle d'intensité -2..+1, cf. _intensite).
+FAMILLE_FORT_SEUIL = -1.5
+_CONF_RANG = {"faible": 0, "moyenne": 1, "forte": 2}
 
 
 @dataclass
@@ -54,6 +76,7 @@ class Digest:
     vix_line: str | None
     verdict: str
     color: str                       # "green" | "orange" | "red"
+    confidence: str | None = None    # "forte" | "moyenne" | "faible"
     signature: tuple = field(default_factory=tuple)   # pour détecter un changement
 
     def to_text(self) -> str:
@@ -61,6 +84,8 @@ class Digest:
         if self.vix_line:
             parts.append(self.vix_line)
         parts += ["", self.verdict]
+        if self.confidence:
+            parts.append(f"Confiance : {self.confidence.capitalize()}")
         return "\n".join(parts)
 
     @property
@@ -139,9 +164,14 @@ def build_digest(rows: list[dict], vix: float | None = None,
     vix_line = (f"VIX supérieur à {int(vix_seuil)} ! (actuellement {vix:.1f})"
                 if vix is not None and vix > vix_seuil else None)
 
-    color, verdict = _verdict(etats, vix, vix_seuil)
-    signature = tuple(sorted((s, e["gamma"], e["delta"]) for s, e in etats.items()))
-    return Digest(_header(now), lines, vix_line, verdict, color, signature)
+    color, verdict, familles = _verdict(etats, vix, vix_seuil)
+    confidence = _confiance_globale(familles)
+    # Signature = régime réel (statut par famille + couleur) : on ne re-poste
+    # que sur un vrai changement de verdict, pas au moindre frémissement d'un
+    # petit frère (SPY/ES/QQQ/NQ) qui ne fait pas basculer sa famille.
+    signature = tuple(sorted((nom, f["statut"]) for nom, f in familles.items()))
+    signature += (("couleur", color),)
+    return Digest(_header(now), lines, vix_line, verdict, color, confidence, signature)
 
 
 def _liste(syms: list[str]) -> str:
@@ -151,27 +181,99 @@ def _liste(syms: list[str]) -> str:
     return ", ".join(syms[:-1]) + " et " + syms[-1]
 
 
-def _verdict(etats: dict[str, dict], vix: float | None,
-             vix_seuil: float) -> tuple[str, str]:
-    """Couleur + phrase de verdict, calquées sur les 4 exemples :
+def _intensite(c: dict) -> int:
+    """Intensité signée d'un symbole, depuis son classify().
 
-    - rouge  : présence marquée de « Fort Gamma Négatif » → déconseillé ;
-    - orange : majorité en Gamma Négatif, OU VIX au-dessus du seuil ;
-    - vert   : majorité en Gamma Positif et VIX calme.
+    Fort négatif -2 · Négatif -1 · Positif +1. Volontairement ASYMÉTRIQUE :
+    pas de « fort positif » (+2). En intraday, un fort gamma négatif change le
+    comportement du marché (accélérations, cassures) ; un gamma positif plus
+    élevé ne fait que renforcer une stabilité déjà connue — la nuance +1/+2
+    n'est pas exploitable, la nuance -1/-2 l'est.
     """
-    n = len(etats) or 1
-    n_fort = sum(1 for e in etats.values() if e["fort"])
-    n_neg = sum(1 for e in etats.values() if e["neg"])
+    if c["fort"]:
+        return -2
+    return -1 if c["neg"] else 1
+
+
+def _famille(etats: dict[str, dict], poids: dict[str, int],
+             principal: str) -> dict | None:
+    """État d'une famille : score pondéré normalisé, statut, confiance.
+
+    - `score` : moyenne pondérée des intensités PRÉSENTES, normalisée par les
+      poids présents → échelle stable [-2, +1] même si une source manque ;
+    - `statut` : 'fort_neg' | 'neg' | 'pos'. `fort_neg` dès que l'indice
+      principal (SPX/NDX) est en fort négatif — règle explicite « le cash index
+      commande » — ou, à défaut d'indice principal, si le score plonge sous le
+      seuil ;
+    - `confiance` : 'forte' (indice principal + les 3 symboles, signes
+      concordants), 'faible' (indice principal absent, ou signes qui se
+      contredisent), 'moyenne' sinon.
+    """
+    presents = {s: etats[s] for s in poids if s in etats}
+    if not presents:
+        return None
+    w = sum(poids[s] for s in presents)
+    score = sum(poids[s] * _intensite(presents[s]) for s in presents) / w
+
+    principal_present = principal in presents
+    principal_fort = principal_present and presents[principal]["fort"]
+    if principal_fort or (not principal_present and score <= FAMILLE_FORT_SEUIL):
+        statut = "fort_neg"
+    elif score < 0:
+        statut = "neg"
+    else:
+        statut = "pos"
+
+    signes = {1 if _intensite(c) > 0 else -1 for c in presents.values()}
+    contradiction = len(signes) > 1
+    complet = w == sum(poids.values())
+    if not principal_present or contradiction:
+        confiance = "faible"
+    elif complet:
+        confiance = "forte"
+    else:
+        confiance = "moyenne"
+    return {"score": score, "statut": statut, "confiance": confiance}
+
+
+def _confiance_globale(familles: dict[str, dict]) -> str | None:
+    """La plus faible des confiances de famille (le maillon faible commande)."""
+    if not familles:
+        return None
+    return min((f["confiance"] for f in familles.values()),
+               key=lambda c: _CONF_RANG[c])
+
+
+def _verdict(etats: dict[str, dict], vix: float | None,
+             vix_seuil: float) -> tuple[str, str, dict[str, dict]]:
+    """Couleur + phrase de verdict, décidés par les DEUX familles (pas les 6
+    symboles) plus le VIX :
+
+    - rouge  : les 2 familles négatives, OU une famille en fort négatif ;
+    - orange : 1 famille négative, OU VIX au-dessus du seuil ;
+    - vert   : sinon.
+
+    Retourne aussi le détail par famille (pour la confiance et la signature).
+    """
+    familles = {}
+    for nom, spec in FAMILLES.items():
+        r = _famille(etats, spec["poids"], spec["principal"])
+        if r is not None:
+            familles[nom] = r
+
+    n_neg = sum(1 for f in familles.values() if f["statut"] in ("neg", "fort_neg"))
+    fort = any(f["statut"] == "fort_neg" for f in familles.values())
     vix_haut = vix is not None and vix > vix_seuil
 
-    if n_fort >= RED_FORT_COUNT:
-        return "red", "Trading contrarient déconseillé sur session US."
-    if n_neg > n / 2:
-        return "orange", "Trading contrarient risqué sur session US."
+    if fort or n_neg >= 2:
+        return "red", "Trading contrarient déconseillé sur session US.", familles
+    if n_neg == 1:
+        return "orange", "Trading contrarient risqué sur session US.", familles
     if vix_haut:
         return ("orange",
-                "Trading contrarient risqué sur session US — forte amplitude attendue.")
-    return "green", "Trading contrarient avec peu de risque sur session US."
+                "Trading contrarient risqué sur session US — forte amplitude attendue.",
+                familles)
+    return "green", "Trading contrarient avec peu de risque sur session US.", familles
 
 
 # --------------------------------------------------------------------------

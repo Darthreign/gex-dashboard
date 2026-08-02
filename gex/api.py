@@ -183,6 +183,7 @@ def register_api(app) -> None:
             "verdict": d.verdict,
             "color": d.color,
             "discord_color": d.discord_color,
+            "confidence": d.confidence,
             "text": d.to_text(),
             "signature": list(d.signature),
         })
