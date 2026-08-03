@@ -171,6 +171,28 @@ def _close_context(symbol: str, day: str) -> dict:
     return out
 
 
+def _tick_context(symbol: str, day: str, entry: float | None = None,
+                  stop: float | None = None, direction: int = 1) -> dict:
+    """Fenêtre de clôture à la résolution du TICK (brut capturé 15h45-16h05 ET).
+
+    Métriques d'excursion avant/après la clôture, et — si `entry`/`stop` sont
+    fournis — le rejeu « un stop aurait-il sauté ? ». `available: False` si aucun
+    tick n'a été capturé ce jour-là (capture = compte courtier requis)."""
+    from . import store, tickstats
+
+    ticks = store.load_ticks(symbol, day)
+    out = {"symbol": symbol, "date": day}
+    if ticks is None or ticks.empty:
+        out.update({"available": False, "reason": "pas de ticks capturés cette séance"})
+        return out
+    split = datetime.combine(datetime.fromisoformat(day).date(),
+                             dt_time(16, 0), ET).timestamp()
+    out.update(tickstats.window_metrics(ticks, split))
+    if entry is not None and stop is not None:
+        out["stop_check"] = tickstats.stop_swept(ticks, entry, stop, direction, after_ts=split)
+    return out
+
+
 def _preferred(symbol: str) -> str:
     """Clé de STATE à lire : la chaîne native _RT si un compte est configuré et
     qu'elle a un état, sinon le symbole de base — même règle que l'interface
@@ -316,6 +338,17 @@ def register_api(app) -> None:
         symbol = symbol.upper()
         day = request.args.get("date") or datetime.now(ET).date().isoformat()
         return jsonify(_close_context(symbol, day))
+
+    @server.route("/api/v1/<symbol>/tick_context")
+    def _tick(symbol):
+        """Fenêtre de clôture au tick. `?date=` ; `?entry=&stop=&dir=long|short`
+        pour rejouer « un stop aurait-il sauté ? »."""
+        symbol = symbol.upper()
+        day = request.args.get("date") or datetime.now(ET).date().isoformat()
+        entry = request.args.get("entry", type=float)
+        stop = request.args.get("stop", type=float)
+        direction = -1 if request.args.get("dir", "long").lower().startswith("s") else 1
+        return jsonify(_tick_context(symbol, day, entry, stop, direction))
 
     @server.route("/api/v1/digest")
     def _digest():

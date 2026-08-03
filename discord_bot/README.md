@@ -29,6 +29,8 @@ analyses dérivées.
   - `!sondage` — (re)poster le sondage de séance à la demande.
   - `!pin QQQ` (ou `!pin SPX 2026-08-01`) — **pinning de clôture** : le prix
     s'est-il collé sur un strike / un mur GEX à 22h ?
+  - `!tick NQ` (ou `!tick ES 2026-08-01`) — **fenêtre de clôture au tick**
+    (21h45-22h05) : range avant/après 22h, expansion, excursions.
   - `!setup MOC A` (ou `!setup NONE`) — tag ton **setup MOC du jour** (recherche).
   - `!hypo` / `!note` — consigner une hypothèse / observation (mémoire du labo).
 
@@ -111,14 +113,20 @@ Ce qui est capturé :
 Trois catégories, gérées différemment :
 
 1. **Sources immuables** (à conserver, non recréables) : snapshots GEX,
-   régimes horodatés, bougies, résultats du sondage, heatmaps, `setup_MOC`,
+   régimes horodatés, bougies, **ticks de la fenêtre de clôture** (21h45-22h05,
+   capturés à la seconde), résultats du sondage, heatmaps, `setup_MOC`,
    `research_log`.
 2. **Dérivés** (calculables, *non* stockés sauf coût prohibitif) : durée d'un
    régime, `pin_ratio`, range 21h50-22h00, impulsion, minutes depuis le dernier
    changement… recalculés **à la demande** depuis les sources. Le **pinning**
    (commande `!pin`, endpoint `/api/v1/<sym>/close_context`) en est l'exemple :
    il se recalcule à partir du snapshot de chaîne ~16h et des bougies, tous deux
-   déjà conservés — donc rien n'est figé.
+   déjà conservés — donc rien n'est figé. Idem pour la **fenêtre de clôture au
+   tick** (`!tick`, endpoint `/api/v1/<sym>/tick_context`) : les excursions et
+   surtout le rejeu **« un stop aurait-il été balayé ? »** (`?entry=&stop=&dir=`)
+   se calculent depuis les ticks bruts capturés 21h45-22h05. Cette capture
+   **nécessite le flux temps réel** (compte courtier) : sans lui, le repli
+   public est délayé ~15 min et ne dirait rien du vrai comportement à 22h.
 3. **Données humaines** (irremplaçables, grande valeur) : `setup_MOC`, notes,
    votes du sondage — ce qu'aucun calcul ne retrouvera jamais.
 

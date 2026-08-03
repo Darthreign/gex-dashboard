@@ -21,6 +21,7 @@ from .ingest import ChainSnapshot, fetch_chain, fetch_index_spot
 from .metrics import ET, SummaryMetrics
 from . import futopt
 from .rtquote import PUBLIC_QUOTES, QUOTES, credentials_present
+from .tickrec import TICKREC
 
 log = logging.getLogger(__name__)
 
@@ -404,6 +405,29 @@ def flush_tape() -> None:
             log.exception("Échec écriture de l'order flow %s", symbol)
 
 
+def arm_close_ticks() -> None:
+    """Ouvre la fenêtre de capture tick de clôture (15h45 ET). Uniquement avec
+    un compte courtier : sans temps réel, le repli public est délayé ~15 min et
+    ne dirait rien du vrai comportement à 22h."""
+    if not credentials_present():
+        return
+    TICKREC.arm()
+    log.info("Capture tick de clôture ARMÉE (15h45-16h05 ET)")
+
+
+def flush_close_ticks() -> None:
+    """Ferme la fenêtre (16h06 ET) et écrit le brut capturé sur disque."""
+    buf = TICKREC.disarm_and_drain()
+    now = datetime.now(ET)
+    total = 0
+    for symbol, rows in buf.items():
+        if rows:
+            store.append_ticks(symbol, rows, now)
+            total += len(rows)
+    if total:
+        log.info("Capture tick de clôture : %d ticks écrits (%s)", total, now.date())
+
+
 def start_scheduler() -> BackgroundScheduler:
     sched = BackgroundScheduler(timezone="America/New_York")
     sched.add_job(
@@ -427,6 +451,10 @@ def start_scheduler() -> BackgroundScheduler:
     # rafraîchir toutes les 15 min n'aurait aucun sens.
     sched.add_job(pull_native_index, "interval", minutes=3,
                   max_instances=1, coalesce=True)
+    # Capture tick de la fenêtre de clôture : armée 15h45 ET (21h45 Paris),
+    # vidée sur disque 16h06 ET (22h06 Paris) — juste après la fin de fenêtre.
+    sched.add_job(arm_close_ticks, "cron", day_of_week="mon-fri", hour=15, minute=45)
+    sched.add_job(flush_close_ticks, "cron", day_of_week="mon-fri", hour=16, minute=6)
     sched.add_job(push_data_repo, "cron", day_of_week="mon-fri", hour=16, minute=20)
     # Sauvegarde distante après le push git : elle porte ce que GitHub refuse
     # (archives Databento de plus de 100 Mo). Sans rclone configuré, l'appel

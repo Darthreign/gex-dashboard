@@ -169,6 +169,28 @@ def load_prices(symbol: str, day: str) -> pd.DataFrame:
     return pd.read_parquet(path) if path.exists() else pd.DataFrame()
 
 
+def append_ticks(symbol: str, rows: list[dict], ts: datetime) -> Path:
+    """Ajoute des ticks bruts (fenêtre de clôture) au fichier du jour.
+
+    Brut volontairement CONSERVÉ (fenêtre ~20 min/jour, quelques Mo) : c'est la
+    seule source qui permet de rejouer la séquence à la seconde — donc de
+    répondre à « un stop aurait-il été balayé ? ». Même provenance courtier que
+    les bougies : `source="dxfeed"`, exclu de l'export par défaut.
+    """
+    path = _ensure(SETTINGS.data_dir / "ticks" / symbol / f"{ts:%Y-%m-%d}.parquet")
+    with _lock_for(path):
+        new = pd.DataFrame(rows)
+        if path.exists():
+            new = pd.concat([pd.read_parquet(path), new], ignore_index=True)
+        _write_atomic(new, path)
+    return path
+
+
+def load_ticks(symbol: str, day: str) -> pd.DataFrame:
+    path = SETTINGS.data_dir / "ticks" / symbol / f"{day}.parquet"
+    return pd.read_parquet(path) if path.exists() else pd.DataFrame()
+
+
 def append_tape(symbol: str, rows: list[dict], ts: datetime) -> Path:
     """Ajoute des barres d'order flow signé (1 min) au fichier du jour.
 

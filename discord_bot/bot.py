@@ -556,6 +556,35 @@ async def pin_cmd(ctx: commands.Context, symbole: str | None = None,
     await ctx.send("\n".join(lignes))
 
 
+@bot.command(name="tick")
+async def tick_cmd(ctx: commands.Context, symbole: str | None = None,
+                   date: str | None = None) -> None:
+    """`!tick NQ` (ou `!tick ES 2026-08-01`) — fenêtre de clôture au tick
+    (21h45-22h05) : range avant/après 22h, expansion, excursions."""
+    if not symbole:
+        await ctx.send("Usage : `!tick NQ` (ou `!tick ES 2026-08-01`). "
+                       "Capture 21h45-22h05, compte courtier requis.")
+        return
+    sym = symbole.upper()
+    path = f"/api/v1/{sym}/tick_context" + (f"?date={date}" if date else "")
+    d = fetch(path)
+    if not d or not d.get("available"):
+        raison = (d or {}).get("reason", "dashboard injoignable")
+        await ctx.send(f"Ticks indisponibles pour {sym} ({raison}).")
+        return
+    lignes = [
+        f"**{sym}** — fenêtre de clôture ({d.get('date')}) · {d.get('n_ticks')} ticks",
+        f"Range {d.get('range')} (haut {d.get('high')} / bas {d.get('low')})",
+    ]
+    if d.get("post_range") is not None:
+        exp = f" (×{d.get('post_expansion')})" if d.get("post_expansion") else ""
+        lignes.append(f"Avant 22h : range {d.get('pre_range')} · après : "
+                      f"range {d.get('post_range')}{exp}")
+        lignes.append(f"Excursion post-clôture depuis {d.get('close_2200')} : "
+                      f"+{d.get('post_max_up')} / −{d.get('post_max_down')}")
+    await ctx.send("\n".join(lignes))
+
+
 @bot.command(name="setup")
 async def setup_cmd(ctx: commands.Context, *, valeur: str | None = None) -> None:
     """`!setup MOC A` (ou `!setup NONE`) — tag le setup MOC du jour.
@@ -665,6 +694,7 @@ async def aide(ctx: commands.Context) -> None:
     e.add_field(
         name="🔬 Recherche (journal du labo)",
         value=("`!pin QQQ` — pinning de clôture (collé sur un strike ? mur GEX ?).\n"
+               "`!tick NQ` — fenêtre de clôture au tick (range avant/après 22h).\n"
                "`!setup MOC A` (ou `!setup NONE`) — tag ton setup MOC du jour.\n"
                "`!hypo <hypothèse>` — consigne une hypothèse à tester.\n"
                "`!note <observation>` — une observation. `!note` seul liste les "
