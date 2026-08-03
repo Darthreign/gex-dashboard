@@ -432,11 +432,16 @@ class RealtimeQuotes:
                     px = item.get("price")
                     if isinstance(px, (int, float)) and px == px:
                         t.last = float(px)
-                        # Capture tick de clôture : négligeable hors fenêtre
-                        # (TICKREC.record sort aussitôt si inactif). Seul le flux
-                        # temps réel arme la fenêtre (cf. scheduler), le repli
-                        # public délayé reste donc inerte.
-                        TICKREC.record(key, now, float(px), t.bid, t.ask)
+                        # Capture tick de clôture — STRICTEMENT best-effort :
+                        # négligeable hors fenêtre (record sort aussitôt si
+                        # inactif), et enveloppée pour qu'un pépin de capture ne
+                        # puisse JAMAIS perturber le flux temps réel (le dashboard
+                        # doit rester en direct). Seul le flux temps réel arme la
+                        # fenêtre (cf. scheduler) ; le repli public reste inerte.
+                        try:
+                            TICKREC.record(key, now, float(px), t.bid, t.ask)
+                        except Exception:  # noqa: BLE001 — capture jamais bloquante
+                            pass
                 t.ts = now
                 self._accumulate(key, t.price, minute)
 
