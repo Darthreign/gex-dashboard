@@ -87,7 +87,7 @@ def test_exemple_4_orange_vix_haut_malgre_gamma_positif():
     d = digest.build_digest(rows, vix=18.5)
     assert d.color == "orange"
     assert "forte amplitude" in d.verdict.lower()
-    assert d.vix_line == "VIX supérieur à 16 ! (actuellement 18.5)"
+    assert d.vix_line == "VIX supérieur à 16 ! (actuellement 18.50)"
     assert any("Delta Négatif (Dealers short gamma) sur QQQ" in ln for ln in d.lines)
 
 

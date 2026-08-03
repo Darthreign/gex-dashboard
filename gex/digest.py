@@ -162,7 +162,7 @@ def build_digest(rows: list[dict], vix: float | None = None,
     for (gamma, delta, gloss), syms in groupes.items():
         lines.append(f"{gamma} - {delta} ({gloss}) sur {_liste(syms)}")
 
-    vix_line = (f"VIX supérieur à {int(vix_seuil)} ! (actuellement {vix:.1f})"
+    vix_line = (f"VIX supérieur à {int(vix_seuil)} ! (actuellement {vix:.2f})"
                 if vix is not None and vix > vix_seuil else None)
 
     color, verdict, familles = _verdict(etats, vix, vix_seuil)
