@@ -46,7 +46,8 @@ PARIS = ZoneInfo("Europe/Paris")
 SYMBOLS = ("SPX", "SPY", "NDX", "QQQ", "ES", "NQ")
 
 # Seuils — configurables, valeurs par défaut calées sur les exemples.
-VIX_SEUIL = 16.0          # au-dessus : bascule au moins en orange + amplitude
+VIX_SEUIL = 16.0          # au-dessus : ligne d'alerte « fin du confort » (info)
+VIX_IMPACT = 20.0         # au-dessus : force au moins l'orange (VIX vraiment élevé)
 
 # Paliers de régime VIX (borne SUP exclue, label, emoji) — le dernier attrape le
 # reste. « élevé » commence vraiment vers 20 (au-dessus de la moyenne long
@@ -274,8 +275,12 @@ def _verdict(etats: dict[str, dict], vix: float | None,
     symboles) plus le VIX :
 
     - rouge  : les 2 familles négatives, OU une famille en fort négatif ;
-    - orange : 1 famille négative, OU VIX au-dessus du seuil ;
+    - orange : 1 famille négative, OU VIX vraiment élevé (≥ VIX_IMPACT = 20) ;
     - vert   : sinon.
+
+    Le VIX ne force la couleur qu'à partir de VIX_IMPACT (20, « élevé ») : entre
+    VIX_SEUIL (16) et 20, la ligne d'alerte s'affiche (fin du confort) mais un
+    verdict sain reste vert. `vix_seuil` (info) n'entre donc pas dans la couleur.
 
     Retourne aussi le détail par famille (pour la confiance et la signature).
     """
@@ -287,7 +292,7 @@ def _verdict(etats: dict[str, dict], vix: float | None,
 
     n_neg = sum(1 for f in familles.values() if f["statut"] in ("neg", "fort_neg"))
     fort = any(f["statut"] == "fort_neg" for f in familles.values())
-    vix_haut = vix is not None and vix > vix_seuil
+    vix_haut = vix is not None and vix >= VIX_IMPACT
 
     if fort or n_neg >= 2:
         return "red", "Trading contrarient déconseillé sur session US.", familles
