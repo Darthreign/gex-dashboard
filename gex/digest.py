@@ -47,6 +47,18 @@ SYMBOLS = ("SPX", "SPY", "NDX", "QQQ", "ES", "NQ")
 
 # Seuils — configurables, valeurs par défaut calées sur les exemples.
 VIX_SEUIL = 16.0          # au-dessus : bascule au moins en orange + amplitude
+
+# Paliers de régime VIX (borne SUP exclue, label, emoji) — le dernier attrape le
+# reste. « élevé » commence vraiment vers 20 (au-dessus de la moyenne long
+# terme) ; 16 (= VIX_SEUIL) n'est que la « fin du confort », pas « élevé ».
+VIX_GRADES = (
+    (12.0, "Complaisance", "😴"),
+    (16.0, "Calme", "🟢"),
+    (20.0, "Normal-haut", "🟡"),
+    (25.0, "Élevé", "🟠"),
+    (35.0, "Stress", "🔴"),
+    (float("inf"), "Panique", "🚨"),
+)
 FORT_PERCENTILE = 0.67    # |net_gex| dans le tiers supérieur de son historique
 FORT_MIN_HISTORY = 20     # sans assez d'historique, pas de « Fort » deviné
 
@@ -92,6 +104,16 @@ class Digest:
     @property
     def discord_color(self) -> int:
         return COLORS[self.color]
+
+
+def vix_grade(vix: float | None) -> dict | None:
+    """Régime du VIX (label + emoji) selon VIX_GRADES. None si VIX inconnu."""
+    if vix is None:
+        return None
+    for sup, label, emoji in VIX_GRADES:
+        if vix < sup:
+            return {"label": label, "emoji": emoji}
+    return {"label": VIX_GRADES[-1][1], "emoji": VIX_GRADES[-1][2]}
 
 
 def _header(now: datetime) -> str:

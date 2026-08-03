@@ -98,6 +98,17 @@ def test_fort_exige_de_l_historique():
     assert d.lines[0].startswith("Gamma Négatif -")
 
 
+def test_vix_grade_paliers():
+    """Le VIX est gradé : 16 (= seuil) est 'Calme', 'Élevé' commence à 20."""
+    assert digest.vix_grade(10)["label"] == "Complaisance"
+    assert digest.vix_grade(14)["label"] == "Calme"
+    assert digest.vix_grade(16)["label"] == "Normal-haut"   # 16 = fin du confort
+    assert digest.vix_grade(22)["label"] == "Élevé"
+    assert digest.vix_grade(30)["label"] == "Stress"
+    assert digest.vix_grade(50)["label"] == "Panique"
+    assert digest.vix_grade(None) is None
+
+
 def test_header_paris_avec_offset():
     now = datetime(2026, 7, 30, 6, 30, tzinfo=ZoneInfo("UTC"))   # 08h30 Paris (CEST)
     d = digest.build_digest([_row("SPX", +1e9, +1e9)], vix=12.0, now=now)

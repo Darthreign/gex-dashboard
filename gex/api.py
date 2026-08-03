@@ -359,7 +359,8 @@ def register_api(app) -> None:
             return jsonify({"available": False})
         return jsonify({"available": True, "vix": round(float(v), 2),
                         "seuil": digest_mod.VIX_SEUIL,
-                        "above": bool(v > digest_mod.VIX_SEUIL)})
+                        "above": bool(v > digest_mod.VIX_SEUIL),
+                        "grade": digest_mod.vix_grade(float(v))})
 
     @server.route("/api/v1/digest")
     def _digest():

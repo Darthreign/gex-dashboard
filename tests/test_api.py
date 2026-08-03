@@ -102,6 +102,7 @@ def test_vix_endpoint(monkeypatch):
     body = r.get_json()
     assert body["available"] is True and body["vix"] == 16.5
     assert body["seuil"] == digest.VIX_SEUIL and body["above"] is True
+    assert body["grade"]["label"] == "Normal-haut"      # 16.5 -> régime gradé
     # indisponible -> available False
     monkeypatch.setattr(digest, "_current_vix", lambda: None)
     assert _client().get("/api/v1/vix").get_json()["available"] is False
