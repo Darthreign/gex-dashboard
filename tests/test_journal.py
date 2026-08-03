@@ -98,17 +98,39 @@ def test_poll_cycle_et_votes_bruts(conn):
     assert journal.polls_a_depouiller(conn, "2026-08-04T11:59:00+02:00") == []
     due = journal.polls_a_depouiller(conn, "2026-08-04T12:00:00+02:00")
     assert [r["message_id"] for r in due] == ["42"]
-    # dépouillement : on stocke les votes BRUTS (comptages), pas un booléen
+    # dépouillement : on stocke les votes BRUTS (comptages), une colonne/option
     journal.poll_tally(conn, date=d,
                        counts={"q1_directionnel": 7, "q1_retracement": 2,
-                               "q3_b4": 3, "q4_repr_low": 1},
+                               "q2_neutre": 4, "q3_dir_oui": 5,
+                               "q4_avant_1615": 3, "q5_b4": 3, "q6_repr_low": 1},
                        tallied_ts="2026-08-04T12:00:00+02:00")
     row = conn.execute("SELECT * FROM polls WHERE date=?", (d,)).fetchone()
-    assert row["q1_directionnel"] == 7 and row["q1_retracement"] == 2
-    assert row["q3_b4"] == 3 and row["q4_repr_low"] == 1
+    assert row["q1_directionnel"] == 7 and row["q2_neutre"] == 4
+    assert row["q3_dir_oui"] == 5 and row["q4_avant_1615"] == 3
+    assert row["q5_b4"] == 3 and row["q6_repr_low"] == 1
     assert row["tallied_ts"] is not None
     # une fois dépouillé, il ne ressort plus
     assert journal.polls_a_depouiller(conn, "2026-08-05T12:00:00+02:00") == []
+
+
+def test_migration_ajoute_colonnes_sondage_manquantes(tmp_path):
+    """Une base créée avec un vieux schéma de `polls` (sans les nouvelles
+    options) reçoit les colonnes manquantes à l'ouverture, sans rien perdre."""
+    import sqlite3
+    p = tmp_path / "old.sqlite"
+    old = sqlite3.connect(str(p))
+    old.execute("CREATE TABLE polls (date TEXT PRIMARY KEY, message_id TEXT, "
+                "posted_ts TEXT, tally_due_ts TEXT, tallied_ts TEXT, "
+                "q1_directionnel INTEGER)")   # schéma incomplet
+    old.execute("INSERT INTO polls (date, message_id, posted_ts, tally_due_ts) "
+                "VALUES ('2026-08-03','1','x','y')")
+    old.commit(); old.close()
+    conn = journal.connect(p)                 # doit ajouter les colonnes manquantes
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(polls)")}
+    assert {"q2_neutre", "q3_dir_oui", "q4_apres_1615", "q5_b1"} <= cols
+    # la donnée existante est intacte
+    assert conn.execute("SELECT message_id FROM polls").fetchone()["message_id"] == "1"
+    conn.close()
 
 
 def test_poll_open_ne_duplique_pas(conn):

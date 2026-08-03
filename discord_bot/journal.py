@@ -52,10 +52,15 @@ CREATE TABLE IF NOT EXISTS polls (
     posted_ts       TEXT NOT NULL,
     tally_due_ts    TEXT NOT NULL,         -- quand dépouiller (J+1 12h)
     tallied_ts      TEXT,                  -- NULL tant que non dépouillé
+    -- Comptages par option (une colonne = une réaction). Bornées et stables :
+    -- des colonnes = lisibles/triables d'un coup d'œil (1 ligne/jour). Doit
+    -- rester aligné avec POLL_COUNT_COLS + POLL_QUESTIONS (côté bot).
     q1_directionnel INTEGER, q1_retracement INTEGER,   -- 😰 / 🧘
-    q2_haussier     INTEGER, q2_baissier    INTEGER,   -- 📈 / 📉
-    q3_b1 INTEGER, q3_b2 INTEGER, q3_b3 INTEGER, q3_b4 INTEGER,  -- 1️⃣..4️⃣
-    q4_repr_high    INTEGER, q4_repr_mid INTEGER, q4_repr_low INTEGER  -- 🎯/😐/🤷
+    q2_haussier INTEGER, q2_baissier INTEGER, q2_neutre INTEGER,   -- 📈 / 📉 / ➡️
+    q3_dir_oui INTEGER, q3_dir_non INTEGER,            -- ✅ / ❌ (phase directionnelle ?)
+    q4_avant_1615 INTEGER, q4_apres_1615 INTEGER,      -- 🌅 / 🌆 (à partir de quand)
+    q5_b1 INTEGER, q5_b2 INTEGER, q5_b3 INTEGER, q5_b4 INTEGER,  -- 1️⃣..4️⃣ (ampleur)
+    q6_repr_high INTEGER, q6_repr_mid INTEGER, q6_repr_low INTEGER  -- 🎯/😐/🤷
 );
 
 CREATE TABLE IF NOT EXISTS heatmaps (
@@ -115,6 +120,18 @@ LOG_TYPES = ("hypothesis", "observation", "conclusion", "decision", "idea", "bug
 # Nom de métrique réservé au tag métier « setup MOC » du jour (cf. set_setup).
 SETUP_METRIC = "setup_moc"
 
+# Colonnes de comptage du sondage (une par réaction), dans l'ordre d'affichage.
+# Source de vérité pour la table `polls` ET la migration. Doit rester alignée
+# avec POLL_QUESTIONS côté bot (mêmes clés = mêmes colonnes).
+POLL_COUNT_COLS = (
+    "q1_directionnel", "q1_retracement",
+    "q2_haussier", "q2_baissier", "q2_neutre",
+    "q3_dir_oui", "q3_dir_non",
+    "q4_avant_1615", "q4_apres_1615",
+    "q5_b1", "q5_b2", "q5_b3", "q5_b4",
+    "q6_repr_high", "q6_repr_mid", "q6_repr_low",
+)
+
 
 def connect(db_path: str | Path) -> sqlite3.Connection:
     """Ouvre (et crée au besoin) la base, schéma garanti présent."""
@@ -125,8 +142,22 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")   # lectures concurrentes sereines
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA)
+    _ensure_poll_columns(conn)
     conn.commit()
     return conn
+
+
+def _ensure_poll_columns(conn: sqlite3.Connection) -> None:
+    """Ajoute au besoin les colonnes de comptage manquantes à `polls`.
+
+    Le sondage évolue rarement, mais quand il change on ajoute une colonne : sur
+    une base déjà créée, `CREATE TABLE IF NOT EXISTS` ne suffit pas, d'où ce
+    petit ALTER idempotent (non destructif : colonnes nullables, données
+    intactes). Zéro migration à écrire à la main."""
+    existing = {r["name"] for r in conn.execute("PRAGMA table_info(polls)")}
+    for col in POLL_COUNT_COLS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE polls ADD COLUMN {col} INTEGER")
 
 
 # --------------------------------------------------------------------------
@@ -240,12 +271,6 @@ def compute_reason(prev: sqlite3.Row | dict | None, color: str,
 # Sondage
 # --------------------------------------------------------------------------
 
-# Colonnes de comptage du sondage, dans l'ordre d'affichage / des réactions.
-POLL_COLS = ("q1_directionnel", "q1_retracement", "q2_haussier", "q2_baissier",
-             "q3_b1", "q3_b2", "q3_b3", "q3_b4",
-             "q4_repr_high", "q4_repr_mid", "q4_repr_low")
-
-
 def poll_posted(conn: sqlite3.Connection, date: str) -> bool:
     """Un sondage a-t-il déjà été posté pour ce jour ? (anti-doublon)"""
     return conn.execute("SELECT 1 FROM polls WHERE date=? LIMIT 1",
@@ -270,13 +295,10 @@ def polls_a_depouiller(conn: sqlite3.Connection, now_ts: str) -> list[sqlite3.Ro
 
 def poll_tally(conn: sqlite3.Connection, *, date: str, counts: dict[str, int],
                tallied_ts: str) -> None:
-    """Écrit les comptages de réactions et marque le sondage dépouillé.
-
-    `counts` : dict {colonne: nombre} pour tout ou partie de POLL_COLS. Les
-    votes BRUTS sont conservés (pas un booléen dérivé) : tu pourras redéfinir
-    un seuil plus tard et recalculer.
-    """
-    cols = [c for c in POLL_COLS if c in counts]
+    """Écrit les comptages de réactions (une colonne par option) et marque le
+    sondage dépouillé. `counts` : dict {colonne: nombre}. Votes BRUTS conservés
+    (pas un booléen) : tu pourras redéfinir un seuil et recalculer."""
+    cols = [c for c in POLL_COUNT_COLS if c in counts]   # whitelist = pas d'injection
     sets = ", ".join(f"{c}=?" for c in cols) + ", tallied_ts=?"
     values = [int(counts[c]) for c in cols] + [tallied_ts, date]
     conn.execute(f"UPDATE polls SET {sets} WHERE date=?", values)

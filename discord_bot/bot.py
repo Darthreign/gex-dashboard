@@ -81,13 +81,35 @@ HEATMAP_SLOTS = {(15, 30): "15h30", (16, 0): "16h00", (18, 0): "18h00", (22, 0):
 HEATMAP_SYMBOLS = ("SPX", "SPY", "NDX", "QQQ", "ES", "NQ")
 CONTEXT_SYMBOLS = ("NQ", "ES", "SPX", "NDX")   # vérité-marché pour daily_metrics
 POLL_POST = (23, 5)                            # heure de post du sondage (Lun-Ven)
-# Réaction -> colonne de comptage (ordre = ordre d'amorçage des réactions).
-POLL_EMOJIS = {
-    "😰": "q1_directionnel", "🧘": "q1_retracement",
-    "📈": "q2_haussier", "📉": "q2_baissier",
-    "1️⃣": "q3_b1", "2️⃣": "q3_b2", "3️⃣": "q3_b3", "4️⃣": "q3_b4",
-    "🎯": "q4_repr_high", "😐": "q4_repr_mid", "🤷": "q4_repr_low",
-}
+# LE sondage, défini une seule fois : (titre, [(emoji, colonne, libellé), …]).
+# Ajouter/retirer une question = éditer ceci (+ la colonne côté journal). Les
+# clés de colonne doivent matcher journal.POLL_COUNT_COLS.
+POLL_QUESTIONS = (
+    ("1. La journée a-t-elle été directionnelle ?", [
+        ("😰", "q1_directionnel", "Oui, pas de retour"),
+        ("🧘", "q1_retracement", "Non, on a eu des retracements (même petits)")]),
+    ("2. L'ouverture a été :", [
+        ("📈", "q2_haussier", "Haussière"),
+        ("📉", "q2_baissier", "Baissière"),
+        ("➡️", "q2_neutre", "Sans direction franche")]),
+    ("3. Y a-t-il eu une phase directionnelle ?", [
+        ("✅", "q3_dir_oui", "Oui"),
+        ("❌", "q3_dir_non", "Non")]),
+    ("4. Si oui, à partir de quand ?", [
+        ("🌅", "q4_avant_1615", "Avant 16h15"),
+        ("🌆", "q4_apres_1615", "Après 16h15")]),
+    ("5. Ampleur du mouvement ? *(NQ pts / ES pts)*", [
+        ("1️⃣", "q5_b1", "100-200 / 25-50"),
+        ("2️⃣", "q5_b2", "200-400 / 50-100"),
+        ("3️⃣", "q5_b3", "400-600 / 100-150"),
+        ("4️⃣", "q5_b4", "600+ / 150+")]),
+    ("6. Le régime affiché t'a semblé…", [
+        ("🎯", "q6_repr_high", "Très représentatif"),
+        ("😐", "q6_repr_mid", "Moyen"),
+        ("🤷", "q6_repr_low", "Peu représentatif")]),
+)
+# Réaction -> colonne (dérivé ; l'ordre = ordre d'amorçage des réactions).
+POLL_EMOJIS = {emoji: col for _, opts in POLL_QUESTIONS for emoji, col, _ in opts}
 
 _last_signature: tuple | None = None
 _last_digest: dict | None = None      # dernier digest, pour la raison d'un changement
@@ -219,16 +241,10 @@ def _poll_embed(now) -> discord.Embed:
         description="Un clic par question. Dépouillé demain à 12h — vos réponses "
                     "nourrissent la base d'étude.",
         color=0x3498DB)
-    e.add_field(name="1. La journée a-t-elle été directionnelle ?",
-                value="😰 Oui, pas de retour\n🧘 Non, on a eu des retracements (même petits)",
-                inline=False)
-    e.add_field(name="2. Ouverture franchement directionnelle ?",
-                value="📈 Haussière\n📉 Baissière", inline=False)
-    e.add_field(name="3. Ampleur du mouvement ? *(NQ pts / ES pts)*",
-                value="1️⃣ 100-200 / 25-50\n2️⃣ 200-400 / 50-100\n"
-                      "3️⃣ 400-600 / 100-150\n4️⃣ 600+ / 150+", inline=False)
-    e.add_field(name="4. Le régime affiché t'a semblé…",
-                value="🎯 Très représentatif\n😐 Moyen\n🤷 Peu représentatif", inline=False)
+    for titre, opts in POLL_QUESTIONS:
+        e.add_field(name=titre,
+                    value="\n".join(f"{emoji} {label}" for emoji, _, label in opts),
+                    inline=False)
     return e
 
 
@@ -311,12 +327,17 @@ def _build_daily_metrics(date: str) -> None:
     if p:
         _poll_ratio(jc, date, "poll_directionnel_ratio", p["q1_directionnel"], p["q1_retracement"])
         _poll_ratio(jc, date, "poll_haussier_ratio", p["q2_haussier"], p["q2_baissier"])
-        _poll_ratio(jc, date, "poll_representatif_ratio", p["q4_repr_high"],
-                    (p["q4_repr_mid"] or 0) + (p["q4_repr_low"] or 0))
-        buckets = {b: p[f"q3_b{b}"] for b in (1, 2, 3, 4) if p[f"q3_b{b}"]}
+        _poll_ratio(jc, date, "poll_phase_dir_ratio", p["q3_dir_oui"], p["q3_dir_non"])
+        _poll_ratio(jc, date, "poll_representatif_ratio", p["q6_repr_high"],
+                    (p["q6_repr_mid"] or 0) + (p["q6_repr_low"] or 0))
+        buckets = {b: p[f"q5_b{b}"] for b in (1, 2, 3, 4) if p[f"q5_b{b}"]}
         if buckets:
             journal.set_metric(jc, date=date, name="poll_amplitude_bucket",
                                value_num=max(buckets, key=buckets.get))
+        av, ap = p["q4_avant_1615"] or 0, p["q4_apres_1615"] or 0
+        if av or ap:                      # heure de la phase directionnelle
+            journal.set_metric(jc, date=date, name="poll_phase_heure",
+                               value_txt="avant_1615" if av >= ap else "apres_1615")
     log.info("daily_metrics construites (%s)", date)
 
 
