@@ -81,13 +81,13 @@ def test_exemple_3_rouge_fort_gamma_negatif():
 
 
 def test_exemple_4_orange_vix_haut_malgre_gamma_positif():
-    """Tout Gamma+ mais VIX>17 → orange + forte amplitude."""
+    """Tout Gamma+ mais VIX>seuil → orange + forte amplitude."""
     rows = [_row(s, +1e9, +1e9) for s in ("SPX", "SPY", "NDX", "ES", "NQ")]
     rows.append(_row("QQQ", +1e9, -1e9))
     d = digest.build_digest(rows, vix=18.5)
     assert d.color == "orange"
     assert "forte amplitude" in d.verdict.lower()
-    assert d.vix_line == "VIX supérieur à 17 ! (actuellement 18.5)"
+    assert d.vix_line == "VIX supérieur à 16 ! (actuellement 18.5)"
     assert any("Delta Négatif (Dealers short gamma) sur QQQ" in ln for ln in d.lines)
 
 

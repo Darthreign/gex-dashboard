@@ -46,7 +46,7 @@ PARIS = ZoneInfo("Europe/Paris")
 SYMBOLS = ("SPX", "SPY", "NDX", "QQQ", "ES", "NQ")
 
 # Seuils — configurables, valeurs par défaut calées sur les exemples.
-VIX_SEUIL = 17.0          # au-dessus : bascule au moins en orange + amplitude
+VIX_SEUIL = 16.0          # au-dessus : bascule au moins en orange + amplitude
 FORT_PERCENTILE = 0.67    # |net_gex| dans le tiers supérieur de son historique
 FORT_MIN_HISTORY = 20     # sans assez d'historique, pas de « Fort » deviné
 
