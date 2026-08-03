@@ -94,18 +94,28 @@ Ce qui est capturé :
 - **Tag métier `setup_MOC`** (`!setup`) : est-ce qu'un setup MOC existait ce
   jour-là, selon tes règles ? Info **non recalculable** — c'est ce qui permet
   d'étudier « quand *ma stratégie* marche », pas seulement le marché.
-- **`research_notes`** : la mémoire du labo (`!note`) — les hypothèses testées
-  et leur statut (pending / confirmed / refuted). Dans un an, ça dira *pourquoi*
-  telle donnée existe et si elle a été tranchée.
+- **`research_log`** : la mémoire du labo (`!hypo`, `!note`) — hypothèses,
+  observations, conclusions, décisions, bugs. Colonnes `type`, `status`,
+  `author` (capté automatiquement) et `linked_date` (la séance concernée, ≠ le
+  jour où c'est écrit). Dans un an, ça dira *pourquoi* telle donnée existe et si
+  elle a été tranchée.
 - **`daily_metrics`** : quelques agrégats au format long (extensible sans
   migration) pour une lecture facile.
 
-**Principe assumé : brut compact + métriques à la demande.** On conserve le
-brut riche (bougies 1 min déjà en Parquet, événements de régime, snapshots de
-chaîne, tags métier) et on **recalcule** les métriques dérivées quand une
-hypothèse arrive — plutôt que d'empiler des dizaines de colonnes dont la moitié
-ne servira jamais. Les timings de régime à la clôture, les stats de la fenêtre
-MOC, etc. se calculent ainsi *à la demande* depuis le brut, sans être figés.
+**La règle d'architecture, en une phrase :**
+
+> **Recalculable → pas stocké. Perdu si non saisi → stocké.**
+
+Trois catégories, gérées différemment :
+
+1. **Sources immuables** (à conserver, non recréables) : snapshots GEX,
+   régimes horodatés, bougies, résultats du sondage, heatmaps, `setup_MOC`,
+   `research_log`.
+2. **Dérivés** (calculables, *non* stockés sauf coût prohibitif) : durée d'un
+   régime, `pin_ratio`, range 21h50-22h00, impulsion, minutes depuis le dernier
+   changement… recalculés **à la demande** depuis les sources.
+3. **Données humaines** (irremplaçables, grande valeur) : `setup_MOC`, notes,
+   votes du sondage — ce qu'aucun calcul ne retrouvera jamais.
 
 > Le bot lit ces analyses via l'API locale du dashboard — il ne voit toujours
 > aucune donnée brute d'options. La base reste **strictement locale** (usage

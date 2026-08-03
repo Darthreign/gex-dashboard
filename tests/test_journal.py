@@ -179,15 +179,22 @@ def test_setup_moc_tag(conn):
     assert journal.get_setup(conn, d) == "NONE"
 
 
-def test_research_notes(conn):
-    n1 = journal.add_note(conn, hypothesis="Le Rouge Fort produit un pinning plus fort",
-                          created="2026-08-03T23:00:00+02:00", date="2026-08-03")
-    journal.add_note(conn, hypothesis="Les flips <2min avant 22h explosent après",
-                     created="2026-08-04T23:00:00+02:00")
-    assert {r["status"] for r in journal.list_notes(conn)} == {"pending"}
-    journal.set_note_status(conn, n1, "confirmed", note="180 séances")
-    row = next(r for r in journal.list_notes(conn) if r["id"] == n1)
+def test_research_log(conn):
+    # hypothèse liée à une séance passée, avec auteur
+    h = journal.add_entry(conn, text="Le Rouge Fort produit un pinning plus fort",
+                          created="2026-08-20T23:00:00+02:00", type="hypothesis",
+                          author="Emilien", linked_date="2026-08-15")
+    journal.add_entry(conn, text="Marche surtout le vendredi",
+                      created="2026-08-21T10:00:00+02:00", type="observation",
+                      author="Collègue")
+    row = next(r for r in journal.list_entries(conn) if r["id"] == h)
+    assert row["type"] == "hypothesis" and row["author"] == "Emilien"
+    assert row["linked_date"] == "2026-08-15"          # séance ≠ jour d'écriture
+    # filtres : par type, par auteur, par statut
+    assert [r["id"] for r in journal.list_entries(conn, type="hypothesis")] == [h]
+    assert {r["author"] for r in journal.list_entries(conn, author="Collègue")} == {"Collègue"}
+    journal.set_entry_status(conn, h, "confirmed", note="180 séances")
+    row = next(r for r in journal.list_entries(conn) if r["id"] == h)
     assert row["status"] == "confirmed" and row["note"] == "180 séances"
-    assert [r["id"] for r in journal.list_notes(conn, status="pending")] != []
     assert all(r["status"] == "confirmed"
-               for r in journal.list_notes(conn, status="confirmed"))
+               for r in journal.list_entries(conn, status="confirmed"))

@@ -92,17 +92,25 @@ CREATE TABLE IF NOT EXISTS daily_metrics (
     PRIMARY KEY (date, symbol, metric_name)
 );
 
--- Mémoire du labo : les hypothèses qu'on teste, et leur statut. Dans un an,
--- c'est ce qui dira POURQUOI telle donnée existe et si elle a été tranchée.
-CREATE TABLE IF NOT EXISTS research_notes (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    created    TEXT NOT NULL,
-    date       TEXT,                 -- séance concernée (optionnel)
-    hypothesis TEXT NOT NULL,
-    status     TEXT NOT NULL DEFAULT 'pending',   -- pending | confirmed | refuted
-    note       TEXT
+-- Mémoire du labo : hypothèses, observations, conclusions, décisions, bugs…
+-- Dans un an, c'est ce qui dira POURQUOI telle donnée existe et si elle a été
+-- tranchée. `linked_date` = la séance CONCERNÉE (≠ `created`, quand c'est
+-- écrit) ; `author` capturé automatiquement pour distinguer les traders sans
+-- migration future.
+CREATE TABLE IF NOT EXISTS research_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    created     TEXT NOT NULL,
+    linked_date TEXT,                 -- séance concernée (optionnel)
+    author      TEXT NOT NULL DEFAULT 'Emilien',
+    type        TEXT NOT NULL DEFAULT 'note',   -- hypothesis|observation|conclusion|decision|idea|bug|note
+    text        TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'pending',   -- pending | confirmed | refuted (surtout pour hypothesis)
+    note        TEXT
 );
 """
+
+# Types d'entrées du journal de recherche (indicatif, la colonne reste libre).
+LOG_TYPES = ("hypothesis", "observation", "conclusion", "decision", "idea", "bug", "note")
 
 # Nom de métrique réservé au tag métier « setup MOC » du jour (cf. set_setup).
 SETUP_METRIC = "setup_moc"
@@ -356,33 +364,38 @@ def get_setup(conn: sqlite3.Connection, date: str) -> str | None:
     return get_metric(conn, date, SETUP_METRIC)
 
 
-def add_note(conn: sqlite3.Connection, *, hypothesis: str, created: str,
-             date: str | None = None, status: str = "pending",
-             note: str | None = None) -> int:
-    """Consigne une hypothèse de recherche. Renvoie son id."""
+def add_entry(conn: sqlite3.Connection, *, text: str, created: str,
+              type: str = "note", author: str = "Emilien",
+              linked_date: str | None = None, status: str = "pending",
+              note: str | None = None) -> int:
+    """Consigne une entrée du journal de recherche. Renvoie son id."""
     cur = conn.execute(
-        "INSERT INTO research_notes (created, date, hypothesis, status, note) "
-        "VALUES (?,?,?,?,?)", (created, date, hypothesis, status, note))
+        "INSERT INTO research_log (created, linked_date, author, type, text, status, note) "
+        "VALUES (?,?,?,?,?,?,?)", (created, linked_date, author, type, text, status, note))
     conn.commit()
     return int(cur.lastrowid)
 
 
-def list_notes(conn: sqlite3.Connection,
-               status: str | None = None) -> list[sqlite3.Row]:
-    if status:
-        return conn.execute("SELECT * FROM research_notes WHERE status=? "
-                            "ORDER BY id DESC", (status,)).fetchall()
-    return conn.execute("SELECT * FROM research_notes ORDER BY id DESC").fetchall()
+def list_entries(conn: sqlite3.Connection, *, type: str | None = None,
+                 status: str | None = None,
+                 author: str | None = None) -> list[sqlite3.Row]:
+    q, where, args = "SELECT * FROM research_log", [], []
+    for col, val in (("type", type), ("status", status), ("author", author)):
+        if val:
+            where.append(f"{col}=?")
+            args.append(val)
+    if where:
+        q += " WHERE " + " AND ".join(where)
+    return conn.execute(q + " ORDER BY id DESC", args).fetchall()
 
 
-def set_note_status(conn: sqlite3.Connection, note_id: int, status: str,
-                    note: str | None = None) -> None:
+def set_entry_status(conn: sqlite3.Connection, entry_id: int, status: str,
+                     note: str | None = None) -> None:
     if note is None:
-        conn.execute("UPDATE research_notes SET status=? WHERE id=?",
-                     (status, note_id))
+        conn.execute("UPDATE research_log SET status=? WHERE id=?", (status, entry_id))
     else:
-        conn.execute("UPDATE research_notes SET status=?, note=? WHERE id=?",
-                     (status, note, note_id))
+        conn.execute("UPDATE research_log SET status=?, note=? WHERE id=?",
+                     (status, note, entry_id))
     conn.commit()
 
 

@@ -35,6 +35,7 @@ import io
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -543,26 +544,49 @@ async def setup_cmd(ctx: commands.Context, *, valeur: str | None = None) -> None
     await ctx.send(f"✅ Setup du {now:%d/%m} enregistré : **{v}**.")
 
 
-@bot.command(name="note", aliases=["hypo"])
-async def note_cmd(ctx: commands.Context, *, texte: str | None = None) -> None:
-    """`!note <hypothèse>` — consigne une hypothèse de recherche (mémoire du
-    labo). Sans argument : liste les 10 dernières."""
+def _split_linked_date(texte: str) -> tuple[str | None, str]:
+    """Détache une éventuelle date AAAA-MM-JJ en tête (séance concernée)."""
+    m = re.match(r"\s*(\d{4}-\d{2}-\d{2})\s+(.*)", texte, re.DOTALL)
+    return (m.group(1), m.group(2).strip()) if m else (None, texte.strip())
+
+
+async def _add_log(ctx, texte: str | None, type_: str) -> None:
+    """Cœur commun de `!note` et `!hypo` : liste si vide, sinon consigne."""
     jc = _journal()
     if jc is None:
         await ctx.send("Journal indisponible.")
         return
     if not texte:
-        rows = journal.list_notes(jc)[:10]
+        rows = journal.list_entries(jc)[:10]
         if not rows:
-            await ctx.send("Aucune note. `!note <hypothèse>` pour en ajouter une.")
+            await ctx.send("Journal vide. `!note <texte>` ou `!hypo <hypothèse>` "
+                           "pour commencer.")
             return
-        lignes = [f"#{r['id']} [{r['status']}] {r['hypothesis']}" for r in rows]
-        await ctx.send("**Notes de recherche :**\n" + "\n".join(lignes))
+        lignes = [f"#{r['id']} [{r['type']}/{r['status']}] {r['text']} "
+                  f"— *{r['author']}*" for r in rows]
+        await ctx.send("**Journal de recherche :**\n" + "\n".join(lignes))
         return
+    linked, texte = _split_linked_date(texte)
     now = dt.datetime.now(PARIS)
-    nid = journal.add_note(jc, hypothesis=texte.strip(), created=now.isoformat(),
-                           date=now.date().isoformat())
-    await ctx.send(f"📝 Note #{nid} consignée (pending) : « {texte.strip()} »")
+    nid = journal.add_entry(jc, text=texte, created=now.isoformat(), type=type_,
+                            author=ctx.author.display_name,
+                            linked_date=linked or now.date().isoformat())
+    quand = f" (séance {linked})" if linked else ""
+    await ctx.send(f"📝 #{nid} [{type_}]{quand} : « {texte} » — *{ctx.author.display_name}*")
+
+
+@bot.command(name="note")
+async def note_cmd(ctx: commands.Context, *, texte: str | None = None) -> None:
+    """`!note [AAAA-MM-JJ] <texte>` — consigne une observation (mémoire du labo).
+    Sans argument : liste les 10 dernières entrées. L'auteur Discord est capté."""
+    await _add_log(ctx, texte, "observation")
+
+
+@bot.command(name="hypo")
+async def hypo_cmd(ctx: commands.Context, *, texte: str | None = None) -> None:
+    """`!hypo [AAAA-MM-JJ] <hypothèse>` — consigne une hypothèse à tester
+    (statut pending)."""
+    await _add_log(ctx, texte, "hypothesis")
 
 
 @bot.command(name="help", aliases=["aide", "commandes"])
@@ -605,10 +629,12 @@ async def aide(ctx: commands.Context) -> None:
         inline=False,
     )
     e.add_field(
-        name="🔬 Recherche",
+        name="🔬 Recherche (journal du labo)",
         value=("`!setup MOC A` (ou `!setup NONE`) — tag ton setup MOC du jour.\n"
-               "`!note <hypothèse>` — consigne une hypothèse à tester (ou liste "
-               "les dernières)."),
+               "`!hypo <hypothèse>` — consigne une hypothèse à tester.\n"
+               "`!note <observation>` — une observation. `!note` seul liste les "
+               "dernières. Préfixe optionnel `AAAA-MM-JJ` pour viser une séance "
+               "passée ; l'auteur est capté automatiquement."),
         inline=False,
     )
     e.add_field(
