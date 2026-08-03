@@ -27,8 +27,10 @@ analyses dérivées.
       (order flow signé), `!skew SPX`, `!profile SPX`, `!vanna SPX`,
       `!charm SPX`, `!history SPX`, `!positionnement SPX`.
   - `!sondage` — (re)poster le sondage de séance à la demande.
+  - `!pin QQQ` (ou `!pin SPX 2026-08-01`) — **pinning de clôture** : le prix
+    s'est-il collé sur un strike / un mur GEX à 22h ?
   - `!setup MOC A` (ou `!setup NONE`) — tag ton **setup MOC du jour** (recherche).
-  - `!note <hypothèse>` — consigner une hypothèse à tester (mémoire du labo).
+  - `!hypo` / `!note` — consigner une hypothèse / observation (mémoire du labo).
 
   **Tout graphique du dashboard peut sortir en image** — la même vue que tu
   vois à l'écran.
@@ -113,7 +115,10 @@ Trois catégories, gérées différemment :
    `research_log`.
 2. **Dérivés** (calculables, *non* stockés sauf coût prohibitif) : durée d'un
    régime, `pin_ratio`, range 21h50-22h00, impulsion, minutes depuis le dernier
-   changement… recalculés **à la demande** depuis les sources.
+   changement… recalculés **à la demande** depuis les sources. Le **pinning**
+   (commande `!pin`, endpoint `/api/v1/<sym>/close_context`) en est l'exemple :
+   il se recalcule à partir du snapshot de chaîne ~16h et des bougies, tous deux
+   déjà conservés — donc rien n'est figé.
 3. **Données humaines** (irremplaçables, grande valeur) : `setup_MOC`, notes,
    votes du sondage — ce qu'aucun calcul ne retrouvera jamais.
 

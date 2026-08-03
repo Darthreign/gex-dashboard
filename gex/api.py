@@ -18,7 +18,9 @@ respecter : ce serveur ne doit pas être exposé au-delà de la machine locale
 from __future__ import annotations
 
 from datetime import datetime
+from datetime import time as dt_time
 
+import pandas as pd
 from flask import Flask, jsonify, request
 
 from . import metrics
@@ -129,6 +131,43 @@ def _session_context(symbol: str, day: str, rev_threshold: float | None = None) 
         "n_reversals": _count_reversals(bars["close"].tolist(), thr),
         "rev_threshold": thr,
     })
+    return out
+
+
+def _close_context(symbol: str, day: str) -> dict:
+    """Pinning de clôture d'une séance : le prix s'est-il collé sur un strike /
+    un mur GEX à 16h ET ? Calcul DÉRIVÉ à la demande depuis le brut (snapshot de
+    chaîne ~16h + bougies), rien n'est stocké. `available: False` si les sources
+    manquent (chaîne ou bougies)."""
+    from . import pinning, store
+
+    out = {"symbol": symbol, "date": day, "available": False}
+
+    # Chaîne la plus proche de 16h ET : natif (_RT) prioritaire, sinon CBOE.
+    chain = None
+    for key in (f"{symbol}_RT", symbol):
+        chain = store.load_snapshot_near(key, day)
+        if chain is not None and not chain.empty:
+            break
+    if chain is None or chain.empty or "strike" not in chain or "gex" not in chain:
+        out["reason"] = "pas de snapshot de chaîne pour cette séance"
+        return out
+
+    bars = store.load_prices(symbol, day)
+    if bars is None or bars.empty:
+        out["reason"] = "pas de bougies (prix de clôture indisponible)"
+        return out
+    bars = bars.sort_values("timestamp")
+    target = pd.Timestamp(f"{day} 16:00:00")
+    ts = pd.to_datetime(bars["timestamp"])
+    close_price = float(bars["close"].iloc[(ts - target).abs().values.argmin()])
+
+    # Fenêtre pré-clôture 15h50-16h00 ET (franchissements de strike).
+    window = bars[(ts.dt.time >= dt_time(15, 50)) & (ts.dt.time <= dt_time(16, 0))]
+    window_closes = [float(c) for c in window["close"].tolist()] or None
+
+    out.update({"available": True})
+    out.update(pinning.pin_metrics(chain, close_price, window_closes))
     return out
 
 
@@ -268,6 +307,15 @@ def register_api(app) -> None:
         day = request.args.get("date") or datetime.now(ET).date().isoformat()
         rev = request.args.get("rev", type=float)
         return jsonify(_session_context(symbol, day, rev))
+
+    @server.route("/api/v1/<symbol>/close_context")
+    def _close(symbol):
+        """Pinning de clôture (16h ET) : distance au strike/mur GEX, pin_ratio,
+        franchissements pré-clôture — calcul à la demande, pour le backtest du
+        comportement de clôture. `?date=YYYY-MM-DD` (défaut : jour ET courant)."""
+        symbol = symbol.upper()
+        day = request.args.get("date") or datetime.now(ET).date().isoformat()
+        return jsonify(_close_context(symbol, day))
 
     @server.route("/api/v1/digest")
     def _digest():

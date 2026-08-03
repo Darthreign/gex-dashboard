@@ -522,6 +522,40 @@ async def sondage(ctx: commands.Context) -> None:
     await _post_poll(dt.datetime.now(PARIS))
 
 
+@bot.command(name="pin")
+async def pin_cmd(ctx: commands.Context, symbole: str | None = None,
+                  date: str | None = None) -> None:
+    """`!pin QQQ` (ou `!pin SPX 2026-08-01`) — pinning de clôture : le prix
+    s'est-il collé sur un strike / un mur GEX à 22h ? Pertinent après la clôture."""
+    if not symbole:
+        await ctx.send("Usage : `!pin QQQ` (ou `!pin SPX 2026-08-01`). "
+                       "Le plus parlant après 22h.")
+        return
+    sym = symbole.upper()
+    path = f"/api/v1/{sym}/close_context" + (f"?date={date}" if date else "")
+    d = fetch(path)
+    if not d or not d.get("available"):
+        raison = (d or {}).get("reason", "dashboard injoignable")
+        await ctx.send(f"Pinning indisponible pour {sym} ({raison}).")
+        return
+    pr = d.get("pin_ratio")
+    jauge = ("collé au strike" if pr is not None and pr < 0.15 else
+             "proche d'un strike" if pr is not None and pr < 0.4 else
+             "entre deux strikes")
+    lignes = [
+        f"**{sym}** — pinning de clôture ({d.get('date')})",
+        f"Clôture {d.get('close')} · strike le plus proche "
+        f"{d.get('nearest_strike')} (écart {d.get('dist_nearest_strike')})",
+        f"pin_ratio {pr} → **{jauge}**" if pr is not None else "pin_ratio n/a",
+        f"Mur GEX1 {d.get('gex1_strike')} (écart {d.get('dist_gex1')}) · "
+        f"GEX2 {d.get('gex2_strike')} (écart {d.get('dist_gex2')})",
+    ]
+    cr = d.get("strike_crossings_preclose")
+    if cr is not None:
+        lignes.append(f"Franchissements de strike (15h50-16h) : {cr}")
+    await ctx.send("\n".join(lignes))
+
+
 @bot.command(name="setup")
 async def setup_cmd(ctx: commands.Context, *, valeur: str | None = None) -> None:
     """`!setup MOC A` (ou `!setup NONE`) — tag le setup MOC du jour.
@@ -630,7 +664,8 @@ async def aide(ctx: commands.Context) -> None:
     )
     e.add_field(
         name="🔬 Recherche (journal du labo)",
-        value=("`!setup MOC A` (ou `!setup NONE`) — tag ton setup MOC du jour.\n"
+        value=("`!pin QQQ` — pinning de clôture (collé sur un strike ? mur GEX ?).\n"
+               "`!setup MOC A` (ou `!setup NONE`) — tag ton setup MOC du jour.\n"
                "`!hypo <hypothèse>` — consigne une hypothèse à tester.\n"
                "`!note <observation>` — une observation. `!note` seul liste les "
                "dernières. Préfixe optionnel `AAAA-MM-JJ` pour viser une séance "

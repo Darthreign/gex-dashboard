@@ -220,6 +220,28 @@ def load_last_snapshot(symbol: str, day: str) -> pd.DataFrame | None:
     return pd.read_parquet(files[-1]) if files else None
 
 
+def load_snapshot_near(symbol: str, day: str,
+                       target_hhmmss: str = "160000") -> pd.DataFrame | None:
+    """Snapshot de chaîne du jour le plus PROCHE d'une heure cible (défaut 16h00
+    ET = clôture cash). Les fichiers sont nommés `HHMMSS.parquet` en heure ET —
+    on choisit celui dont l'écart à la cible est minimal. Sert au pinning de
+    clôture, où c'est la structure des strikes à ~16h qui compte."""
+    root = SETTINGS.data_dir / "snapshots" / symbol / day
+    files = sorted(root.glob("*.parquet")) if root.exists() else []
+    if not files:
+        return None
+
+    def _secs(stem: str) -> int:
+        try:
+            return int(stem[0:2]) * 3600 + int(stem[2:4]) * 60 + int(stem[4:6])
+        except (ValueError, IndexError):
+            return 0
+
+    target = _secs(target_hhmmss)
+    best = min(files, key=lambda f: abs(_secs(f.stem) - target))
+    return pd.read_parquet(best)
+
+
 def load_latest_snapshot(symbol: str) -> tuple[pd.DataFrame, datetime] | None:
     """Dernier snapshot toutes séances confondues, avec son horodatage (naïf
     en ET, comme le reste du feed — cf. gex.metrics.ET).
