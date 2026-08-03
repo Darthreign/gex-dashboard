@@ -42,6 +42,96 @@ def _summary_dict(symbol: str, s) -> dict:
     }
 
 
+# Seuil (points) au-delà duquel un retournement compte comme un « vrai »
+# retracement, par instrument. Sert au comptage n_reversals — première version
+# volontairement simple, recalculable plus tard depuis les bougies brutes.
+_REV_THRESHOLD = {"NQ": 30.0, "ES": 8.0, "SPX": 10.0, "NDX": 40.0,
+                  "SPY": 1.0, "QQQ": 1.2}
+
+
+def _count_reversals(closes, threshold: float) -> int:
+    """Compte les retournements de la série de clôtures dépassant `threshold`.
+
+    Zigzag : on suit le plus haut et le plus bas depuis le dernier pivot ; un
+    reflux de `threshold` depuis l'extrême marque un pivot. Le tout PREMIER
+    mouvement (celui qui établit la tendance de départ) ne compte pas comme un
+    retournement — seuls les changements de sens suivants comptent. Mesure
+    objective de « combien de fois le marché s'est retourné », indépendante de
+    la perception du trader.
+    """
+    if not closes:
+        return 0
+    n, direction = 0, 0            # direction : 0 inconnue, +1 haussier, -1 baissier
+    hi = lo = closes[0]
+    for c in closes:
+        hi, lo = max(hi, c), min(lo, c)
+        if direction >= 0 and hi - c >= threshold:        # reflux depuis le haut
+            if direction == 1:                            # on tendait à la hausse -> vrai retournement
+                n += 1
+            direction, hi, lo = -1, c, c
+        elif direction <= 0 and c - lo >= threshold:      # rebond depuis le bas
+            if direction == -1:
+                n += 1
+            direction, hi, lo = 1, c, c
+    return n
+
+
+def _session_context(symbol: str, day: str, rev_threshold: float | None = None) -> dict:
+    """Vérité de marché OBJECTIVE d'une séance, calculée depuis les bougies
+    1 min stockées (`store.load_prices`). Sert au journal de recherche : ce qui
+    s'est réellement passé, à confronter au ressenti du sondage.
+
+    Fonctionne en intraday (bougies partielles du jour) comme en fin de séance.
+    Renvoie `available: False` si aucune bougie n'existe pour ce symbole/jour.
+    """
+    from datetime import date as _date, timedelta
+
+    from . import store
+
+    bars = store.load_prices(symbol, day)
+    d = _date.fromisoformat(day)
+    out = {"symbol": symbol, "date": day, "weekday": d.weekday(), "available": False}
+    if bars is None or bars.empty:
+        return out
+    bars = bars.sort_values("timestamp")
+    o = float(bars["open"].iloc[0])
+    hi = float(bars["high"].max())
+    lo = float(bars["low"].min())
+    last = float(bars["close"].iloc[-1])
+
+    # clôture de la veille + ATR (moyenne des ranges quotidiens sur ~14 jours)
+    prev_close, ranges = None, []
+    probe = d
+    for _ in range(20):
+        probe -= timedelta(days=1)
+        prior = store.load_prices(symbol, probe.isoformat())
+        if prior is None or prior.empty:
+            continue
+        if prev_close is None:
+            prev_close = float(prior.sort_values("timestamp")["close"].iloc[-1])
+        ranges.append(float(prior["high"].max() - prior["low"].min()))
+        if len(ranges) >= 14:
+            break
+    prev_atr = round(sum(ranges) / len(ranges), 2) if ranges else None
+
+    rng = hi - lo
+    thr = rev_threshold or _REV_THRESHOLD.get(symbol, 30.0)
+    out.update({
+        "available": True,
+        "open": o, "high": hi, "low": lo, "close": last, "price": last,
+        "prev_close": prev_close,
+        "gap": round(o - prev_close, 2) if prev_close is not None else None,
+        "prev_atr": prev_atr,
+        "range": round(rng, 2),
+        "max_up": round(hi - o, 2),
+        "max_down": round(o - lo, 2),
+        "close_location": round((last - lo) / rng, 3) if rng else None,
+        "n_reversals": _count_reversals(bars["close"].tolist(), thr),
+        "rev_threshold": thr,
+    })
+    return out
+
+
 def _preferred(symbol: str) -> str:
     """Clé de STATE à lire : la chaîne native _RT si un compte est configuré et
     qu'elle a un état, sinon le symbole de base — même règle que l'interface
@@ -166,6 +256,19 @@ def register_api(app) -> None:
             "rows": rows.to_dict(orient="records"),
         })
 
+    @server.route("/api/v1/<symbol>/session_context")
+    def _session(symbol):
+        """Vérité de marché objective d'une séance (OHLC, gap, ATR veille,
+        excursions, retournements) — pour le journal de recherche.
+
+        `?date=YYYY-MM-DD` (défaut : jour ET courant). `?rev=` force le seuil de
+        retournement. En intraday, renvoie l'état courant (bougies partielles).
+        """
+        symbol = symbol.upper()
+        day = request.args.get("date") or datetime.now(ET).date().isoformat()
+        rev = request.args.get("rev", type=float)
+        return jsonify(_session_context(symbol, day, rev))
+
     @server.route("/api/v1/digest")
     def _digest():
         """Verdict d'état du gamma prêt à diffuser (cf. gex/digest.py).
@@ -184,6 +287,7 @@ def register_api(app) -> None:
             "color": d.color,
             "discord_color": d.discord_color,
             "confidence": d.confidence,
+            "families": d.families,
             "text": d.to_text(),
             "signature": list(d.signature),
         })

@@ -26,6 +26,7 @@ analyses dérivées.
     - `!heatmap NQ`, `!gex NQ`, `!delta NQ` (Delta Exposure), `!flow NQ`
       (order flow signé), `!skew SPX`, `!profile SPX`, `!vanna SPX`,
       `!charm SPX`, `!history SPX`, `!positionnement SPX`.
+  - `!sondage` — (re)poster le sondage de séance à la demande.
 
   **Tout graphique du dashboard peut sortir en image** — la même vue que tu
   vois à l'écran.
@@ -61,6 +62,39 @@ couverture des données : *forte* = indice principal présent, les 3 symboles de
 la famille, signes concordants ; *faible* = indice cash manquant ou symboles
 qui se contredisent ; *moyenne* entre les deux. Deux verdicts identiques
 n'ont pas la même valeur selon les sources disponibles.
+
+## Collecte pour le backtest (base de recherche)
+
+En plus de diffuser, le bot **accumule des données** pour étudier plus tard
+quels scénarios se sont joués et comment. Tout est rangé en local dans
+`data/journal/` (base **SQLite** + images), à côté des données du dashboard.
+Voir [`journal.py`](journal.py) pour le schéma.
+
+Ce qui est capturé :
+
+- **Sondage de séance** posté à **23h05** (Lun-Ven), **dépouillé le lendemain à
+  12h** (temps de voter le matin). Quatre questions à réactions : journée
+  directionnelle (😰/🧘), ouverture haussière/baissière (📈/📉), ampleur du
+  mouvement (1️⃣-4️⃣, échelles NQ **et** ES), et **représentativité du régime**
+  (🎯/😐/🤷 — pour distinguer « mauvaise journée = marché » de « = moteur qui a
+  mal classé »). Les **votes bruts** sont conservés (pas un booléen) : tu
+  pourras redéfinir un seuil et recalculer.
+- **Régimes** : snapshot à l'ouverture (15h30), **chaque changement** (avec la
+  *raison* : couleur / famille / confiance) et un **heartbeat** toutes les 10
+  min (pour prouver que le bot tournait). Chaque événement stocke aussi l'état
+  du marché à l'instant T (prix NQ/ES, distance à l'open/high/low).
+- **Heatmaps** des 6 symboles aux créneaux **15h30 / 16h00 / 18h00 / 22h00**
+  (PNG). Le numérique par strike est déjà dans les Parquet du dashboard — les
+  PNG sont le complément visuel.
+- **Contexte de marché objectif** (OHLC, gap, ATR veille, excursions,
+  retournements) par séance, calculé par le dashboard, à confronter au ressenti
+  du sondage.
+- **`daily_metrics`** : une table de *features* au format long (extensible sans
+  migration) qui pré-agrège tout ça, une lecture facile pour l'analyse.
+
+> Le bot lit ces analyses via l'API locale du dashboard — il ne voit toujours
+> aucune donnée brute d'options. La base reste **strictement locale** (usage
+> personnel), comme le reste des données du projet.
 
 ## Installation (une fois)
 

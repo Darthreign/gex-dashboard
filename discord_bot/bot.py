@@ -12,7 +12,11 @@ Ce qu'il fait :
   jugé par famille S&P / Nasdaq, qui bascule) ;
 - répond aux commandes : `!etat`/`!gamma` (digest complet), `!gamma SYM`
   (valeurs calculées), `!niveaux SYM [ÉCHELLE]` (niveaux, transposables),
-  n'importe quel graphique en image (`!heatmap`, `!delta`…), et `!help`.
+  n'importe quel graphique en image (`!heatmap`, `!delta`…), et `!help` ;
+- COLLECTE pour le backtest (cf. journal.py) : sondage de séance à réactions
+  (23h05, dépouillé J+1 12h), snapshots de régime (open + changements +
+  heartbeat), heatmaps aux créneaux clés, et contexte de marché objectif — le
+  tout dans une base SQLite locale (`data/journal/`).
 
 Prérequis (à faire UNE fois, côté Discord) :
   1. https://discord.com/developers/applications -> New Application -> Bot
@@ -28,6 +32,7 @@ from __future__ import annotations
 
 import datetime as dt
 import io
+import json
 import logging
 import os
 from pathlib import Path
@@ -36,6 +41,8 @@ from zoneinfo import ZoneInfo
 import discord
 import requests
 from discord.ext import commands, tasks
+
+import journal
 
 # Charge un .env local s'il existe, pour ne pas avoir à toucher aux variables
 # d'environnement Windows. Optionnel : sans python-dotenv, on lit directement
@@ -62,8 +69,43 @@ SCHEDULE = {(8, 30), (15, 25), (15, 35), (17, 30)}
 # Session US en heure de Paris (15h30 = 9h30 ET open ; ~22h = 16h ET close).
 SESSION_START, SESSION_END = dt.time(15, 30), dt.time(22, 0)
 
+# --- Journal de recherche (backtest) ----------------------------------------
+# Base et images rangées avec le reste des données du dashboard (D:\Gex\data),
+# calculé depuis l'emplacement du bot pour rester portable. Surchargeable.
+JOURNAL_DB = os.environ.get("JOURNAL_DB") or str(
+    Path(__file__).resolve().parent.parent / "data" / "journal" / "journal.sqlite")
+HEATMAP_DIR = Path(JOURNAL_DB).parent / "heatmaps"
+# Créneaux de capture heatmap (h, min) -> libellé de slot.
+HEATMAP_SLOTS = {(15, 30): "15h30", (16, 0): "16h00", (18, 0): "18h00", (22, 0): "22h00"}
+HEATMAP_SYMBOLS = ("SPX", "SPY", "NDX", "QQQ", "ES", "NQ")
+CONTEXT_SYMBOLS = ("NQ", "ES", "SPX", "NDX")   # vérité-marché pour daily_metrics
+POLL_POST = (23, 5)                            # heure de post du sondage (Lun-Ven)
+# Réaction -> colonne de comptage (ordre = ordre d'amorçage des réactions).
+POLL_EMOJIS = {
+    "😰": "q1_directionnel", "🧘": "q1_retracement",
+    "📈": "q2_haussier", "📉": "q2_baissier",
+    "1️⃣": "q3_b1", "2️⃣": "q3_b2", "3️⃣": "q3_b3", "4️⃣": "q3_b4",
+    "🎯": "q4_repr_high", "😐": "q4_repr_mid", "🤷": "q4_repr_low",
+}
+
 _last_signature: tuple | None = None
+_last_digest: dict | None = None      # dernier digest, pour la raison d'un changement
 _posted: dict[str, set] = {}          # jour ISO -> {(h, min) déjà postés}
+_JC = None                            # connexion SQLite (ouverte à la 1re demande)
+
+
+def _journal():
+    """Connexion au journal, ouverte paresseusement (une fois). None si échec —
+    la collecte est alors désactivée sans casser le reste du bot."""
+    global _JC
+    if _JC is None:
+        try:
+            _JC = journal.connect(JOURNAL_DB)
+            log.info("Journal de recherche ouvert : %s", JOURNAL_DB)
+        except Exception:  # noqa: BLE001
+            log.exception("Journal indisponible (%s) — collecte désactivée", JOURNAL_DB)
+            return None
+    return _JC
 
 
 def fetch(path: str) -> dict | None:
@@ -101,18 +143,221 @@ def _en_session(now: dt.datetime) -> bool:
     return now.weekday() < 5 and SESSION_START <= now.timetz().replace(tzinfo=None) <= SESSION_END
 
 
-@tasks.loop(seconds=60)
-async def tick() -> None:
-    """Boucle minute : poste aux heures fixes, et sur changement de régime."""
-    global _last_signature
-    now = dt.datetime.now(PARIS)
-    # Week-end : marché fermé, aucun post automatique. Les commandes à la
-    # demande (!niveaux, !gamma…) restent actives — « silencieux » ne veut pas
-    # dire « muet si on l'interroge ».
+# --------------------------------------------------------------------------
+# Collecte pour le journal de recherche (heatmaps, régimes, sondage)
+# --------------------------------------------------------------------------
+
+def _fetch_png(symbol: str, chart: str) -> bytes | None:
+    try:
+        r = requests.get(f"{DASHBOARD}/api/v1/{symbol}/chart/{chart}.png", timeout=45)
+    except requests.RequestException:
+        return None
+    return r.content if r.status_code == 200 and r.content[:4] == b"\x89PNG" else None
+
+
+def _sub(a, b):
+    return round(a - b, 2) if isinstance(a, (int, float)) and isinstance(b, (int, float)) else None
+
+
+def _market_snapshot() -> dict | None:
+    """État du marché à l'instant T (NQ/ES) : prix + distances open/high/low.
+    Quelques nombres, capturés surtout aux changements de régime."""
+    out = {}
+    for key, sym in (("nq", "NQ"), ("es", "ES")):
+        c = fetch(f"/api/v1/{sym}/session_context")
+        if c and c.get("available"):
+            p = c.get("price")
+            out[key] = {"price": p, "dist_open": _sub(p, c.get("open")),
+                        "dist_high": _sub(p, c.get("high")), "dist_low": _sub(p, c.get("low"))}
+    return out or None
+
+
+async def _record_regime(now, kind: str, d: dict, reason=None, with_market=True) -> None:
+    jc = _journal()
+    if jc is None or d is None:
+        return
+    market = _market_snapshot() if with_market else None
+    journal.record_regime(
+        jc, date=now.date().isoformat(), ts=now.isoformat(), kind=kind,
+        color=d.get("color"), confidence=d.get("confidence"), verdict=d.get("verdict"),
+        reason=reason, families=d.get("families"), digest=d, market=market)
+
+
+def _prev_for_reason() -> dict | None:
+    if _last_digest is None:
+        return None
+    return {"color": _last_digest.get("color"), "confidence": _last_digest.get("confidence"),
+            "families_json": json.dumps(_last_digest.get("families") or {})}
+
+
+async def _capture_heatmaps(date: str, slot_label: str, now) -> None:
+    jc = _journal()
+    if jc is None:
+        return
+    got = 0
+    for sym in HEATMAP_SYMBOLS:
+        if journal.heatmap_done(jc, date, slot_label, sym):
+            continue
+        png = _fetch_png(sym, "heatmap")
+        if png is None:
+            continue
+        folder = HEATMAP_DIR / date
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{slot_label}_{sym}.png"
+        path.write_bytes(png)
+        journal.record_heatmap(jc, date=date, slot=slot_label, symbol=sym,
+                               path=str(path), ts=now.isoformat())
+        got += 1
+    if got:
+        log.info("Heatmaps %s : %d image(s) (%s)", slot_label, got, date)
+
+
+def _poll_embed(now) -> discord.Embed:
+    e = discord.Embed(
+        title=f"🗳️ Sondage de séance — {now.strftime('%d/%m/%Y')}",
+        description="Un clic par question. Dépouillé demain à 12h — vos réponses "
+                    "nourrissent la base d'étude.",
+        color=0x3498DB)
+    e.add_field(name="1. La journée a-t-elle été directionnelle ?",
+                value="😰 Oui, pas de retour\n🧘 Non, on a eu des retracements (même petits)",
+                inline=False)
+    e.add_field(name="2. Ouverture franchement directionnelle ?",
+                value="📈 Haussière\n📉 Baissière", inline=False)
+    e.add_field(name="3. Ampleur du mouvement ? *(NQ pts / ES pts)*",
+                value="1️⃣ 100-200 / 25-50\n2️⃣ 200-400 / 50-100\n"
+                      "3️⃣ 400-600 / 100-150\n4️⃣ 600+ / 150+", inline=False)
+    e.add_field(name="4. Le régime affiché t'a semblé…",
+                value="🎯 Très représentatif\n😐 Moyen\n🤷 Peu représentatif", inline=False)
+    return e
+
+
+async def _post_poll(now) -> None:
+    channel = bot.get_channel(CHANNEL_ID)
+    jc = _journal()
+    if channel is None or jc is None:
+        return
+    msg = await channel.send(embed=_poll_embed(now))
+    for emoji in POLL_EMOJIS:                      # amorce les réactions (un clic pour voter)
+        try:
+            await msg.add_reaction(emoji)
+        except discord.HTTPException:
+            pass
+    tally_due = dt.datetime.combine((now + dt.timedelta(days=1)).date(), dt.time(12, 0), PARIS)
+    journal.poll_open(jc, date=now.date().isoformat(), message_id=str(msg.id),
+                      posted_ts=now.isoformat(), tally_due_ts=tally_due.isoformat())
+    log.info("Sondage posté (%s), dépouillement prévu %s", now.date().isoformat(), tally_due)
+
+
+async def _tally_due_polls(now) -> None:
+    jc = _journal()
+    if jc is None:
+        return
+    for row in journal.polls_a_depouiller(jc, now.isoformat()):
+        channel = bot.get_channel(CHANNEL_ID)
+        if channel is None:
+            return
+        try:
+            msg = await channel.fetch_message(int(row["message_id"]))
+        except (discord.NotFound, discord.HTTPException):
+            log.warning("Sondage %s introuvable au dépouillement", row["message_id"])
+            continue
+        counts = {}
+        for reaction in msg.reactions:
+            col = POLL_EMOJIS.get(str(reaction.emoji))
+            if col:
+                counts[col] = max(0, reaction.count - 1)   # -1 : l'amorce du bot
+        journal.poll_tally(jc, date=row["date"], counts=counts, tallied_ts=now.isoformat())
+        log.info("Sondage %s dépouillé : %s", row["date"], counts)
+        _build_daily_metrics(row["date"])
+
+
+def _poll_ratio(jc, date, name, a, b) -> None:
+    a, b = a or 0, b or 0
+    if a + b > 0:
+        journal.set_metric(jc, date=date, name=name, value_num=round(a / (a + b), 3))
+
+
+def _build_daily_metrics(date: str) -> None:
+    """Table de features (1 ligne logique/jour, format long) : agrégats de
+    régime + vérité-marché + ratios du sondage. Recalculable à volonté."""
+    jc = _journal()
+    if jc is None:
+        return
+    tl = journal.regime_timeline(jc, date)
+    fin = dt.datetime.combine(dt.date.fromisoformat(date), dt.time(22, 0), PARIS).isoformat()
+    for col, val in journal.minutes_par_couleur(tl, fin).items():
+        journal.set_metric(jc, date=date, name=f"minutes_{col}", value_num=round(val, 1))
+    journal.set_metric(jc, date=date, name="n_changes",
+                       value_num=sum(1 for e in tl if e["kind"] == "change"))
+    opens = [e for e in tl if e["kind"] == "open"]
+    if opens:
+        journal.set_metric(jc, date=date, name="open_regime", value_txt=opens[0]["color"])
+        journal.set_metric(jc, date=date, name="open_confidence", value_txt=opens[0]["confidence"])
+    if tl:
+        journal.set_metric(jc, date=date, name="close_regime", value_txt=tl[-1]["color"])
+    # Vérité-marché objective (le dashboard calcule, on stocke).
+    for sym in CONTEXT_SYMBOLS:
+        c = fetch(f"/api/v1/{sym}/session_context?date={date}")
+        if not c or not c.get("available"):
+            continue
+        journal.upsert_market_context(jc, date=date, symbol=sym, ctx=c)
+        for k in ("range", "gap", "max_up", "max_down", "close_location",
+                  "n_reversals", "prev_atr"):
+            if c.get(k) is not None:
+                journal.set_metric(jc, date=date, symbol=sym, name=k, value_num=float(c[k]))
+    # Sondage : ratios dérivés (les votes bruts restent en table polls).
+    p = jc.execute("SELECT * FROM polls WHERE date=?", (date,)).fetchone()
+    if p:
+        _poll_ratio(jc, date, "poll_directionnel_ratio", p["q1_directionnel"], p["q1_retracement"])
+        _poll_ratio(jc, date, "poll_haussier_ratio", p["q2_haussier"], p["q2_baissier"])
+        _poll_ratio(jc, date, "poll_representatif_ratio", p["q4_repr_high"],
+                    (p["q4_repr_mid"] or 0) + (p["q4_repr_low"] or 0))
+        buckets = {b: p[f"q3_b{b}"] for b in (1, 2, 3, 4) if p[f"q3_b{b}"]}
+        if buckets:
+            journal.set_metric(jc, date=date, name="poll_amplitude_bucket",
+                               value_num=max(buckets, key=buckets.get))
+    log.info("daily_metrics construites (%s)", date)
+
+
+async def _journal_tick(now, d) -> None:
+    """Collecte data : dépouillement (tous les jours), puis captures de séance
+    (semaine seulement). Isolé de tout le reste et enveloppé en try/except par
+    l'appelant : un pépin de collecte ne doit jamais perturber le bot."""
+    jc = _journal()
+    if jc is None:
+        return
+    await _tally_due_polls(now)          # peut tomber un week-end (sondage du vendredi)
     if now.weekday() >= 5:
         return
+    date, slot = now.date().isoformat(), (now.hour, now.minute)
+    if slot in HEATMAP_SLOTS:
+        await _capture_heatmaps(date, HEATMAP_SLOTS[slot], now)
+    if slot == (15, 30) and not journal.regime_open_done(jc, date):
+        await _record_regime(now, "open", d)
+    elif _en_session(now) and now.minute % 10 == 0:
+        await _record_regime(now, "heartbeat", d, with_market=False)
+    if slot == POLL_POST and not journal.poll_posted(jc, date):
+        await _post_poll(now)
+
+
+@tasks.loop(seconds=60)
+async def tick() -> None:
+    """Boucle minute : collecte (journal), posts aux heures fixes, et sur
+    changement de régime."""
+    global _last_signature, _last_digest
+    now = dt.datetime.now(PARIS)
     d = fetch("/api/v1/digest")
-    if d is None:
+
+    # Collecte pour le backtest — tourne AUSSI le week-end (pour dépouiller le
+    # sondage du vendredi). Cloisonnée : jamais bloquante pour le reste.
+    try:
+        await _journal_tick(now, d)
+    except Exception:  # noqa: BLE001
+        log.exception("Collecte journal : échec (sans conséquence sur le bot)")
+
+    # Posts Discord automatiques : silencieux le week-end, « muet » ne valant
+    # que pour l'automatique — les commandes à la demande restent actives.
+    if now.weekday() >= 5 or d is None:
         return
     signature = tuple(tuple(x) for x in d.get("signature", []))
 
@@ -123,7 +368,7 @@ async def tick() -> None:
         deja.add(slot)
         await _post(d)
         log.info("Post fixe %02dh%02d (%s)", slot[0], slot[1], d["color"])
-        _last_signature = signature
+        _last_signature, _last_digest = signature, d
         return
 
     # Changement de régime : uniquement en session, et seulement après un
@@ -131,7 +376,10 @@ async def tick() -> None:
     if _en_session(now) and _last_signature is not None and signature != _last_signature:
         await _post(d)
         log.info("Changement de régime détecté -> post (%s)", d["color"])
-    _last_signature = signature
+        reason = journal.compute_reason(_prev_for_reason(), d.get("color"),
+                                        d.get("confidence"), d.get("families"))
+        await _record_regime(now, "change", d, reason=reason)
+    _last_signature, _last_digest = signature, d
 
 
 @bot.command(name="etat")
@@ -264,6 +512,15 @@ for _name, (_chart, _leg) in CHARTS.items():
     _make_chart_command(_name, _chart, _leg)
 
 
+@bot.command(name="sondage")
+async def sondage(ctx: commands.Context) -> None:
+    """`!sondage` — poste le sondage de séance à la demande (sinon auto à 23h05).
+
+    Utile pour tester, ou relancer manuellement. Si un sondage a déjà été posté
+    aujourd'hui, le dépouillement restera sur le premier (anti-doublon)."""
+    await _post_poll(dt.datetime.now(PARIS))
+
+
 @bot.command(name="help", aliases=["aide", "commandes"])
 async def aide(ctx: commands.Context) -> None:
     """`!help` — la liste des commandes, regroupées par thème."""
@@ -297,6 +554,13 @@ async def aide(ctx: commands.Context) -> None:
         inline=False,
     )
     e.add_field(
+        name="🗳️ Sondage de séance",
+        value=("Chaque soir (23h05), un sondage à réactions sur la journée "
+               "(directionnelle ? ampleur ? régime représentatif ?). Vos votes "
+               "alimentent une base d'étude. `!sondage` le relance à la demande."),
+        inline=False,
+    )
+    e.add_field(
         name="ℹ️ Comment se lit le verdict",
         value=("Le régime est jugé par **famille** indépendante — **S&P** "
                "(SPX/SPY/ES) et **Nasdaq** (NDX/QQQ/NQ) — et non symbole par "
@@ -314,6 +578,7 @@ async def aide(ctx: commands.Context) -> None:
 @bot.event
 async def on_ready() -> None:
     log.info("Bot connecté : %s (salon cible %s)", bot.user, CHANNEL_ID)
+    _journal()                    # ouvre (et crée au besoin) la base de recherche
     if not tick.is_running():
         tick.start()
 

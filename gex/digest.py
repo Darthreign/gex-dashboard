@@ -78,6 +78,7 @@ class Digest:
     color: str                       # "green" | "orange" | "red"
     confidence: str | None = None    # "forte" | "moyenne" | "faible"
     signature: tuple = field(default_factory=tuple)   # pour détecter un changement
+    families: dict = field(default_factory=dict)      # {famille: {score, statut, confiance}}
 
     def to_text(self) -> str:
         parts = [self.header, ""] + self.lines
@@ -171,7 +172,8 @@ def build_digest(rows: list[dict], vix: float | None = None,
     # petit frère (SPY/ES/QQQ/NQ) qui ne fait pas basculer sa famille.
     signature = tuple(sorted((nom, f["statut"]) for nom, f in familles.items()))
     signature += (("couleur", color),)
-    return Digest(_header(now), lines, vix_line, verdict, color, confidence, signature)
+    return Digest(_header(now), lines, vix_line, verdict, color, confidence,
+                  signature, familles)
 
 
 def _liste(syms: list[str]) -> str:
