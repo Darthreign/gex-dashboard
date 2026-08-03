@@ -393,6 +393,20 @@ async def etat(ctx: commands.Context) -> None:
     await ctx.send(embed=_embed(d))
 
 
+@bot.command(name="vix")
+async def vix_cmd(ctx: commands.Context) -> None:
+    """`!vix` — la volatilité (VIX) et sa position vs le seuil du digest."""
+    d = fetch("/api/v1/vix")
+    if not d or not d.get("available"):
+        await ctx.send("VIX indisponible pour l'instant.")
+        return
+    seuil = d.get("seuil", 0)
+    above = d.get("above")
+    etat = (f"🔴 au-dessus du seuil ({seuil:.0f})" if above
+            else f"🟢 sous le seuil ({seuil:.0f})")
+    await ctx.send(f"**VIX {d['vix']:.2f}** — {etat}.")
+
+
 @bot.command(name="gamma")
 async def gamma(ctx: commands.Context, symbole: str | None = None) -> None:
     """`!gamma` (digest) ou `!gamma NQ` (valeurs calculées d'un symbole)."""
@@ -668,7 +682,8 @@ async def aide(ctx: commands.Context) -> None:
                "couleur, confiance).\n"
                "`!gamma` — idem `!etat`.\n"
                "`!gamma NQ` — les valeurs calculées d'un symbole (GEX net, "
-               "DEX net, Zero Gamma)."),
+               "DEX net, Zero Gamma).\n"
+               "`!vix` — la volatilité (VIX) et sa position vs le seuil."),
         inline=False,
     )
     e.add_field(

@@ -93,6 +93,20 @@ def test_strikes_colonnes_attendues():
     assert set(rows[0]) == {"strike", "type", "expiry", "open_interest", "gex", "dex"}
 
 
+def test_vix_endpoint(monkeypatch):
+    """`/api/v1/vix` renvoie la valeur courante, le seuil, et si on est au-dessus."""
+    from gex import digest
+    monkeypatch.setattr(digest, "_current_vix", lambda: 16.5)
+    r = _client().get("/api/v1/vix")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["available"] is True and body["vix"] == 16.5
+    assert body["seuil"] == digest.VIX_SEUIL and body["above"] is True
+    # indisponible -> available False
+    monkeypatch.setattr(digest, "_current_vix", lambda: None)
+    assert _client().get("/api/v1/vix").get_json()["available"] is False
+
+
 def test_digest_expose_les_familles():
     """Le digest doit exposer le détail par famille (score/statut/confiance) —
     c'est ce que le journal stocke pour le backtest."""

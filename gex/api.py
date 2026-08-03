@@ -350,6 +350,17 @@ def register_api(app) -> None:
         direction = -1 if request.args.get("dir", "long").lower().startswith("s") else 1
         return jsonify(_tick_context(symbol, day, entry, stop, direction))
 
+    @server.route("/api/v1/vix")
+    def _vix():
+        """VIX courant + seuil du digest (pour une interrogation directe)."""
+        from . import digest as digest_mod
+        v = digest_mod._current_vix()
+        if v is None:
+            return jsonify({"available": False})
+        return jsonify({"available": True, "vix": round(float(v), 2),
+                        "seuil": digest_mod.VIX_SEUIL,
+                        "above": bool(v > digest_mod.VIX_SEUIL)})
+
     @server.route("/api/v1/digest")
     def _digest():
         """Verdict d'état du gamma prêt à diffuser (cf. gex/digest.py).
