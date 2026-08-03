@@ -79,6 +79,9 @@ CREATE TABLE IF NOT EXISTS market_context (
 
 -- Features évolutives, format long (EAV) : ajouter un indicateur = une INSERT,
 -- jamais un ALTER TABLE. `symbol` NULL pour une métrique globale au jour.
+-- Principe assumé : on privilégie le BRUT compact (bougies déjà en Parquet,
+-- événements de régime) et on ne pose ici que les agrégats ou tags qui ne sont
+-- PAS recalculables — surtout pas un cimetière de dérivés qu'on saurait refaire.
 CREATE TABLE IF NOT EXISTS daily_metrics (
     date        TEXT NOT NULL,
     symbol      TEXT,
@@ -88,7 +91,21 @@ CREATE TABLE IF NOT EXISTS daily_metrics (
     ts          TEXT,
     PRIMARY KEY (date, symbol, metric_name)
 );
+
+-- Mémoire du labo : les hypothèses qu'on teste, et leur statut. Dans un an,
+-- c'est ce qui dira POURQUOI telle donnée existe et si elle a été tranchée.
+CREATE TABLE IF NOT EXISTS research_notes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    created    TEXT NOT NULL,
+    date       TEXT,                 -- séance concernée (optionnel)
+    hypothesis TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'pending',   -- pending | confirmed | refuted
+    note       TEXT
+);
 """
+
+# Nom de métrique réservé au tag métier « setup MOC » du jour (cf. set_setup).
+SETUP_METRIC = "setup_moc"
 
 
 def connect(db_path: str | Path) -> sqlite3.Connection:
@@ -296,9 +313,17 @@ def upsert_market_context(conn: sqlite3.Connection, *, date: str, symbol: str,
 def set_metric(conn: sqlite3.Connection, *, date: str, name: str,
                value_num: float | None = None, value_txt: str | None = None,
                symbol: str | None = None, ts: str | None = None) -> None:
-    """Pose une feature dans `daily_metrics` (format long, extensible)."""
+    """Pose une feature dans `daily_metrics` (format long, extensible).
+
+    Upsert manuel (DELETE + INSERT) car la clé primaire contient `symbol`, qui
+    peut être NULL pour une métrique globale — et SQLite traite deux NULL comme
+    DISTINCTS dans une contrainte d'unicité : un simple INSERT OR REPLACE
+    dupliquerait au lieu de remplacer. `symbol IS ?` gère le NULL au DELETE.
+    """
+    conn.execute("DELETE FROM daily_metrics WHERE date=? AND symbol IS ? "
+                 "AND metric_name=?", (date, symbol, name))
     conn.execute(
-        "INSERT OR REPLACE INTO daily_metrics "
+        "INSERT INTO daily_metrics "
         "(date, symbol, metric_name, value_num, value_txt, ts) VALUES (?,?,?,?,?,?)",
         (date, symbol, name, value_num, value_txt, ts))
     conn.commit()
@@ -314,6 +339,51 @@ def get_metric(conn: sqlite3.Connection, date: str, name: str,
     if row is None:
         return None
     return row["value_num"] if row["value_num"] is not None else row["value_txt"]
+
+
+# --------------------------------------------------------------------------
+# Tag métier « setup MOC » + notes de recherche
+# --------------------------------------------------------------------------
+
+def set_setup(conn: sqlite3.Connection, *, date: str, value: str,
+              ts: str | None = None) -> None:
+    """Tag le setup MOC du jour (ex. 'MOC A', 'NONE'). Corrigible : ré-écrire
+    remplace. Info métier NON recalculable, contrairement aux dérivés."""
+    set_metric(conn, date=date, name=SETUP_METRIC, value_txt=value, ts=ts)
+
+
+def get_setup(conn: sqlite3.Connection, date: str) -> str | None:
+    return get_metric(conn, date, SETUP_METRIC)
+
+
+def add_note(conn: sqlite3.Connection, *, hypothesis: str, created: str,
+             date: str | None = None, status: str = "pending",
+             note: str | None = None) -> int:
+    """Consigne une hypothèse de recherche. Renvoie son id."""
+    cur = conn.execute(
+        "INSERT INTO research_notes (created, date, hypothesis, status, note) "
+        "VALUES (?,?,?,?,?)", (created, date, hypothesis, status, note))
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def list_notes(conn: sqlite3.Connection,
+               status: str | None = None) -> list[sqlite3.Row]:
+    if status:
+        return conn.execute("SELECT * FROM research_notes WHERE status=? "
+                            "ORDER BY id DESC", (status,)).fetchall()
+    return conn.execute("SELECT * FROM research_notes ORDER BY id DESC").fetchall()
+
+
+def set_note_status(conn: sqlite3.Connection, note_id: int, status: str,
+                    note: str | None = None) -> None:
+    if note is None:
+        conn.execute("UPDATE research_notes SET status=? WHERE id=?",
+                     (status, note_id))
+    else:
+        conn.execute("UPDATE research_notes SET status=?, note=? WHERE id=?",
+                     (status, note, note_id))
+    conn.commit()
 
 
 # --------------------------------------------------------------------------

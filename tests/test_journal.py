@@ -154,3 +154,40 @@ def test_market_context_et_metriques_eav(conn):
     # extensibilité : une métrique inventée plus tard s'insère sans ALTER TABLE
     journal.set_metric(conn, date=d, name="metrique_du_futur", value_num=42)
     assert journal.get_metric(conn, d, "metrique_du_futur") == 42
+
+
+def test_set_metric_globale_ne_duplique_pas(conn):
+    """Régression : symbol NULL dans la clé primaire — deux NULL étant distincts
+    en SQLite, un upsert naïf dupliquerait. On ré-écrit, on doit remplacer."""
+    d = "2026-08-03"
+    journal.set_metric(conn, date=d, name="n_changes", value_num=3)
+    journal.set_metric(conn, date=d, name="n_changes", value_num=5)
+    n = conn.execute("SELECT COUNT(*) c FROM daily_metrics "
+                     "WHERE date=? AND symbol IS NULL AND metric_name='n_changes'",
+                     (d,)).fetchone()["c"]
+    assert n == 1
+    assert journal.get_metric(conn, d, "n_changes") == 5
+
+
+def test_setup_moc_tag(conn):
+    d = "2026-08-03"
+    assert journal.get_setup(conn, d) is None
+    journal.set_setup(conn, date=d, value="MOC A")
+    assert journal.get_setup(conn, d) == "MOC A"
+    # corrigible : ré-écrire remplace
+    journal.set_setup(conn, date=d, value="NONE")
+    assert journal.get_setup(conn, d) == "NONE"
+
+
+def test_research_notes(conn):
+    n1 = journal.add_note(conn, hypothesis="Le Rouge Fort produit un pinning plus fort",
+                          created="2026-08-03T23:00:00+02:00", date="2026-08-03")
+    journal.add_note(conn, hypothesis="Les flips <2min avant 22h explosent après",
+                     created="2026-08-04T23:00:00+02:00")
+    assert {r["status"] for r in journal.list_notes(conn)} == {"pending"}
+    journal.set_note_status(conn, n1, "confirmed", note="180 séances")
+    row = next(r for r in journal.list_notes(conn) if r["id"] == n1)
+    assert row["status"] == "confirmed" and row["note"] == "180 séances"
+    assert [r["id"] for r in journal.list_notes(conn, status="pending")] != []
+    assert all(r["status"] == "confirmed"
+               for r in journal.list_notes(conn, status="confirmed"))

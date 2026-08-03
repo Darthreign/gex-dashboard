@@ -27,6 +27,8 @@ analyses dérivées.
       (order flow signé), `!skew SPX`, `!profile SPX`, `!vanna SPX`,
       `!charm SPX`, `!history SPX`, `!positionnement SPX`.
   - `!sondage` — (re)poster le sondage de séance à la demande.
+  - `!setup MOC A` (ou `!setup NONE`) — tag ton **setup MOC du jour** (recherche).
+  - `!note <hypothèse>` — consigner une hypothèse à tester (mémoire du labo).
 
   **Tout graphique du dashboard peut sortir en image** — la même vue que tu
   vois à l'écran.
@@ -89,8 +91,21 @@ Ce qui est capturé :
 - **Contexte de marché objectif** (OHLC, gap, ATR veille, excursions,
   retournements) par séance, calculé par le dashboard, à confronter au ressenti
   du sondage.
-- **`daily_metrics`** : une table de *features* au format long (extensible sans
-  migration) qui pré-agrège tout ça, une lecture facile pour l'analyse.
+- **Tag métier `setup_MOC`** (`!setup`) : est-ce qu'un setup MOC existait ce
+  jour-là, selon tes règles ? Info **non recalculable** — c'est ce qui permet
+  d'étudier « quand *ma stratégie* marche », pas seulement le marché.
+- **`research_notes`** : la mémoire du labo (`!note`) — les hypothèses testées
+  et leur statut (pending / confirmed / refuted). Dans un an, ça dira *pourquoi*
+  telle donnée existe et si elle a été tranchée.
+- **`daily_metrics`** : quelques agrégats au format long (extensible sans
+  migration) pour une lecture facile.
+
+**Principe assumé : brut compact + métriques à la demande.** On conserve le
+brut riche (bougies 1 min déjà en Parquet, événements de régime, snapshots de
+chaîne, tags métier) et on **recalcule** les métriques dérivées quand une
+hypothèse arrive — plutôt que d'empiler des dizaines de colonnes dont la moitié
+ne servira jamais. Les timings de régime à la clôture, les stats de la fenêtre
+MOC, etc. se calculent ainsi *à la demande* depuis le brut, sans être figés.
 
 > Le bot lit ces analyses via l'API locale du dashboard — il ne voit toujours
 > aucune donnée brute d'options. La base reste **strictement locale** (usage

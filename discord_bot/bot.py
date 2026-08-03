@@ -521,6 +521,50 @@ async def sondage(ctx: commands.Context) -> None:
     await _post_poll(dt.datetime.now(PARIS))
 
 
+@bot.command(name="setup")
+async def setup_cmd(ctx: commands.Context, *, valeur: str | None = None) -> None:
+    """`!setup MOC A` (ou `!setup NONE`) — tag le setup MOC du jour.
+
+    Info métier, pour étudier « quand MA stratégie marche » et pas seulement le
+    marché. Unique par jour, corrigible (ré-écrire remplace)."""
+    jc = _journal()
+    if jc is None:
+        await ctx.send("Journal indisponible.")
+        return
+    today = dt.datetime.now(PARIS).date().isoformat()
+    if not valeur:
+        actuel = journal.get_setup(jc, today)
+        await ctx.send(f"Usage : `!setup MOC A` ou `!setup NONE`. "
+                       f"Setup du jour : **{actuel or '—'}**.")
+        return
+    now = dt.datetime.now(PARIS)
+    v = valeur.strip().upper()
+    journal.set_setup(jc, date=today, value=v, ts=now.isoformat())
+    await ctx.send(f"✅ Setup du {now:%d/%m} enregistré : **{v}**.")
+
+
+@bot.command(name="note", aliases=["hypo"])
+async def note_cmd(ctx: commands.Context, *, texte: str | None = None) -> None:
+    """`!note <hypothèse>` — consigne une hypothèse de recherche (mémoire du
+    labo). Sans argument : liste les 10 dernières."""
+    jc = _journal()
+    if jc is None:
+        await ctx.send("Journal indisponible.")
+        return
+    if not texte:
+        rows = journal.list_notes(jc)[:10]
+        if not rows:
+            await ctx.send("Aucune note. `!note <hypothèse>` pour en ajouter une.")
+            return
+        lignes = [f"#{r['id']} [{r['status']}] {r['hypothesis']}" for r in rows]
+        await ctx.send("**Notes de recherche :**\n" + "\n".join(lignes))
+        return
+    now = dt.datetime.now(PARIS)
+    nid = journal.add_note(jc, hypothesis=texte.strip(), created=now.isoformat(),
+                           date=now.date().isoformat())
+    await ctx.send(f"📝 Note #{nid} consignée (pending) : « {texte.strip()} »")
+
+
 @bot.command(name="help", aliases=["aide", "commandes"])
 async def aide(ctx: commands.Context) -> None:
     """`!help` — la liste des commandes, regroupées par thème."""
@@ -558,6 +602,13 @@ async def aide(ctx: commands.Context) -> None:
         value=("Chaque soir (23h05), un sondage à réactions sur la journée "
                "(directionnelle ? ampleur ? régime représentatif ?). Vos votes "
                "alimentent une base d'étude. `!sondage` le relance à la demande."),
+        inline=False,
+    )
+    e.add_field(
+        name="🔬 Recherche",
+        value=("`!setup MOC A` (ou `!setup NONE`) — tag ton setup MOC du jour.\n"
+               "`!note <hypothèse>` — consigne une hypothèse à tester (ou liste "
+               "les dernières)."),
         inline=False,
     )
     e.add_field(
