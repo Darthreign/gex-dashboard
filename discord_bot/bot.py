@@ -513,6 +513,18 @@ _BUCKETS = {"0dte": "0DTE", "semaine": "Semaine", "week": "Semaine",
 # Échelles d'affichage transposables (comme le sélecteur du dashboard).
 _SCALES = {"SPX", "NDX", "SPY", "QQQ", "ES", "NQ"}
 
+# Vannes tirées au sort quand une COMMANDE n'existe pas (`{cmd}` = son nom).
+_UNKNOWN_QUIPS = (
+    "🤷 `!{cmd}` ? Jamais entendu parler. Tape `!help` pour les vraies.",
+    "🎲 `!{cmd}` : c'est pas dans mon deck. `!help` ?",
+    "🧐 `!{cmd}`… tu inventes des commandes maintenant ? `!help`.",
+    "🙃 `!{cmd}` n'existe pas, mais l'effort est noté. `!help`.",
+    "📡 `!{cmd}` : aucune réponse de la station. Essaie `!help`.",
+    "🤨 `!{cmd}` ? Tente `!help`, tu seras peut-être surpris.",
+    "🛎️ `!{cmd}` : y'a personne à ce guichet. `!help`.",
+    "🕵️ `!{cmd}` introuvable au dossier. `!help` pour la liste.",
+)
+
 # Vannes tirées au sort quand un mot n'est pas reconnu (`{toks}` = les tokens).
 _IGNORE_QUIPS = (
     "🤨 {toks} ? C'est un grec que je connais pas, celui-là. Ignoré.",
@@ -575,7 +587,9 @@ async def _send_chart(ctx: commands.Context, symbole: str, chart: str, legende: 
         await ctx.send("Dashboard injoignable pour l'instant.")
         return
     if r.status_code != 200 or r.content[:4] != b"\x89PNG":
-        await ctx.send(f"Graphique indisponible pour {sym} (pull pas encore fait ?).")
+        await ctx.send(f"🃏 **{sym}** ? Soit c'est pas un symbole que je suis, soit "
+                       f"le pull n'est pas encore fait. (Essaie SPX, NDX, NQ, ES, "
+                       f"SPY, QQQ…)")
         return
     leg = f"{legende} — {suffixe}" if suffixe else legende
     fichier = discord.File(io.BytesIO(r.content), filename=f"{sym}_{chart}.png")
@@ -819,6 +833,16 @@ async def aide(ctx: commands.Context) -> None:
                       "(Paris) et à chaque changement de régime. Silencieux le "
                       "week-end.")
     await ctx.send(embed=e)
+
+
+@bot.event
+async def on_command_error(ctx: commands.Context, error: Exception) -> None:
+    """Commande inconnue → petite vanne (au lieu du silence). Les vraies erreurs
+    sont journalisées, pas avalées."""
+    if isinstance(error, commands.CommandNotFound):
+        await ctx.send(random.choice(_UNKNOWN_QUIPS).format(cmd=ctx.invoked_with))
+        return
+    log.error("Erreur commande %s : %s", ctx.command, error, exc_info=error)
 
 
 @bot.event
