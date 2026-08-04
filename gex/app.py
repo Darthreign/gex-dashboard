@@ -467,8 +467,10 @@ def heatmap_fig(symbol: str, lang: str, day: str | None = None,
                                            " %{y:.0f}<extra></extra>"))
 
     # repères horizontaux, choisis par la checklist de l'onglet — seul le
-    # spot reste toujours affiché, comme référence de lecture systématique
-    keys = metrics.key_levels(sel, spot)
+    # spot reste toujours affiché, comme référence de lecture systématique.
+    # Murs classés au spot structurel (clôture veille), comme partout ailleurs.
+    _ref = ref_spot(symbol, spot)
+    keys = metrics.key_levels(sel, spot, ref_spot=_ref, all_expiries=True)
     items = [dict(y=xf(spot), label=t(lang, "legend_spot"), color=C["spot"], dash="dot")]
     if "zero_gamma" in levels_shown:
         zg = metrics.zero_gamma(df, spot)
@@ -490,7 +492,7 @@ def heatmap_fig(symbol: str, lang: str, day: str | None = None,
         if v is not None:
             items.append(dict(y=xf(v), label=label, color=color, dash="dash"))
     if "gex_walls" in levels_shown:
-        walls = metrics.top_gex_levels(sel, ref_spot=spot)
+        walls = metrics.top_gex_levels(sel, ref_spot=_ref, all_expiries=True)
         labels = wall_labels(walls) if not walls.empty else {}
         for lv in walls.itertuples():
             items.append(dict(y=xf(lv.strike), label=labels.get(lv.strike, "GEX"),
@@ -1312,20 +1314,23 @@ def _figure_for(symbol: str, name: str, lang: str = "fr", bucket: str = "Tout",
     zg = metrics.zero_gamma(df, spot)
     sel = df[metrics.bucket_mask(df, bucket, today_d)]
     b_lbl = t(lang, BUCKET_KEYS[bucket])
+    # Mêmes murs que le dashboard : structural = clôture veille (magnitude),
+    # live = spot courant en séance (côté), périmètre = bucket affiché.
+    structural = ref_spot(symbol, spot)
+    live = spot if market_is_open() else structural
 
     if name == "gex":
-        levels = metrics.top_gex_levels(df, ref_spot=spot)
+        res = metrics.compute_levels(df, structural, live, bucket=bucket, today=today_d)
         hvl = metrics.zero_gamma(df, spot, weight_col="volume")
-        keys = metrics.key_levels(df, spot, ref_spot=spot)
         return exposure_fig(sel, spot, zg, "gex",
                             t(lang, "gex_title", bucket=b_lbl), lang,
-                            levels=levels, hvl=hvl, xf=xf, keys=keys, window=win)
+                            levels=res["levels"], hvl=hvl, xf=xf, keys=res["keys"], window=win)
     if name == "dex":
+        res = metrics.compute_levels(df, structural, live, bucket=bucket, today=today_d)
         hvl = metrics.zero_gamma(df, spot, weight_col="volume")
-        keys = metrics.key_levels(df, spot, ref_spot=spot)
         return exposure_fig(sel, spot, zg, "dex",
                             t(lang, "dex_title", bucket=b_lbl), lang,
-                            hvl=hvl, xf=xf, keys=keys, level_set="regime", window=win)
+                            hvl=hvl, xf=xf, keys=res["keys"], level_set="regime", window=win)
     if name == "smile":
         return smile_fig(sel, spot, lang)
     if name == "profile":
@@ -1830,12 +1835,15 @@ def create_app() -> Dash:
         # même l'ouverture du cash : le prix de référence reste alors celui de
         # la clôture, qui est l'état sur lequel le plan a été bâti.
         side_spot = snap.spot if market_is_open() else ref
-        levels = metrics.top_gex_levels(df, ref_spot=ref)
+        # Source UNIQUE des niveaux (cf. metrics.compute_levels) : murs classés au
+        # spot structurel (clôture veille), côté au spot live, périmètre = bucket.
+        _res = metrics.compute_levels(df, ref, side_spot, bucket=bucket)
+        levels = _res["levels"]
         if majors and not levels.empty:
             # ne garde que les murs pesant au moins 25 % du plus fort
             levels = levels[levels["gex"].abs() >= 0.25 * levels["gex"].abs().max()]
         hvl = metrics.zero_gamma(df, snap.spot, weight_col="volume")
-        keys = metrics.key_levels(df, side_spot, ref_spot=ref)
+        keys = _res["keys"]
         return (
             levels_strip(levels, lang, hvl, zg, xf, note, keys),
             _pin(exposure_fig(sel, snap.spot, zg, "gex",

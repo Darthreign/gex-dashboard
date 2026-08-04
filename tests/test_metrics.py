@@ -467,3 +467,37 @@ def test_gap_de_futures_ninvalide_pas_les_murs():
     assert fige["put_support"] == 7400.0
     assert suit_le_gap["put_support"] == 7450.0, (
         "le gap déplace bien le support quand on lui passe le prix du future")
+
+
+def test_compute_levels_perimetre_suit_le_bucket():
+    """compute_levels : en 0DTE, un gros mur d'une échéance LOINTAINE est ignoré ;
+    en Tout, il devient le Put Support. C'est le fix du décalage de périmètre."""
+    spot = 100.0
+    near = (datetime.now(ET) + timedelta(days=2)).date()
+    far = (datetime.now(ET) + timedelta(days=30)).date()
+    snap = make_chain(spot, [
+        {"expiry": near, "type": "C", "strike": 105.0, "open_interest": 100.0},
+        {"expiry": near, "type": "P", "strike": 95.0, "open_interest": 100.0},
+        {"expiry": far, "type": "P", "strike": 90.0, "open_interest": 8000.0},  # gros put lointain
+    ])
+    df = metrics.enrich(snap)
+    proche = metrics.compute_levels(df, spot, spot, bucket="0DTE")
+    assert proche["keys"]["put_support"] == 95.0        # lointain ignoré
+    tout = metrics.compute_levels(df, spot, spot, bucket="Tout")
+    assert tout["keys"]["put_support"] == 90.0          # lointain pris en compte
+
+
+def test_compute_levels_cote_suit_le_live_spot():
+    """Le CÔTÉ (résistance/support) suit le live_spot ; la magnitude, le
+    structural_spot. Ici seul le live change."""
+    spot = 100.0
+    near = (datetime.now(ET) + timedelta(days=2)).date()
+    snap = make_chain(spot, [
+        {"expiry": near, "type": "C", "strike": 100.0, "open_interest": 500.0}])
+    df = metrics.enrich(snap)
+    # live SOUS le strike → le strike est une résistance (call_wall)
+    sous = metrics.compute_levels(df, spot, 99.0, bucket="0DTE")
+    assert sous["keys"]["call_wall"] == 100.0
+    # live AU-DESSUS du strike → plus de résistance au-dessus
+    sur = metrics.compute_levels(df, spot, 101.0, bucket="0DTE")
+    assert sur["keys"]["call_wall"] is None

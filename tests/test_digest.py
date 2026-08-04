@@ -53,7 +53,7 @@ def test_orange_une_seule_famille_negative():
              _row("NQ", -1e9, +1e9)]
     d = digest.build_digest(rows, vix=13.0)
     assert d.color == "orange"
-    assert d.verdict == "Trading contrarient risqué sur session US."
+    assert d.verdict == "Trading contrarien risqué sur session US."
     # NDX et QQQ (delta−) regroupés sur la ligne short
     assert any("Delta Négatif (Dealers short gamma) sur NDX et QQQ" in ln for ln in d.lines)
 

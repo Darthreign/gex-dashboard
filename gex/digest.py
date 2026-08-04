@@ -295,14 +295,14 @@ def _verdict(etats: dict[str, dict], vix: float | None,
     vix_haut = vix is not None and vix >= VIX_IMPACT
 
     if fort or n_neg >= 2:
-        return "red", "Trading contrarient déconseillé sur session US.", familles
+        return "red", "Trading contrarien déconseillé sur session US.", familles
     if n_neg == 1:
-        return "orange", "Trading contrarient risqué sur session US.", familles
+        return "orange", "Trading contrarien risqué sur session US.", familles
     if vix_haut:
         return ("orange",
-                "Trading contrarient risqué sur session US — forte amplitude attendue.",
+                "Trading contrarien risqué sur session US — forte amplitude attendue.",
                 familles)
-    return "green", "Trading contrarient avec peu de risque sur session US.", familles
+    return "green", "Trading contrarien avec peu de risque sur session US.", familles
 
 
 # --------------------------------------------------------------------------

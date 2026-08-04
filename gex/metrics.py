@@ -328,9 +328,14 @@ def futures_basis(df: pd.DataFrame, spot: float, today: date | None = None) -> f
 
 
 def top_gex_levels(df: pd.DataFrame, n: int = 5,
-                   ref_spot: float | None = None) -> pd.DataFrame:
-    """Les n strikes au |GEX| le plus fort sur l'échéance la plus proche
-    (le 0DTE en séance ; la prochaine séance après la cloche).
+                   ref_spot: float | None = None,
+                   all_expiries: bool = False) -> pd.DataFrame:
+    """Les n strikes au |GEX| le plus fort.
+
+    Par défaut sur l'échéance la plus proche (le 0DTE en séance ; la prochaine
+    séance après la cloche). `all_expiries=True` agrège TOUTES les échéances du
+    df fourni — c'est le point d'entrée `compute_levels` qui fixe alors le
+    périmètre en amont (par bucket).
 
     `ref_spot` fige le spot auquel le gamma est évalué — la clôture de la
     veille, quand l'open interest a été arrêté. Sans lui, le gamma est repris
@@ -341,7 +346,7 @@ def top_gex_levels(df: pd.DataFrame, n: int = 5,
     if df.empty:
         return pd.DataFrame()
     nearest = df["expiry"].min()
-    sub = df[df["expiry"] == nearest]
+    sub = df if all_expiries else df[df["expiry"] == nearest]
     if ref_spot:
         agg = gex_at_spot(sub, ref_spot).rename("gex").reset_index()
         agg = agg.rename(columns={"index": "strike"})
@@ -397,8 +402,9 @@ def expected_move(df: pd.DataFrame, spot: float) -> float | None:
 
 
 def key_levels(df: pd.DataFrame, spot: float,
-               ref_spot: float | None = None) -> dict[str, float | None]:
-    """Niveaux directionnels de l'échéance la plus proche (esprit MenthorQ) :
+               ref_spot: float | None = None,
+               all_expiries: bool = False) -> dict[str, float | None]:
+    """Niveaux directionnels (esprit MenthorQ) :
 
     - call_wall  : plus forte concentration de gamma call AU-DESSUS du spot
                    (résistance)
@@ -407,6 +413,9 @@ def key_levels(df: pd.DataFrame, spot: float,
 
     Contrairement au classement GEX1-5 (non directionnel), ces niveaux ne sont
     cherchés que du côté où ils font sens comme support/résistance.
+
+    Par défaut sur l'échéance la plus proche ; `all_expiries=True` agrège tout
+    le df fourni (périmètre fixé en amont par `compute_levels`).
     """
     out: dict[str, float | None] = {
         "call_wall": None, "put_support": None, "d1_min": None, "d1_max": None,
@@ -414,7 +423,7 @@ def key_levels(df: pd.DataFrame, spot: float,
     if df.empty:
         return out
     nearest = df["expiry"].min()
-    sub = df[df["expiry"] == nearest]
+    sub = df if all_expiries else df[df["expiry"] == nearest]
     # Le CLASSEMENT des murs se fait au spot de référence (structure figée) ;
     # le côté où on les cherche dépend en revanche du spot COURANT, une
     # résistance n'ayant de sens qu'au-dessus du marché du moment.
@@ -432,6 +441,31 @@ def key_levels(df: pd.DataFrame, spot: float,
         out["d1_min"] = spot - move
         out["d1_max"] = spot + move
     return out
+
+
+def compute_levels(chain: pd.DataFrame, structural_spot: float, live_spot: float,
+                   bucket: str = "0DTE", today: date | None = None,
+                   n: int = 5) -> dict:
+    """POINT D'ENTRÉE UNIQUE des niveaux affichés (murs GEX1-5 + call/put wall).
+
+    Dashboard, API et bot l'appellent tous, pour ne PLUS JAMAIS diverger sur le
+    spot de référence ou le périmètre d'échéances (le vrai bug identifié).
+
+    - `structural_spot` : spot figé (clôture veille) → **magnitude** des murs
+      (l'OI est une photo, on ne veut pas que le prix live déplace les murs) ;
+    - `live_spot` : spot courant → **côté** (au-dessus/en dessous = résistance /
+      support) ;
+    - `bucket` : périmètre d'échéances (0DTE / Semaine / Mois / Tout), plus de
+      filtre `expiry.min()` caché — les murs suivent ce qu'affiche l'interface.
+
+    Renvoie {"levels": DataFrame GEX1-n, "keys": dict call_wall/put_support/1D}.
+    """
+    today = today or datetime.now(ET).date()
+    sub = chain[bucket_mask(chain, bucket, today)] if not chain.empty else chain
+    return {
+        "levels": top_gex_levels(sub, n=n, ref_spot=structural_spot, all_expiries=True),
+        "keys": key_levels(sub, live_spot, ref_spot=structural_spot, all_expiries=True),
+    }
 
 
 def put_call_ratios(df: pd.DataFrame) -> dict[str, float]:
