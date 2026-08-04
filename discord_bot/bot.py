@@ -35,6 +35,7 @@ import io
 import json
 import logging
 import os
+import random
 import re
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -512,6 +513,20 @@ _BUCKETS = {"0dte": "0DTE", "semaine": "Semaine", "week": "Semaine",
 # Échelles d'affichage transposables (comme le sélecteur du dashboard).
 _SCALES = {"SPX", "NDX", "SPY", "QQQ", "ES", "NQ"}
 
+# Vannes tirées au sort quand un mot n'est pas reconnu (`{toks}` = les tokens).
+_IGNORE_QUIPS = (
+    "🤨 {toks} ? C'est un grec que je connais pas, celui-là. Ignoré.",
+    "🧐 {toks} : ni échéance, ni %, ni symbole. J'ai fait semblant de rien.",
+    "🥸 J'ai zappé {toks} — pas dans mon vocabulaire d'options.",
+    "🙈 {toks} m'a filé entre les doigts.",
+    "🃏 {toks} ? Poliment ignoré, sans rancune.",
+    "😎 {toks} n'a pas passé le contrôle qualité. Dehors.",
+    "🫡 {toks} : ignoré avec le sourire.",
+    "🧹 J'ai balayé {toks} sous le tapis (pas compris).",
+    "🛸 {toks} vient d'une autre galaxie, je l'ai laissé repartir.",
+    "🎣 {toks} ? Rien mordu, je relâche.",
+)
+
 
 def _parse_chart_opts(args: tuple[str, ...]) -> tuple[dict, str, list[str]]:
     """Analyse des options d'un graphe, dans N'IMPORTE QUEL ordre :
@@ -549,10 +564,10 @@ async def _send_chart(ctx: commands.Context, symbole: str, chart: str, legende: 
     sym = symbole.upper()
     params, suffixe, unknown = _parse_chart_opts(args)
     if unknown:
-        await ctx.send(
-            f"⚠️ Ignoré : {', '.join(f'`{u}`' for u in unknown)} — options "
-            f"valides : échéance (0dte/semaine/mois/tout), concentration (±%), "
-            f"échelle (SPX/NDX/SPY/QQQ/ES/NQ).")
+        toks = ", ".join(f"`{u}`" for u in unknown)
+        quip = random.choice(_IGNORE_QUIPS).format(toks=toks)
+        await ctx.send(f"{quip}\n-# Valides : échéance (0dte/semaine/mois/tout) · "
+                       f"concentration ±% · échelle (SPX/NDX/SPY/QQQ/ES/NQ).")
     try:
         r = requests.get(f"{DASHBOARD}/api/v1/{sym}/chart/{chart}.png",
                          params=params, timeout=45)
