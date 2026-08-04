@@ -314,7 +314,22 @@ def _verdict(etats: dict[str, dict], vix: float | None,
         return ("orange",
                 "Trading contrarien risqué sur session US — forte amplitude attendue.",
                 familles)
-    return "green", "Trading contrarien avec peu de risque sur session US.", familles
+    return "green", _verdict_vert(etats), familles
+
+
+def _verdict_vert(etats: dict[str, dict]) -> str:
+    """Verdict vert, rendu DIRECTIONNEL quand un sens de delta domine (régime
+    amorti : le côté favorisé par la couverture est peu risqué, l'autre risqué).
+    Delta partagé → phrase neutre. Asymétrie de RISQUE, pas un ordre."""
+    n_neg = sum(1 for e in etats.values() if e["delta"] == "Delta Négatif")
+    n_pos = sum(1 for e in etats.values() if e["delta"] == "Delta Positif")
+    if n_neg > n_pos:      # marché majoritairement Delta− → longs favorisés
+        return ("Trading contrarien sur session US : très peu de risque sur les "
+                "longs, risqué sur les shorts.")
+    if n_pos > n_neg:      # Delta+ → shorts favorisés
+        return ("Trading contrarien sur session US : très peu de risque sur les "
+                "shorts, risqué sur les longs.")
+    return "Trading contrarien avec peu de risque sur session US."
 
 
 # --------------------------------------------------------------------------

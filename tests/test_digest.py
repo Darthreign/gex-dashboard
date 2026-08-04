@@ -47,6 +47,22 @@ def test_exemple_1_vert():
     assert d.vix_line is None
 
 
+def test_verdict_vert_directionnel_selon_delta():
+    """Le verdict vert suit le sens de delta dominant (asymétrie de risque)."""
+    d = digest.build_digest([_row(s, +1e9, -1e9) for s in
+                             ("SPX", "SPY", "NDX", "QQQ", "ES", "NQ")], vix=12.0)
+    assert d.color == "green"
+    assert "très peu de risque sur les longs" in d.verdict and "risqué sur les shorts" in d.verdict
+    d2 = digest.build_digest([_row(s, +1e9, +1e9) for s in
+                              ("SPX", "SPY", "NDX", "QQQ", "ES", "NQ")], vix=12.0)
+    assert "très peu de risque sur les shorts" in d2.verdict
+    # delta partagé (3 vs 3) → phrase neutre
+    rows = [_row(s, +1e9, +1e9) for s in ("SPX", "SPY", "NDX")]
+    rows += [_row(s, +1e9, -1e9) for s in ("QQQ", "ES", "NQ")]
+    d3 = digest.build_digest(rows, vix=12.0)
+    assert d3.verdict == "Trading contrarien avec peu de risque sur session US."
+
+
 def test_lecture_risque_ajoutee_seulement_sur_gamma_positif():
     """Gamma+ → une ligne de lecture du risque (asymétrie, pas un ordre) ;
     Gamma− → rien (le verdict contrarien couvre déjà)."""
