@@ -1270,19 +1270,24 @@ CHART_NAMES = ("gex", "dex", "heatmap", "flow", "gflow", "tape", "history",
                "spotzg", "smile", "profile", "profile_exp", "vanna", "charm", "oi")
 
 
-def _figure_for(symbol: str, name: str, lang: str = "fr") -> go.Figure | None:
-    """Reconstruit un graphique hors du contexte Dash, avec des réglages par
-    défaut (jour courant, fenêtre 4 %, échelle native). Renvoie None si le nom
-    est inconnu ou si les données manquent."""
+def _figure_for(symbol: str, name: str, lang: str = "fr", bucket: str = "Tout",
+                window: float | None = None) -> go.Figure | None:
+    """Reconstruit un graphique hors du contexte Dash. `bucket` (échéance :
+    0DTE / Semaine / Mois / Tout) et `window` (concentration, ex. 0.02) sont
+    réglables — sinon défauts (Tout, 4 %). Renvoie None si le nom est inconnu
+    ou si les données manquent."""
     if name not in CHART_NAMES:
         return None
+    if bucket not in BUCKET_KEYS:
+        bucket = "Tout"
+    win = window if window is not None else 0.04    # défaut concentration ±4 %
     today = datetime.now(ET).strftime("%Y-%m-%d")
     today_d = datetime.now(ET).date()
     xf, _, _ = _transform_for(symbol, symbol)      # échelle native, sans transposition
 
     # Graphiques qui lisent le disque directement (jour + réglages par défaut).
     if name == "heatmap":
-        return heatmap_fig(symbol, lang, today, 0.04, xf, symbol, None)
+        return heatmap_fig(symbol, lang, today, win, xf, symbol, None)
     if name == "flow":
         return flow_fig(symbol, lang, today)
     if name == "gflow":
@@ -1302,47 +1307,49 @@ def _figure_for(symbol: str, name: str, lang: str = "fr") -> go.Figure | None:
         return None
     spot = snap.spot
     zg = metrics.zero_gamma(df, spot)
-    sel = df[metrics.bucket_mask(df, "Tout", today_d)]
-    all_lbl = t(lang, "bucket_all")
+    sel = df[metrics.bucket_mask(df, bucket, today_d)]
+    b_lbl = t(lang, BUCKET_KEYS[bucket])
 
     if name == "gex":
         levels = metrics.top_gex_levels(df, ref_spot=spot)
         hvl = metrics.zero_gamma(df, spot, weight_col="volume")
         keys = metrics.key_levels(df, spot, ref_spot=spot)
         return exposure_fig(sel, spot, zg, "gex",
-                            t(lang, "gex_title", bucket=all_lbl), lang,
-                            levels=levels, hvl=hvl, xf=xf, keys=keys)
+                            t(lang, "gex_title", bucket=b_lbl), lang,
+                            levels=levels, hvl=hvl, xf=xf, keys=keys, window=win)
     if name == "dex":
         hvl = metrics.zero_gamma(df, spot, weight_col="volume")
         keys = metrics.key_levels(df, spot, ref_spot=spot)
         return exposure_fig(sel, spot, zg, "dex",
-                            t(lang, "dex_title", bucket=all_lbl), lang,
-                            hvl=hvl, xf=xf, keys=keys, level_set="regime")
+                            t(lang, "dex_title", bucket=b_lbl), lang,
+                            hvl=hvl, xf=xf, keys=keys, level_set="regime", window=win)
     if name == "smile":
         return smile_fig(sel, spot, lang)
     if name == "profile":
-        return profile_fig(df, spot, zg, lang, 0.08, xf)
+        return profile_fig(df, spot, zg, lang, window or 0.08, xf)
     if name == "profile_exp":
-        return profile_by_expiry_fig(df, spot, lang, 0.08, xf)
+        return profile_by_expiry_fig(df, spot, lang, window or 0.08, xf)
     if name in ("vanna", "charm"):
         sec = metrics.add_second_order(sel, spot)
         col = "vex" if name == "vanna" else "cex"
         title = t(lang, "vex_title" if name == "vanna" else "cex_title")
-        return second_order_fig(sec, spot, col, title, 0.04, xf)
+        return second_order_fig(sec, spot, col, title, win, xf)
     if name == "oi":
         prev = store.load_previous_snapshot(symbol, today)
         if prev is None:
             return None
         prev_day, prev_df = prev
         chg = metrics.oi_change(prev_df, df)
-        return oi_change_fig(chg, spot, lang, prev_day, 0.04, xf)
+        return oi_change_fig(chg, spot, lang, prev_day, win, xf)
     return None
 
 
-def chart_png(symbol: str, name: str, lang: str = "fr") -> bytes | None:
-    """PNG d'un graphique, ou None si indisponible. Fond opaque (le thème sombre
-    a un fond transparent par défaut, illisible dans Discord)."""
-    fig = _figure_for(symbol, name, lang)
+def chart_png(symbol: str, name: str, lang: str = "fr", bucket: str = "Tout",
+              window: float | None = None) -> bytes | None:
+    """PNG d'un graphique, ou None si indisponible. `bucket`/`window` réglables
+    (échéance, concentration). Fond opaque (le thème sombre a un fond transparent
+    par défaut, illisible dans Discord)."""
+    fig = _figure_for(symbol, name, lang, bucket, window)
     if fig is None:
         return None
     fig.update_layout(paper_bgcolor=C["surface"], plot_bgcolor=C["surface"])
@@ -2018,8 +2025,10 @@ def create_app() -> Dash:
         heatmap (cf. chart_png / CHART_NAMES). Consommé par le bot Discord."""
         from flask import Response, request
         lang = request.args.get("lang", "fr")
+        bucket = request.args.get("bucket", "Tout")
+        window = request.args.get("window", type=float)   # ex. 0.02, sinon défaut
         try:
-            png = chart_png(symbol.upper(), name.lower(), lang)
+            png = chart_png(symbol.upper(), name.lower(), lang, bucket, window)
         except Exception:  # noqa: BLE001 — un rendu qui échoue ne doit pas 500 salement
             log.exception("Rendu PNG %s/%s", symbol, name)
             png = None

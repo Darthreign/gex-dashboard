@@ -506,40 +506,72 @@ CHARTS = {
 }
 
 
-async def _send_chart(ctx: commands.Context, symbole: str, chart: str, legende: str) -> None:
-    """Récupère le PNG du dashboard et le poste en pièce jointe."""
+# Échéance : alias saisis -> bucket côté dashboard.
+_BUCKETS = {"0dte": "0DTE", "semaine": "Semaine", "week": "Semaine",
+            "mois": "Mois", "month": "Mois", "tout": "Tout", "all": "Tout"}
+
+
+def _parse_chart_opts(echeance: str | None, concentration: str | None) -> tuple[dict, str]:
+    """(query params, suffixe de légende) depuis l'échéance et la concentration.
+
+    échéance : 0dte / semaine / mois / tout. concentration : 2 / 4 / 10 (%)."""
+    params, bits = {}, []
+    if echeance and echeance.lower() in _BUCKETS:
+        params["bucket"] = _BUCKETS[echeance.lower()]
+        bits.append(params["bucket"])
+    if concentration:
+        try:
+            pct = float(concentration.replace("%", "").replace(",", "."))
+            params["window"] = pct / 100 if pct >= 1 else pct   # 2 -> 0.02
+            bits.append(f"±{params['window'] * 100:g}%")
+        except ValueError:
+            pass
+    return params, (" · ".join(bits))
+
+
+async def _send_chart(ctx: commands.Context, symbole: str, chart: str, legende: str,
+                      echeance: str | None = None, concentration: str | None = None) -> None:
+    """Récupère le PNG du dashboard et le poste en pièce jointe. `echeance` et
+    `concentration` optionnelles (échéance / fenêtre de strikes)."""
     sym = symbole.upper()
+    params, suffixe = _parse_chart_opts(echeance, concentration)
     try:
-        r = requests.get(f"{DASHBOARD}/api/v1/{sym}/chart/{chart}.png", timeout=45)
+        r = requests.get(f"{DASHBOARD}/api/v1/{sym}/chart/{chart}.png",
+                         params=params, timeout=45)
     except requests.RequestException:
         await ctx.send("Dashboard injoignable pour l'instant.")
         return
     if r.status_code != 200 or r.content[:4] != b"\x89PNG":
         await ctx.send(f"Graphique indisponible pour {sym} (pull pas encore fait ?).")
         return
+    leg = f"{legende} — {suffixe}" if suffixe else legende
     fichier = discord.File(io.BytesIO(r.content), filename=f"{sym}_{chart}.png")
-    await ctx.send(f"**{sym}** — {legende}", file=fichier)
+    await ctx.send(f"**{sym}** — {leg}", file=fichier)
 
 
 @bot.command(name="graph")
-async def graph(ctx: commands.Context, symbole: str | None = None,
-                nom: str | None = None) -> None:
-    """`!graph NQ heatmap` — n'importe quel graphique en image."""
+async def graph(ctx: commands.Context, symbole: str | None = None, nom: str | None = None,
+                echeance: str | None = None, concentration: str | None = None) -> None:
+    """`!graph NQ gex 0dte 2` — n'importe quel graphique, échéance et
+    concentration (±%) optionnelles."""
     if not symbole or not nom or nom.lower() not in CHARTS:
         dispo = ", ".join(sorted(CHARTS))
-        await ctx.send(f"Usage : `!graph SYMBOLE NOM`. Graphiques : {dispo}.")
+        await ctx.send(f"Usage : `!graph SYMBOLE NOM [ÉCHÉANCE] [±%]`. "
+                       f"Graphiques : {dispo}.")
         return
     chart, legende = CHARTS[nom.lower()]
-    await _send_chart(ctx, symbole, chart, legende)
+    await _send_chart(ctx, symbole, chart, legende, echeance, concentration)
 
 
 def _make_chart_command(cmd_name: str, chart: str, legende: str):
     @bot.command(name=cmd_name)
-    async def _cmd(ctx: commands.Context, symbole: str | None = None):
+    async def _cmd(ctx: commands.Context, symbole: str | None = None,
+                   echeance: str | None = None, concentration: str | None = None):
         if not symbole:
-            await ctx.send(f"Usage : `!{cmd_name} SYMBOLE` (ex. `!{cmd_name} NQ`).")
+            await ctx.send(f"Usage : `!{cmd_name} SYMBOLE [ÉCHÉANCE] [±%]` "
+                           f"(ex. `!{cmd_name} NQ 0dte 2`).")
             return
-        await _send_chart(ctx, symbole, chart, legende)
+        await _send_chart(ctx, symbole, chart, legende, echeance, concentration)
     return _cmd
 
 
@@ -718,7 +750,9 @@ async def aide(ctx: commands.Context) -> None:
     e.add_field(
         name="🖼️ Graphiques (image)",
         value=(f"`!graph NQ heatmap` — n'importe quel graphique du dashboard.\n"
-               f"Raccourcis directs : {graphes}."),
+               f"Raccourcis directs : {graphes}.\n"
+               f"Options : **échéance** (0dte/semaine/mois/tout) et "
+               f"**concentration** ±% — ex. `!gex NQ 0dte 2`."),
         inline=False,
     )
     e.add_field(
