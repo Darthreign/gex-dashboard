@@ -1271,11 +1271,12 @@ CHART_NAMES = ("gex", "dex", "heatmap", "flow", "gflow", "tape", "history",
 
 
 def _figure_for(symbol: str, name: str, lang: str = "fr", bucket: str = "Tout",
-                window: float | None = None) -> go.Figure | None:
+                window: float | None = None, scale: str | None = None) -> go.Figure | None:
     """Reconstruit un graphique hors du contexte Dash. `bucket` (échéance :
-    0DTE / Semaine / Mois / Tout) et `window` (concentration, ex. 0.02) sont
-    réglables — sinon défauts (Tout, 4 %). Renvoie None si le nom est inconnu
-    ou si les données manquent."""
+    0DTE / Semaine / Mois / Tout), `window` (concentration, ex. 0.02) et `scale`
+    (échelle d'affichage, ex. NQ pour transposer NDX en prix NQ) sont réglables
+    — sinon défauts (Tout, 4 %, échelle native). Renvoie None si le nom est
+    inconnu ou si les données manquent."""
     if name not in CHART_NAMES:
         return None
     if bucket not in BUCKET_KEYS:
@@ -1283,7 +1284,9 @@ def _figure_for(symbol: str, name: str, lang: str = "fr", bucket: str = "Tout",
     win = window if window is not None else 0.04    # défaut concentration ±4 %
     today = datetime.now(ET).strftime("%Y-%m-%d")
     today_d = datetime.now(ET).date()
-    xf, _, _ = _transform_for(symbol, symbol)      # échelle native, sans transposition
+    # Échelle : native par défaut ; sinon transpose les prix vers `scale`
+    # (ex. GEX du NDX affiché en prix NQ), comme le sélecteur du dashboard.
+    xf, _, _ = _transform_for(symbol, (scale or symbol).upper())
 
     # Graphiques qui lisent le disque directement (jour + réglages par défaut).
     if name == "heatmap":
@@ -1345,11 +1348,11 @@ def _figure_for(symbol: str, name: str, lang: str = "fr", bucket: str = "Tout",
 
 
 def chart_png(symbol: str, name: str, lang: str = "fr", bucket: str = "Tout",
-              window: float | None = None) -> bytes | None:
-    """PNG d'un graphique, ou None si indisponible. `bucket`/`window` réglables
-    (échéance, concentration). Fond opaque (le thème sombre a un fond transparent
-    par défaut, illisible dans Discord)."""
-    fig = _figure_for(symbol, name, lang, bucket, window)
+              window: float | None = None, scale: str | None = None) -> bytes | None:
+    """PNG d'un graphique, ou None si indisponible. `bucket`/`window`/`scale`
+    réglables (échéance, concentration, échelle d'affichage). Fond opaque (le
+    thème sombre a un fond transparent par défaut, illisible dans Discord)."""
+    fig = _figure_for(symbol, name, lang, bucket, window, scale)
     if fig is None:
         return None
     fig.update_layout(paper_bgcolor=C["surface"], plot_bgcolor=C["surface"])
@@ -2027,8 +2030,9 @@ def create_app() -> Dash:
         lang = request.args.get("lang", "fr")
         bucket = request.args.get("bucket", "Tout")
         window = request.args.get("window", type=float)   # ex. 0.02, sinon défaut
+        scale = request.args.get("scale")                 # échelle d'affichage
         try:
-            png = chart_png(symbol.upper(), name.lower(), lang, bucket, window)
+            png = chart_png(symbol.upper(), name.lower(), lang, bucket, window, scale)
         except Exception:  # noqa: BLE001 — un rendu qui échoue ne doit pas 500 salement
             log.exception("Rendu PNG %s/%s", symbol, name)
             png = None

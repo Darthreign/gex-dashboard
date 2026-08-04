@@ -509,32 +509,50 @@ CHARTS = {
 # Échéance : alias saisis -> bucket côté dashboard.
 _BUCKETS = {"0dte": "0DTE", "semaine": "Semaine", "week": "Semaine",
             "mois": "Mois", "month": "Mois", "tout": "Tout", "all": "Tout"}
+# Échelles d'affichage transposables (comme le sélecteur du dashboard).
+_SCALES = {"SPX", "NDX", "SPY", "QQQ", "ES", "NQ"}
 
 
-def _parse_chart_opts(echeance: str | None, concentration: str | None) -> tuple[dict, str]:
-    """(query params, suffixe de légende) depuis l'échéance et la concentration.
-
-    échéance : 0dte / semaine / mois / tout. concentration : 2 / 4 / 10 (%)."""
-    params, bits = {}, []
-    if echeance and echeance.lower() in _BUCKETS:
-        params["bucket"] = _BUCKETS[echeance.lower()]
-        bits.append(params["bucket"])
-    if concentration:
+def _parse_chart_opts(args: tuple[str, ...]) -> tuple[dict, str, list[str]]:
+    """Analyse des options d'un graphe, dans N'IMPORTE QUEL ordre :
+    échéance (0dte/semaine/mois/tout), concentration (2 / 4 / 10 %), échelle
+    (SPX/NDX/… pour transposer). Renvoie (query params, suffixe de légende,
+    tokens NON reconnus)."""
+    params, bits, unknown = {}, [], []
+    for tok in args:
+        low = tok.lower()
+        if low in _BUCKETS:
+            params["bucket"] = _BUCKETS[low]
+            bits.append(params["bucket"])
+            continue
+        num = low.replace("%", "").replace(",", ".")
         try:
-            pct = float(concentration.replace("%", "").replace(",", "."))
+            pct = float(num)
             params["window"] = pct / 100 if pct >= 1 else pct   # 2 -> 0.02
             bits.append(f"±{params['window'] * 100:g}%")
+            continue
         except ValueError:
             pass
-    return params, (" · ".join(bits))
+        if tok.upper() in _SCALES:
+            params["scale"] = tok.upper()
+            bits.append(f"échelle {params['scale']}")
+        else:
+            unknown.append(tok)
+    return params, " · ".join(bits), unknown
 
 
 async def _send_chart(ctx: commands.Context, symbole: str, chart: str, legende: str,
-                      echeance: str | None = None, concentration: str | None = None) -> None:
-    """Récupère le PNG du dashboard et le poste en pièce jointe. `echeance` et
-    `concentration` optionnelles (échéance / fenêtre de strikes)."""
+                      *args: str) -> None:
+    """Récupère le PNG du dashboard et le poste en pièce jointe. Options
+    optionnelles (échéance / concentration / échelle) dans n'importe quel ordre ;
+    prévient si un mot n'est pas reconnu."""
     sym = symbole.upper()
-    params, suffixe = _parse_chart_opts(echeance, concentration)
+    params, suffixe, unknown = _parse_chart_opts(args)
+    if unknown:
+        await ctx.send(
+            f"⚠️ Ignoré : {', '.join(f'`{u}`' for u in unknown)} — options "
+            f"valides : échéance (0dte/semaine/mois/tout), concentration (±%), "
+            f"échelle (SPX/NDX/SPY/QQQ/ES/NQ).")
     try:
         r = requests.get(f"{DASHBOARD}/api/v1/{sym}/chart/{chart}.png",
                          params=params, timeout=45)
@@ -550,28 +568,27 @@ async def _send_chart(ctx: commands.Context, symbole: str, chart: str, legende: 
 
 
 @bot.command(name="graph")
-async def graph(ctx: commands.Context, symbole: str | None = None, nom: str | None = None,
-                echeance: str | None = None, concentration: str | None = None) -> None:
-    """`!graph NQ gex 0dte 2` — n'importe quel graphique, échéance et
-    concentration (±%) optionnelles."""
+async def graph(ctx: commands.Context, symbole: str | None = None,
+                nom: str | None = None, *args: str) -> None:
+    """`!graph NQ gex 0dte 2` — n'importe quel graphique ; échéance,
+    concentration (±%) et échelle (ex. NQ) optionnelles, dans tout ordre."""
     if not symbole or not nom or nom.lower() not in CHARTS:
         dispo = ", ".join(sorted(CHARTS))
-        await ctx.send(f"Usage : `!graph SYMBOLE NOM [ÉCHÉANCE] [±%]`. "
+        await ctx.send(f"Usage : `!graph SYMBOLE NOM [ÉCHÉANCE] [±%] [ÉCHELLE]`. "
                        f"Graphiques : {dispo}.")
         return
     chart, legende = CHARTS[nom.lower()]
-    await _send_chart(ctx, symbole, chart, legende, echeance, concentration)
+    await _send_chart(ctx, symbole, chart, legende, *args)
 
 
 def _make_chart_command(cmd_name: str, chart: str, legende: str):
     @bot.command(name=cmd_name)
-    async def _cmd(ctx: commands.Context, symbole: str | None = None,
-                   echeance: str | None = None, concentration: str | None = None):
+    async def _cmd(ctx: commands.Context, symbole: str | None = None, *args: str):
         if not symbole:
-            await ctx.send(f"Usage : `!{cmd_name} SYMBOLE [ÉCHÉANCE] [±%]` "
-                           f"(ex. `!{cmd_name} NQ 0dte 2`).")
+            await ctx.send(f"Usage : `!{cmd_name} SYMBOLE [ÉCHÉANCE] [±%] [ÉCHELLE]` "
+                           f"(ex. `!{cmd_name} NQ 0dte 2`, ou `!{cmd_name} NDX NQ`).")
             return
-        await _send_chart(ctx, symbole, chart, legende, echeance, concentration)
+        await _send_chart(ctx, symbole, chart, legende, *args)
     return _cmd
 
 
@@ -751,8 +768,9 @@ async def aide(ctx: commands.Context) -> None:
         name="🖼️ Graphiques (image)",
         value=(f"`!graph NQ heatmap` — n'importe quel graphique du dashboard.\n"
                f"Raccourcis directs : {graphes}.\n"
-               f"Options : **échéance** (0dte/semaine/mois/tout) et "
-               f"**concentration** ±% — ex. `!gex NQ 0dte 2`."),
+               f"Options (tout ordre) : **échéance** (0dte/semaine/mois/tout), "
+               f"**concentration** ±%, **échelle** (SPX/NDX/…) — ex. "
+               f"`!gex NQ 0dte 2`, `!gex NDX NQ` (NDX en prix NQ)."),
         inline=False,
     )
     e.add_field(
