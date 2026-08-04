@@ -40,9 +40,24 @@ def test_exemple_1_vert():
     d = digest.build_digest(rows, vix=14.0)
     assert d.color == "green"
     assert "peu de risque" in d.verdict
-    assert d.lines[0] == "Gamma Positif - Delta Positif (Dealers long gamma) sur SPX, SPY, NDX, ES et NQ"
-    assert d.lines[1] == "Gamma Négatif - Delta Positif (Dealers long gamma) sur QQQ"
+    assert "Gamma Positif - Delta Positif (Dealers long gamma) sur SPX, SPY, NDX, ES et NQ" in d.lines
+    assert "Gamma Négatif - Delta Positif (Dealers long gamma) sur QQQ" in d.lines
+    # lecture de risque ajoutée sous l'état Gamma+ (et pas sous le Gamma−)
+    assert any("Short avec très peu de risque" in ln for ln in d.lines)
     assert d.vix_line is None
+
+
+def test_lecture_risque_ajoutee_seulement_sur_gamma_positif():
+    """Gamma+ → une ligne de lecture du risque (asymétrie, pas un ordre) ;
+    Gamma− → rien (le verdict contrarien couvre déjà)."""
+    d1 = digest.build_digest([_row("SPX", +1e9, -1e9)], vix=12.0)   # Gamma+ Delta−
+    assert any("Réduire le risque sur les shorts | Long avec très peu de risque" in ln
+               for ln in d1.lines)
+    d2 = digest.build_digest([_row("SPX", +1e9, +1e9)], vix=12.0)   # Gamma+ Delta+
+    assert any("Réduire le risque sur les longs | Short avec très peu de risque" in ln
+               for ln in d2.lines)
+    d3 = digest.build_digest([_row("SPX", -1e9, +1e9)], vix=12.0)   # Gamma−
+    assert not any("très peu de risque" in ln for ln in d3.lines)
 
 
 def test_orange_une_seule_famille_negative():

@@ -66,6 +66,15 @@ FORT_MIN_HISTORY = 20     # sans assez d'historique, pas de « Fort » deviné
 # Couleurs Discord (barre d'embed) — vert / orange / rouge.
 COLORS = {"green": 0x2ECC71, "orange": 0xE67E22, "red": 0xE74C3C}
 
+# Lecture du RISQUE ajoutée sous les états à Gamma POSITIF (régime amorti) : le
+# marché « aide » un sens de couverture, donc l'autre sens travaille à
+# contre-courant. C'est une asymétrie de RISQUE, pas un ordre (aucun « achète /
+# vends »). Sur Gamma négatif, rien : le verdict contrarien couvre déjà le cas.
+_LECTURE_RISQUE = {
+    ("Gamma Positif", "Delta Négatif"): "Réduire le risque sur les shorts | Long avec très peu de risque",
+    ("Gamma Positif", "Delta Positif"): "Réduire le risque sur les longs | Short avec très peu de risque",
+}
+
 # Familles indépendantes. Le régime réel tient à DEUX classes d'actifs, pas à
 # six marchés : SPX/SPY/ES sont trois vues du même S&P 500 ; NDX/QQQ/NQ du même
 # Nasdaq. On les agrège par famille pour ne pas compter trois fois le même
@@ -184,6 +193,9 @@ def build_digest(rows: list[dict], vix: float | None = None,
     lines = []
     for (gamma, delta, gloss), syms in groupes.items():
         lines.append(f"{gamma} - {delta} ({gloss}) sur {_liste(syms)}")
+        lecture = _LECTURE_RISQUE.get((gamma, delta))
+        if lecture:
+            lines.append(f"→ {lecture}")
 
     vix_line = (f"VIX supérieur à {int(vix_seuil)} ! (actuellement {vix:.2f})"
                 if vix is not None and vix > vix_seuil else None)
