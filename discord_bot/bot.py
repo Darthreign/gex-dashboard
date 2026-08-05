@@ -172,7 +172,7 @@ async def _post_close(d: dict) -> None:
     msg = d.get("close_message")
     if channel is None or not msg:
         return
-    await channel.send(embed=discord.Embed(description=msg, color=0x2C3E50))
+    await channel.send(embed=discord.Embed(description=msg, color=0xE74C3C))
 
 
 def _en_session(now: dt.datetime) -> bool:
@@ -651,7 +651,7 @@ async def cloture(ctx: commands.Context) -> None:
     if not d or not d.get("close_message"):
         await ctx.send("Message de clôture indisponible (dashboard pas prêt ?).")
         return
-    await ctx.send(embed=discord.Embed(description=d["close_message"], color=0x2C3E50))
+    await ctx.send(embed=discord.Embed(description=d["close_message"], color=0xE74C3C))
 
 
 @bot.command(name="sondage")

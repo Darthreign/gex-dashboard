@@ -318,38 +318,54 @@ def _verdict(etats: dict[str, dict], vix: float | None,
     return "green", _verdict_vert(etats), familles
 
 
-def _mm_stance(etats: dict[str, dict]) -> str | None:
-    """Sens des Market Makers pour le message de clôture.
+# Message de clôture : on précise le sens des MM PAR INSTRUMENT tradé (futures).
+_CLOSE_SYMBOLS = ("NQ", "ES")
+_ARTICLES = {"NQ": "le NQ", "ES": "l'ES", "SPX": "le SPX", "NDX": "le NDX",
+             "SPY": "le SPY", "QQQ": "le QQQ"}
 
-    Gamma positif dominant → les MM sont à CONTRE-SENS du delta dominant
-    (Delta− → « long » le sous-jacent, Delta+ → « short »). Gamma négatif
-    dominant → « amplificateur » (régime dangereux). None si delta partagé.
-    """
-    if not etats:
-        return None
-    n_gneg = sum(1 for e in etats.values() if e["neg"])
-    if n_gneg > len(etats) - n_gneg:          # gamma négatif dominant
-        return "amplificateur"
-    n_dneg = sum(1 for e in etats.values() if e["delta"] == "Delta Négatif")
-    n_dpos = sum(1 for e in etats.values() if e["delta"] == "Delta Positif")
-    if n_dneg > n_dpos:
-        return "long"       # delta négatif → MM long
-    if n_dpos > n_dneg:
-        return "short"      # delta positif → MM short
-    return None             # partagé
+
+def _join_syms(syms: list[str]) -> str:
+    """« le NQ et l'ES » — articles + « et » avant le dernier."""
+    labels = [_ARTICLES.get(s, s) for s in syms]
+    if len(labels) == 1:
+        return labels[0]
+    return ", ".join(labels[:-1]) + " et " + labels[-1]
 
 
 def _close_message(etats: dict[str, dict]) -> str:
     """Message automatique de « clôture » (heure fixée côté bot) : arrêter le
-    contrarien, et rappeler le sens des MM. Contexte de risque, pas un ordre."""
-    stance = _mm_stance(etats)
-    if stance == "amplificateur":
-        milieu = ("Attention : on est en régime **amplificateur de mouvement** "
-                  "(gamma négatif) — ça risque de mal se passer.")
-    elif stance in ("long", "short"):
-        milieu = f"Actuellement les Market Makers sont **{stance}** le sous-jacent."
-    else:
-        milieu = "Le positionnement des Market Makers est partagé (pas de sens net)."
+    contrarien + sens des Market Makers PAR instrument. Gamma+ → MM à
+    contre-sens du delta (Delta− → long, Delta+ → short) ; Gamma− →
+    « amplificateur » (danger). Contexte de risque, pas un ordre."""
+    long_, short_, ampli = [], [], []
+    for sym in _CLOSE_SYMBOLS:
+        e = etats.get(sym)
+        if e is None:
+            continue
+        if e["neg"]:                              # gamma négatif → amplificateur
+            ampli.append(sym)
+        elif e["delta"] == "Delta Négatif":       # gamma+ delta− → MM long
+            long_.append(sym)
+        else:                                     # gamma+ delta+ → MM short
+            short_.append(sym)
+
+    parts = []
+    if long_:
+        parts.append(f"**long** sur {_join_syms(long_)}")
+    if short_:
+        parts.append(f"**short** sur {_join_syms(short_)}")
+    milieu = ("Actuellement les Market Makers sont " + " et ".join(parts) + "."
+              if parts else "")
+    if ampli:
+        v = "est" if len(ampli) == 1 else "sont"
+        amp = _join_syms(ampli)
+        amp = amp[:1].upper() + amp[1:]          # 1re lettre seulement (garder « ES »)
+        warn = (f"⚠️ {amp} {v} en régime **amplificateur de mouvement** — ça "
+                f"risque de mal se passer.")
+        milieu = f"{milieu} {warn}" if milieu else warn
+    if not milieu:
+        milieu = "Positionnement des Market Makers indéterminé (pas de données NQ/ES)."
+
     return ("🔒 Stop le trading contrarien si tu n'es pas en position ; si tu es en "
             "position, sors dès que tu peux. " + milieu +
             " Verrouille ton trading et va profiter de ta soirée. 🌙")

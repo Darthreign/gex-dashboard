@@ -47,19 +47,20 @@ def test_exemple_1_vert():
     assert d.vix_line is None
 
 
-def test_close_message_sens_des_market_makers():
-    """Message de clôture : Gamma+ → MM à contre-sens du delta ; Gamma− →
-    amplificateur. La consigne d'arrêt est toujours là."""
-    long_ = digest.build_digest([_row(s, +1e9, -1e9) for s in
-                                 ("SPX", "SPY", "NDX", "QQQ", "ES", "NQ")], vix=12.0)
-    assert "Market Makers sont **long**" in long_.close_message
-    assert "Stop le trading contrarien" in long_.close_message
-    short = digest.build_digest([_row(s, +1e9, +1e9) for s in
-                                 ("SPX", "SPY", "NDX", "QQQ", "ES", "NQ")], vix=12.0)
-    assert "Market Makers sont **short**" in short.close_message
-    ampli = digest.build_digest([_row(s, -1e9, +1e9) for s in
-                                 ("SPX", "SPY", "NDX", "QQQ", "ES", "NQ")], vix=12.0)
-    assert "amplificateur de mouvement" in ampli.close_message
+def test_close_message_sens_par_instrument():
+    """Message de clôture : sens des MM détaillé PAR instrument (NQ/ES). Gamma+ →
+    contre-sens du delta ; Gamma− → amplificateur."""
+    # NQ & ES Gamma+ Delta− → MM long sur les deux
+    d = digest.build_digest([_row(s, +1e9, -1e9) for s in ("NQ", "ES")], vix=12.0)
+    assert "**long** sur le NQ et l'ES" in d.close_message
+    assert "Stop le trading contrarien" in d.close_message
+    # NQ long (Delta−), ES short (Delta+)
+    mix = digest.build_digest([_row("NQ", +1e9, -1e9), _row("ES", +1e9, +1e9)], vix=12.0)
+    assert "**long** sur le NQ" in mix.close_message and "**short** sur l'ES" in mix.close_message
+    # ES en gamma négatif → amplificateur
+    ampli = digest.build_digest([_row("NQ", +1e9, -1e9), _row("ES", -1e9, +1e9)], vix=12.0)
+    assert "**long** sur le NQ" in ampli.close_message
+    assert "L'ES est en régime **amplificateur de mouvement**" in ampli.close_message
 
 
 def test_verdict_vert_directionnel_selon_delta():
