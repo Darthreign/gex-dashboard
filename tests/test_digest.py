@@ -47,6 +47,21 @@ def test_exemple_1_vert():
     assert d.vix_line is None
 
 
+def test_close_message_sens_des_market_makers():
+    """Message de clôture : Gamma+ → MM à contre-sens du delta ; Gamma− →
+    amplificateur. La consigne d'arrêt est toujours là."""
+    long_ = digest.build_digest([_row(s, +1e9, -1e9) for s in
+                                 ("SPX", "SPY", "NDX", "QQQ", "ES", "NQ")], vix=12.0)
+    assert "Market Makers sont **long**" in long_.close_message
+    assert "Stop le trading contrarien" in long_.close_message
+    short = digest.build_digest([_row(s, +1e9, +1e9) for s in
+                                 ("SPX", "SPY", "NDX", "QQQ", "ES", "NQ")], vix=12.0)
+    assert "Market Makers sont **short**" in short.close_message
+    ampli = digest.build_digest([_row(s, -1e9, +1e9) for s in
+                                 ("SPX", "SPY", "NDX", "QQQ", "ES", "NQ")], vix=12.0)
+    assert "amplificateur de mouvement" in ampli.close_message
+
+
 def test_verdict_vert_directionnel_selon_delta():
     """Le verdict vert suit le sens de delta dominant (asymétrie de risque)."""
     d = digest.build_digest([_row(s, +1e9, -1e9) for s in

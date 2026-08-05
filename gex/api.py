@@ -390,6 +390,7 @@ def register_api(app) -> None:
             "discord_color": d.discord_color,
             "confidence": d.confidence,
             "families": d.families,
+            "close_message": d.close_message,
             "text": d.to_text(),
             "signature": list(d.signature),
         })

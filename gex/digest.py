@@ -101,6 +101,7 @@ class Digest:
     confidence: str | None = None    # "forte" | "moyenne" | "faible"
     signature: tuple = field(default_factory=tuple)   # pour détecter un changement
     families: dict = field(default_factory=dict)      # {famille: {score, statut, confiance}}
+    close_message: str = ""                           # post automatique de clôture (22h)
 
     def to_text(self) -> str:
         parts = [self.header, ""] + self.lines
@@ -208,7 +209,7 @@ def build_digest(rows: list[dict], vix: float | None = None,
     signature = tuple(sorted((nom, f["statut"]) for nom, f in familles.items()))
     signature += (("couleur", color),)
     return Digest(_header(now), lines, vix_line, verdict, color, confidence,
-                  signature, familles)
+                  signature, familles, _close_message(etats))
 
 
 def _liste(syms: list[str]) -> str:
@@ -315,6 +316,43 @@ def _verdict(etats: dict[str, dict], vix: float | None,
                 "Trading contrarien risqué sur session US — forte amplitude attendue.",
                 familles)
     return "green", _verdict_vert(etats), familles
+
+
+def _mm_stance(etats: dict[str, dict]) -> str | None:
+    """Sens des Market Makers pour le message de clôture.
+
+    Gamma positif dominant → les MM sont à CONTRE-SENS du delta dominant
+    (Delta− → « long » le sous-jacent, Delta+ → « short »). Gamma négatif
+    dominant → « amplificateur » (régime dangereux). None si delta partagé.
+    """
+    if not etats:
+        return None
+    n_gneg = sum(1 for e in etats.values() if e["neg"])
+    if n_gneg > len(etats) - n_gneg:          # gamma négatif dominant
+        return "amplificateur"
+    n_dneg = sum(1 for e in etats.values() if e["delta"] == "Delta Négatif")
+    n_dpos = sum(1 for e in etats.values() if e["delta"] == "Delta Positif")
+    if n_dneg > n_dpos:
+        return "long"       # delta négatif → MM long
+    if n_dpos > n_dneg:
+        return "short"      # delta positif → MM short
+    return None             # partagé
+
+
+def _close_message(etats: dict[str, dict]) -> str:
+    """Message automatique de « clôture » (heure fixée côté bot) : arrêter le
+    contrarien, et rappeler le sens des MM. Contexte de risque, pas un ordre."""
+    stance = _mm_stance(etats)
+    if stance == "amplificateur":
+        milieu = ("Attention : on est en régime **amplificateur de mouvement** "
+                  "(gamma négatif) — ça risque de mal se passer.")
+    elif stance in ("long", "short"):
+        milieu = f"Actuellement les Market Makers sont **{stance}** le sous-jacent."
+    else:
+        milieu = "Le positionnement des Market Makers est partagé (pas de sens net)."
+    return ("🔒 Stop le trading contrarien si tu n'es pas en position ; si tu es en "
+            "position, sors dès que tu peux. " + milieu +
+            " Verrouille ton trading et va profiter de ta soirée. 🌙")
 
 
 def _verdict_vert(etats: dict[str, dict]) -> str:

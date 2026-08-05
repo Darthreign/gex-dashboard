@@ -7,7 +7,8 @@ dérivées — et les relaie dans un salon Discord. On peut donc le partager ave
 des amis sans qu'ils aient de compte courtier ni accès aux chaînes dxFeed.
 
 Ce qu'il fait :
-- poste l'état du gamma à heures fixes (8h30 / 15h25 / 15h35 / 17h30 Paris) ;
+- poste l'état du gamma à heures fixes (8h30 / 15h25 / 15h35 Paris), plus un
+  message de « clôture » à 16h (stop contrarien + sens des MM + bonne soirée) ;
 - poste aussi à chaque CHANGEMENT DE RÉGIME pendant la session US (le verdict,
   jugé par famille S&P / Nasdaq, qui bascule) ;
 - répond aux commandes : `!etat`/`!gamma` (digest complet), `!gamma SYM`
@@ -67,7 +68,9 @@ DASHBOARD = os.environ.get("DASHBOARD_URL", "http://127.0.0.1:8050").rstrip("/")
 # Heures Paris des posts fixes (h, min). Modifiable sans toucher au reste.
 # 15h25 = juste avant l'open US (15h30 = 9h30 ET) ; 15h35 = mise à jour juste
 # après l'open.
-SCHEDULE = {(8, 30), (15, 25), (15, 35), (17, 30)}
+SCHEDULE = {(8, 30), (15, 25), (15, 35)}
+# Message de « clôture » (Paris) : stop contrarien + sens des MM + bonne soirée.
+CLOSE_POST = (16, 0)
 # Session US en heure de Paris (15h30 = 9h30 ET open ; ~22h = 16h ET close).
 SESSION_START, SESSION_END = dt.time(15, 30), dt.time(22, 0)
 
@@ -161,6 +164,15 @@ async def _post(d: dict) -> None:
                     CHANNEL_ID)
         return
     await channel.send(embed=_embed(d))
+
+
+async def _post_close(d: dict) -> None:
+    """Message de clôture (stop contrarien + sens des MM + bonne soirée)."""
+    channel = bot.get_channel(CHANNEL_ID)
+    msg = d.get("close_message")
+    if channel is None or not msg:
+        return
+    await channel.send(embed=discord.Embed(description=msg, color=0x2C3E50))
 
 
 def _en_session(now: dt.datetime) -> bool:
@@ -387,6 +399,12 @@ async def tick() -> None:
     slot = (now.hour, now.minute)
     jour = now.date().isoformat()
     deja = _posted.setdefault(jour, set())
+    if slot == CLOSE_POST and slot not in deja:      # message de clôture (16h)
+        deja.add(slot)
+        await _post_close(d)
+        log.info("Message de clôture posté (%02dh%02d)", slot[0], slot[1])
+        _last_signature, _last_digest = signature, d
+        return
     if slot in SCHEDULE and slot not in deja:
         deja.add(slot)
         await _post(d)
@@ -829,9 +847,9 @@ async def aide(ctx: commands.Context) -> None:
                "(forte/moyenne/faible) reflète la couverture des données."),
         inline=False,
     )
-    e.set_footer(text="Posté automatiquement à 8h30 / 15h25 / 15h35 / 17h30 "
-                      "(Paris) et à chaque changement de régime. Silencieux le "
-                      "week-end.")
+    e.set_footer(text="Posté automatiquement à 8h30 / 15h25 / 15h35 (Paris), "
+                      "message de clôture à 16h, et à chaque changement de régime. "
+                      "Silencieux le week-end.")
     await ctx.send(embed=e)
 
 
