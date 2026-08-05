@@ -644,6 +644,16 @@ for _name, (_chart, _leg) in CHARTS.items():
     _make_chart_command(_name, _chart, _leg)
 
 
+@bot.command(name="cloture", aliases=["close"])
+async def cloture(ctx: commands.Context) -> None:
+    """`!cloture` — poste le message de clôture à la demande (sinon auto à 16h)."""
+    d = fetch("/api/v1/digest")
+    if not d or not d.get("close_message"):
+        await ctx.send("Message de clôture indisponible (dashboard pas prêt ?).")
+        return
+    await ctx.send(embed=discord.Embed(description=d["close_message"], color=0x2C3E50))
+
+
 @bot.command(name="sondage")
 async def sondage(ctx: commands.Context) -> None:
     """`!sondage` — poste le sondage de séance à la demande (sinon auto à 23h05).
@@ -801,7 +811,8 @@ async def aide(ctx: commands.Context) -> None:
                "`!gamma NQ` — les valeurs calculées d'un symbole (GEX net, "
                "DEX net, Zero Gamma).\n"
                "`!vix` — la volatilité (VIX), son régime (calme→panique) et sa "
-               "position vs le seuil."),
+               "position vs le seuil.\n"
+               "`!cloture` — le message de clôture (auto à 16h)."),
         inline=False,
     )
     e.add_field(
