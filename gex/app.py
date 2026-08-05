@@ -17,7 +17,7 @@ from dash import Dash, ctx, dcc, html
 from dash.dependencies import Input, Output, State
 from dash.exceptions import PreventUpdate
 
-from . import metrics, scales, store
+from . import digest, metrics, scales, store
 from .api import register_api
 from .tt_web import connection_status, register_oauth
 from .config import SETTINGS, UNDERLYINGS, targets
@@ -1152,14 +1152,25 @@ def regime_banner(symbol: str, lang: str) -> html.Div:
         s = st.summary
     if s is None or s.zero_gamma is None:
         return html.Div(style={"display": "none"})
-    dex_hist = store.load_history(symbol).get("net_dex")
-    r = metrics.regime_read(s.net_gex, s.net_dex, dex_history=dex_hist)
-    color = C[_REGIME_SEVERITY_COLOR[r["severity"]]]
+    # EXACTEMENT le même texte que le bot (digest.symbol_reading), pour que le
+    # bandeau et les posts Discord disent la même chose. Traduit selon la langue.
+    hist = store.load_history(symbol)
+    netgex_hist = hist["net_gex"] if not hist.empty and "net_gex" in hist else None
+    rd = digest.symbol_reading(s.net_gex, s.net_dex, netgex_hist, lang=lang)
+    key = ("neg" if rd["gamma"] == "Fort Gamma Négatif"
+           else "zg" if rd["gamma"] == "Gamma Négatif" else "ok")
+    color = C[key]
+    # « \n → … » (ligne de lecture du risque) rendue sur une seconde ligne.
+    text_children = []
+    for i, ligne in enumerate(rd["text"].split("\n")):
+        if i:
+            text_children.append(html.Br())
+        text_children.append(ligne)
     return html.Div(
         [
             html.Div(t(lang, "regime_label"), className="regime-label",
                      style={"color": color}),
-            html.Div(regime_text(lang, r), className="regime-text"),
+            html.Div(text_children, className="regime-text"),
             html.Div(t(lang, "regime_disclaimer"), className="regime-disclaimer"),
         ],
         className="regime-banner",

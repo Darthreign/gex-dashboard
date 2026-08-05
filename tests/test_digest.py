@@ -47,6 +47,20 @@ def test_exemple_1_vert():
     assert d.vix_line is None
 
 
+def test_symbol_reading_fr_et_en_suivent_le_digest():
+    """Le bandeau (symbol_reading) dit EXACTEMENT ce que le bot dit, FR et EN."""
+    fr = digest.symbol_reading(+1e9, -1e9, lang="fr")
+    assert fr["text"].startswith("Gamma Positif - Delta Négatif (Dealers short gamma)")
+    assert "→ Réduire le risque sur les shorts | Long avec très peu de risque" in fr["text"]
+    en = digest.symbol_reading(+1e9, -1e9, lang="en")
+    assert en["text"].startswith("Positive Gamma - Negative Delta (Dealers short gamma)")
+    assert "→ Reduce risk on shorts | Long with very little risk" in en["text"]
+    assert fr["gamma"] == en["gamma"] == "Gamma Positif"   # clé interne (couleur)
+    # cohérence avec le bot : la 1re ligne FR est incluse dans la ligne du digest
+    d = digest.build_digest([_row("SPX", +1e9, -1e9)], vix=12.0)
+    assert any(fr["text"].split(chr(10))[0] in ln for ln in d.lines)
+
+
 def test_close_message_sens_par_instrument():
     """Message de clôture : sens des MM détaillé PAR instrument (NQ/ES). Gamma+ →
     contre-sens du delta ; Gamma− → amplificateur."""

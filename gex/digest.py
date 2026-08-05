@@ -167,6 +167,39 @@ def classify(net_gex: float, net_dex: float, hist=None) -> dict:
             "neg": net_gex < 0, "fort": fort}
 
 
+# Traductions EN pour le bandeau du dashboard (le bot reste FR). Le bandeau doit
+# dire EXACTEMENT la même chose que le digest, dans la langue de l'interface.
+_GAMMA_EN = {"Gamma Positif": "Positive Gamma", "Gamma Négatif": "Negative Gamma",
+             "Fort Gamma Négatif": "Strong Negative Gamma"}
+_DELTA_EN = {"Delta Positif": "Positive Delta", "Delta Négatif": "Negative Delta"}
+_LECTURE_RISQUE_EN = {
+    ("Gamma Positif", "Delta Négatif"): "Reduce risk on shorts | Long with very little risk",
+    ("Gamma Positif", "Delta Positif"): "Reduce risk on longs | Short with very little risk",
+}
+
+
+def symbol_reading(net_gex: float, net_dex: float, hist=None,
+                   lang: str = "fr") -> dict:
+    """Lecture d'UN symbole — MÊME texte que les lignes du digest (bot), pour que
+    le bandeau du dashboard dise exactement la même chose. Traduit en EN si
+    besoin (même structure). Renvoie {text, gamma}.
+
+    `text` : « Gamma X - Delta Y (Dealers … gamma) » + éventuellement la ligne de
+    lecture du risque (sur Gamma positif). `gamma` (FR) : pour la couleur.
+    """
+    c = classify(net_gex, net_dex, hist)
+    if lang == "en":
+        gamma, delta = _GAMMA_EN.get(c["gamma"], c["gamma"]), _DELTA_EN.get(c["delta"], c["delta"])
+        lecture = _LECTURE_RISQUE_EN.get((c["gamma"], c["delta"]))
+    else:
+        gamma, delta = c["gamma"], c["delta"]
+        lecture = _LECTURE_RISQUE.get((c["gamma"], c["delta"]))
+    text = f"{gamma} - {delta} ({c['gloss']})"
+    if lecture:
+        text += f"\n→ {lecture}"
+    return {"text": text, "gamma": c["gamma"]}
+
+
 def build_digest(rows: list[dict], vix: float | None = None,
                  now: datetime | None = None, vix_seuil: float = VIX_SEUIL) -> Digest:
     """Construit le digest à partir des états par symbole.
