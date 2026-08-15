@@ -1,4 +1,4 @@
-"""Capture tick de clôture : recorder (gex/tickrec), stats à la demande
+"""Capture tick d'ouverture : collecteur (gex/tickcapture), stats à la demande
 (gex/tickstats) et endpoint /tick_context.
 
 Le cœur : `stop_swept` — la réponse objective à « un stop aurait-il été
@@ -10,28 +10,60 @@ from datetime import datetime, time
 
 import pandas as pd
 
-from gex import tickrec, tickstats
+from gex import tickcapture, tickstats
 from gex.metrics import ET
 
 
-def test_recorder_inerte_hors_fenetre():
-    r = tickrec.TickWindowRecorder(symbols=("NQ",))
-    r.record("NQ", 1.0, 100.0)                 # inactif -> ignoré
-    assert r.disarm_and_drain() == {}
+# Univers de test : streamer -> libellé, comme le construit _build_universe.
+_UNIV = {"/NQU26:XCME": "NQ", "/ESU26:XCME": "ES"}
 
 
-def test_recorder_capture_et_filtre():
-    r = tickrec.TickWindowRecorder(symbols=("NQ",))
-    r.arm()
-    assert r.active is True
-    r.record("NQ", 1.0, 100.0, 99.9, 100.1)
-    r.record("ES", 1.0, 50.0)                  # pas suivi -> ignoré
-    r.record("NQ", 2.0, None)                  # prix None -> ignoré
-    buf = r.disarm_and_drain()
+def _print(stream, price, **kw):
+    return {"eventType": "TimeAndSale", "eventSymbol": stream, "price": price, **kw}
+
+
+def test_record_mapping_et_filtre():
+    c = tickcapture.TickCapture()
+    c.record(_UNIV, _print("/NQU26:XCME", 100.0, size=3, bidPrice=99.9,
+                           askPrice=100.1, aggressorSide="BUY", time=1_700_000_000_000),
+             now=42.0)
+    c.record(_UNIV, _print("/ZZZ:XCME", 50.0), now=42.0)      # non suivi -> ignoré
+    c.record(_UNIV, _print("/NQU26:XCME", float("nan")), now=42.0)  # NaN -> ignoré
+    buf = c._buf
     assert list(buf) == ["NQ"] and len(buf["NQ"]) == 1
-    assert r.active is False                    # fenêtre refermée
     row = buf["NQ"][0]
-    assert row["price"] == 100.0 and row["source"] == "dxfeed"
+    assert row["price"] == 100.0 and row["size"] == 3.0
+    assert row["bid"] == 99.9 and row["ask"] == 100.1 and row["side"] == "BUY"
+    assert row["source"] == "dxfeed"
+    # horodatage d'ÉCHANGE (ms) prioritaire sur la réception locale
+    assert row["ts"] == 1_700_000_000.0
+
+
+def test_record_repli_temps_local_sans_champ_time():
+    c = tickcapture.TickCapture()
+    c.record(_UNIV, _print("/ESU26:XCME", 5000.0), now=99.5)   # pas de `time`
+    row = c._buf["ES"][0]
+    assert row["ts"] == 99.5 and row["size"] is None and row["side"] is None
+
+
+def test_arm_sans_identifiants_reste_inerte(monkeypatch):
+    monkeypatch.setattr(tickcapture, "credentials_present", lambda: False)
+    c = tickcapture.TickCapture()
+    c.arm()
+    assert c.active is False and c._thread is None    # aucune session ouverte
+
+
+def test_stop_and_flush_ecrit_le_brut(monkeypatch):
+    from gex import store
+    written = {}
+    monkeypatch.setattr(store, "append_ticks",
+                        lambda sym, rows, ts: written.setdefault(sym, rows))
+    c = tickcapture.TickCapture()
+    c.record(_UNIV, _print("/NQU26:XCME", 100.0), now=1.0)
+    c.record(_UNIV, _print("/NQU26:XCME", 101.0), now=2.0)
+    total = c.stop_and_flush()
+    assert total == 2 and [r["price"] for r in written["NQ"]] == [100.0, 101.0]
+    assert c._buf == {}                                # buffer vidé
 
 
 def _ticks():
