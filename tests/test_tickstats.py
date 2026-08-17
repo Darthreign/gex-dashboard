@@ -22,48 +22,63 @@ def _print(stream, price, **kw):
     return {"eventType": "TimeAndSale", "eventSymbol": stream, "price": price, **kw}
 
 
-def test_record_mapping_et_filtre():
+def test_record_mapping_et_schema():
     c = tickcapture.TickCapture()
-    c.record(_UNIV, _print("/NQU26:XCME", 100.0, size=3, bidPrice=99.9,
-                           askPrice=100.1, aggressorSide="BUY", time=1_700_000_000_000),
+    c.record(_UNIV, _print("/NQU26:XCME", 100.0, size=3, time=1_700_000_000_000),
              now=42.0)
     c.record(_UNIV, _print("/ZZZ:XCME", 50.0), now=42.0)      # non suivi -> ignoré
     c.record(_UNIV, _print("/NQU26:XCME", float("nan")), now=42.0)  # NaN -> ignoré
     buf = c._buf
     assert list(buf) == ["NQ"] and len(buf["NQ"]) == 1
     row = buf["NQ"][0]
-    assert row["price"] == 100.0 and row["size"] == 3.0
-    assert row["bid"] == 99.9 and row["ask"] == 100.1 and row["side"] == "BUY"
-    assert row["source"] == "dxfeed"
+    # schéma aligné sur ticks_full : ts, price, volume, source (rien d'autre)
+    assert set(row) == {"ts", "price", "volume", "source"}
+    assert row["price"] == 100.0 and row["volume"] == 3 and row["source"] == "dxfeed"
+    assert isinstance(row["volume"], int)
     # horodatage d'ÉCHANGE (ms) prioritaire sur la réception locale
     assert row["ts"] == 1_700_000_000.0
 
 
-def test_record_repli_temps_local_sans_champ_time():
+def test_record_repli_temps_local_et_volume_defaut():
     c = tickcapture.TickCapture()
-    c.record(_UNIV, _print("/ESU26:XCME", 5000.0), now=99.5)   # pas de `time`
+    c.record(_UNIV, _print("/ESU26:XCME", 5000.0), now=99.5)   # pas de `time` ni `size`
     row = c._buf["ES"][0]
-    assert row["ts"] == 99.5 and row["size"] is None and row["side"] is None
+    assert row["ts"] == 99.5 and row["volume"] == 0            # garde-fou int, pas de NaN
 
 
-def test_arm_sans_identifiants_reste_inerte(monkeypatch):
+def test_start_sans_identifiants_reste_inerte(monkeypatch):
     monkeypatch.setattr(tickcapture, "credentials_present", lambda: False)
     c = tickcapture.TickCapture()
-    c.arm()
-    assert c.active is False and c._thread is None    # aucune session ouverte
+    c.start()
+    assert c._started is False                          # aucune session ouverte
 
 
-def test_stop_and_flush_ecrit_le_brut(monkeypatch):
-    from gex import store
-    written = {}
-    monkeypatch.setattr(store, "append_ticks",
-                        lambda sym, rows, ts: written.setdefault(sym, rows))
+def test_drain_vide_le_buffer():
     c = tickcapture.TickCapture()
-    c.record(_UNIV, _print("/NQU26:XCME", 100.0), now=1.0)
-    c.record(_UNIV, _print("/NQU26:XCME", 101.0), now=2.0)
-    total = c.stop_and_flush()
-    assert total == 2 and [r["price"] for r in written["NQ"]] == [100.0, 101.0]
-    assert c._buf == {}                                # buffer vidé
+    c.record(_UNIV, _print("/NQU26:XCME", 100.0, size=1), now=1.0)
+    c.record(_UNIV, _print("/NQU26:XCME", 101.0, size=2), now=2.0)
+    out = c.drain()
+    assert [r["price"] for r in out["NQ"]] == [100.0, 101.0]
+    assert c._buf == {} and c.drain() == {}            # vidé, re-drain vide
+
+
+def test_append_ticks_parquet_journalier(tmp_path, monkeypatch):
+    """append_ticks écrit UN parquet par jour, schéma ts/price/volume/source,
+    et concatène les flushes successifs du même jour."""
+    from datetime import datetime
+
+    from gex import store
+    from gex.config import SETTINGS
+
+    monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
+    ts = datetime(2026, 8, 17, 10, 0)
+    store.append_ticks("NQ", [{"ts": 1.0, "price": 100.0, "volume": 3, "source": "dxfeed"}], ts)
+    store.append_ticks("NQ", [{"ts": 2.0, "price": 101.0, "volume": 1, "source": "dxfeed"}], ts)
+    df = store.load_ticks("NQ", "2026-08-17")
+    assert list(df.columns) == ["ts", "price", "volume", "source"]
+    assert list(df["price"]) == [100.0, 101.0] and list(df["volume"]) == [3, 1]
+    # un seul fichier journalier
+    assert (tmp_path / "ticks" / "NQ" / "2026-08-17.parquet").exists()
 
 
 def _ticks():

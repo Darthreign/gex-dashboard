@@ -14,6 +14,7 @@ from gex.flowtape import TAPE
 from gex.logsetup import setup_logging
 from gex.rtquote import PUBLIC_QUOTES, QUOTES
 from gex.scheduler import start_scheduler
+from gex.tickcapture import CAPTURE
 
 
 def main(host: str = "127.0.0.1", port: int = 8050) -> None:
@@ -26,6 +27,9 @@ def main(host: str = "127.0.0.1", port: int = 8050) -> None:
     PUBLIC_QUOTES.start()
     # order flow signé sur options : sans identifiants, l'appel est sans effet
     TAPE.start()
+    # capture tick-par-tick continue NQ/ES (24/5) : session dxLink dédiée,
+    # sans identifiants l'appel est sans effet
+    CAPTURE.start()
     create_app().run(host=host, port=port, debug=False)
 
 

@@ -405,17 +405,24 @@ def flush_tape() -> None:
             log.exception("Échec écriture de l'order flow %s", symbol)
 
 
-def arm_open_ticks() -> None:
-    """Ouvre la fenêtre de capture tick de l'OUVERTURE US (9h30 ET / 15h30
-    Paris) : session dxLink dédiée, abonnée à TimeAndSale sur NQ/ES. Gating
-    sur les identifiants délégué à CAPTURE.arm (le repli public délayé ne
-    dirait rien du vrai comportement à l'ouverture)."""
-    CAPTURE.arm()
-
-
-def flush_open_ticks() -> None:
-    """Ferme la fenêtre (10h30 ET / 16h30 Paris) et écrit le brut sur disque."""
-    CAPTURE.stop_and_flush()
+def flush_ticks() -> None:
+    """Écrit sur disque le brut tick-par-tick accumulé par la capture continue
+    (cf. gex/tickcapture). Même logique que flush_prices/flush_tape : le
+    collecteur agrège en mémoire, seul le flush touche le disque — ici vers le
+    parquet JOURNALIER de chaque contrat, chaque tick rangé selon la date ET de
+    son horodatage d'échange (le passage de minuit répartit proprement)."""
+    buf = CAPTURE.drain()
+    for symbol, rows in buf.items():
+        by_day: dict[str, list[dict]] = {}
+        for r in rows:
+            ts_et = datetime.fromtimestamp(r["ts"], tz=UTC).astimezone(ET)
+            by_day.setdefault(ts_et.strftime("%Y-%m-%d"), []).append(r)
+        for rows_day in by_day.values():
+            ts_et = datetime.fromtimestamp(rows_day[0]["ts"], tz=UTC).astimezone(ET)
+            try:
+                store.append_ticks(symbol, rows_day, ts_et)
+            except Exception:  # noqa: BLE001 — une écriture ratée ne doit rien casser
+                log.exception("Capture tick : échec écriture %s", symbol)
 
 
 def start_scheduler() -> BackgroundScheduler:
@@ -441,11 +448,11 @@ def start_scheduler() -> BackgroundScheduler:
     # rafraîchir toutes les 15 min n'aurait aucun sens.
     sched.add_job(pull_native_index, "interval", minutes=3,
                   max_instances=1, coalesce=True)
-    # Capture tick-par-tick de l'OUVERTURE US : armée 9h30 ET (15h30 Paris),
-    # vidée sur disque 10h30 ET (16h30 Paris) — session dxLink dédiée abonnée
-    # à TimeAndSale sur NQ/ES, sans jamais toucher le flux spot du dashboard.
-    sched.add_job(arm_open_ticks, "cron", day_of_week="mon-fri", hour=9, minute=30)
-    sched.add_job(flush_open_ticks, "cron", day_of_week="mon-fri", hour=10, minute=30)
+    # Capture tick-par-tick CONTINUE (24/5) : le collecteur (démarré au boot,
+    # cf. run.py) agrège en mémoire, ce job vide vers le parquet journalier de
+    # NQ/ES toutes les 60 s. Session dxLink dédiée, sans jamais toucher le flux
+    # spot du dashboard.
+    sched.add_job(flush_ticks, "interval", seconds=60, max_instances=1, coalesce=True)
     sched.add_job(push_data_repo, "cron", day_of_week="mon-fri", hour=16, minute=20)
     # Sauvegarde distante après le push git : elle porte ce que GitHub refuse
     # (archives Databento de plus de 100 Mo). Sans rclone configuré, l'appel

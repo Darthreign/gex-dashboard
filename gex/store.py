@@ -169,14 +169,23 @@ def load_prices(symbol: str, day: str) -> pd.DataFrame:
     return pd.read_parquet(path) if path.exists() else pd.DataFrame()
 
 
-def append_ticks(symbol: str, rows: list[dict], ts: datetime) -> Path:
-    """Ajoute des ticks bruts (fenêtre de clôture) au fichier du jour.
+def append_ticks(symbol: str, rows: list[dict], ts: datetime) -> Path | None:
+    """Ajoute des ticks bruts au PARQUET JOURNALIER du symbole.
 
-    Brut volontairement CONSERVÉ (fenêtre ~20 min/jour, quelques Mo) : c'est la
-    seule source qui permet de rejouer la séquence à la seconde — donc de
-    répondre à « un stop aurait-il été balayé ? ». Même provenance courtier que
-    les bougies : `source="dxfeed"`, exclu de l'export par défaut.
+    Schéma aligné sur le jeu de référence `ticks_full` (Databento) pour que la
+    capture live soit directement exploitable par le backtest : colonnes
+    `ts` (epoch s), `price`, `volume`, `source`. Brut volontairement CONSERVÉ —
+    la seule source qui permet de rejouer la séquence à la seconde (« un stop
+    aurait-il été balayé ? »). Provenance courtier : `source="dxfeed"`, exclu
+    de l'export par défaut.
+
+    La capture continue (24/5, cf. gex/tickcapture) vide en mémoire toutes les
+    ~60 s ; à ~3,5 Mo/jour/contrat le lire-concaténer-réécrire reste léger. Le
+    verrou par fichier + le temporaire unique protègent des écritures
+    concurrentes (cf. _write_atomic). Un flush vide n'écrit rien.
     """
+    if not rows:
+        return None
     path = _ensure(SETTINGS.data_dir / "ticks" / symbol / f"{ts:%Y-%m-%d}.parquet")
     with _lock_for(path):
         new = pd.DataFrame(rows)

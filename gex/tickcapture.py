@@ -1,23 +1,33 @@
-"""Capture TICK-PAR-TICK des futures NQ et ES sur l'HEURE D'OUVERTURE US
-(9h30-10h30 ET = 15h30-16h30 Paris).
+"""Capture TICK-PAR-TICK CONTINUE des futures NQ et ES — la totale, en
+permanence sur toute la session (dimanche 18h ET → vendredi 17h ET).
 
 Pourquoi une session dxLink DÉDIÉE, et non un tap sur le flux du dashboard :
 le flux temps réel (`rtquote.QUOTES`) s'abonne à `Quote`/`Trade`, deux
 événements CONFLATÉS — dxFeed n'y livre qu'un échantillon (~1 print toutes
 les quelques secondes), suffisant pour un spot d'affichage mais pas pour
 rejouer une séquence à la seconde. `TimeAndSale`, lui, livre CHAQUE
-transaction. On ouvre donc notre propre connexion, on s'abonne à
-`TimeAndSale` sur les deux contrats front, et on écoute — sans jamais toucher
-`QUOTES`, pour que le dashboard reste en direct quoi qu'il arrive à cette
-capture.
+transaction, avec sa taille. On ouvre donc notre propre connexion, on
+s'abonne à `TimeAndSale` sur les deux contrats front, et on écoute en
+continu — sans jamais toucher `QUOTES`, pour que le dashboard reste en direct
+quoi qu'il arrive ici.
 
-Ce qu'on garde : le BRUT intégral de la fenêtre (prix, taille, bid/ask, côté
-agresseur, horodatage d'échange). C'est la seule donnée non reconstituable —
-ni CBOE ni le feed courtier ne rejouent un historique tick-par-tick (le
-courtier n'expose l'historique qu'en bougies `Candle`). Un tick non capté est
-perdu pour toujours : d'où « brut conservé, jamais recalculé ». La fenêtre
-(~60 min/jour) pèse quelques dizaines de Mo par contrat, écrits une seule fois
-à la fermeture — jamais dans le chemin d'ingestion.
+Ce qu'on garde, aligné sur le jeu de référence `ticks_full` (Databento) pour
+que la capture live soit DIRECTEMENT exploitable par le backtest : `ts` (epoch
+s, heure d'échange), `price`, `volume`, `source`. C'est la seule donnée non
+reconstituable — ni CBOE ni le feed courtier ne rejouent un historique
+tick-par-tick (le courtier n'expose l'historique qu'en bougies `Candle`). Un
+tick non capté est perdu pour toujours : d'où « brut conservé, jamais recalculé ».
+
+Volume : la session tourne ~23h/j, 5j/7, à quelques dizaines à centaines de
+prints/s par contrat en séance. On agrège donc en mémoire et on vide toutes
+les ~30 s (cf. scheduler.flush_ticks) vers des CHUNKS PARTITIONNÉS
+(`data/ticks/NQ/<jour>/part-*.parquet`) — jamais un fichier journalier réécrit
+en boucle (O(n²) sur des millions de lignes). Le buffer mémoire ne porte donc
+jamais plus de ~30 s de flux.
+
+La session se RECYCLE périodiquement (reconnexion) pour reconstruire l'univers :
+le contrat front roule chaque trimestre, et une reconnexion propre vaut mieux
+qu'un canal ouvert depuis des jours.
 
 ⚠️ Licence : données courtier, usage personnel, non redistribuables. Écrit
 avec `source="dxfeed"`, ce qui exclut ces fichiers de l'export (cf.
@@ -45,84 +55,48 @@ log = logging.getLogger(__name__)
 # la clé de résolution dans resolve_symbols -> symbole streamer (/NQU26:XCME).
 TRACKED_FUTURES: tuple[str, ...] = ("NQ", "ES")
 
-# Borne DURE de session : même si le job de vidange (flush) ne se déclenchait
-# pas (crash du scheduler, horloge de travers), l'écoute ne peut pas déborder
-# au-delà de cette durée. La fenêtre visée fait 60 min ; on laisse une marge
-# pour couvrir un léger décalage de planification sans jamais tourner sans fin.
-MAX_SESSION_S = 75 * 60
-
-# Cadence de re-vérification du drapeau `active` quand le flux est silencieux :
-# `recv` est enveloppé dans un wait_for pour que la fermeture soit prise en
-# compte en ~1 s même si aucun print n'arrive (rare à l'ouverture, mais on ne
-# veut pas dépendre du trafic pour s'arrêter proprement).
-RECV_TIMEOUT_S = 1.0
+# La session se recycle (reconnexion + reconstruction d'univers) à ce rythme :
+# suffisant pour rattraper un roll de contrat le jour dit et repartir sur une
+# connexion fraîche, sans reconnecter pour rien en pleine séance.
+UNIVERSE_REFRESH_S = 30 * 60
 
 
 class TickCapture:
-    """Session dxLink dédiée qui bufferise chaque `TimeAndSale` de NQ/ES
-    pendant la fenêtre d'ouverture. Armée/vidée par le scheduler ; totalement
-    inerte hors fenêtre (aucun thread, aucune connexion)."""
+    """Collecteur continu : une session dxLink dédiée qui bufferise chaque
+    `TimeAndSale` de NQ/ES. Démarré une fois au boot ; le scheduler vide le
+    buffer sur disque toutes les ~30 s (cf. flush_ticks). Sans identifiants,
+    `start()` est sans effet."""
 
     def __init__(self, symbols: tuple[str, ...] = TRACKED_FUTURES) -> None:
         self.symbols = tuple(symbols)
-        self.active = False
         self._buf: dict[str, list[dict]] = {}
         self._lock = threading.Lock()
-        self._thread: threading.Thread | None = None
+        self._started = False
         self._state = "off"
 
-    # -- cycle de vie (appelé par le scheduler) ---------------------------
+    # -- cycle de vie -----------------------------------------------------
 
-    def arm(self) -> None:
-        """Ouvre la fenêtre : connecte une session dédiée et bufferise les
-        prints. Sans identifiants courtier, ne fait rien — le repli public est
-        délayé ~15 min, sans valeur pour du tick-par-tick."""
-        if not credentials_present():
-            log.info("Capture tick d'ouverture désactivée (identifiants absents)")
+    def start(self) -> None:
+        """Lance le collecteur en tâche de fond (idempotent). Sans identifiants
+        courtier, ne fait rien — le repli public délayé ~15 min n'a aucune
+        valeur pour du tick-par-tick."""
+        if self._started:
             return
-        with self._lock:
-            if self.active:
-                return
-            self.active = True
-            self._buf = {}
+        if not credentials_present():
+            log.info("Capture tick continue désactivée (identifiants absents)")
+            self._state = "off"
+            return
+        self._started = True
         self._state = "connecting"
-        self._thread = threading.Thread(
-            target=self._run, name="tickcapture", daemon=True)
-        self._thread.start()
-        log.info("Capture tick d'ouverture ARMÉE "
-                 "(9h30-10h30 ET / 15h30-16h30 Paris)")
+        threading.Thread(target=self._run, name="tickcapture", daemon=True).start()
 
-    def stop_and_flush(self) -> int:
-        """Ferme la fenêtre, attend la fin de la session, écrit le brut sur
-        disque. Renvoie le nombre de ticks écrits."""
+    def drain(self) -> dict[str, list[dict]]:
+        """Récupère et vide le buffer (appelé par le scheduler pour écrire sur
+        disque). Un swap sous verrou : la capture continue d'alimenter un
+        buffer neuf pendant l'écriture."""
         with self._lock:
-            self.active = False
-        t = self._thread
-        if t is not None:
-            t.join(timeout=15)  # la boucle relit `active` toutes les ~1 s
-        self._thread = None
-        with self._lock:
-            buf, self._buf = self._buf, {}
-        if not buf:
-            return 0
-
-        from . import store
-        from .metrics import ET
-        from datetime import datetime
-
-        now = datetime.now(ET)
-        total = 0
-        for symbol, rows in buf.items():
-            if rows:
-                try:
-                    store.append_ticks(symbol, rows, now)
-                    total += len(rows)
-                except Exception:  # noqa: BLE001 — une écriture ratée n'en condamne pas six
-                    log.exception("Capture tick : échec écriture %s", symbol)
-        if total:
-            log.info("Capture tick d'ouverture : %d ticks écrits (%s)",
-                     total, now.date())
-        return total
+            out, self._buf = self._buf, {}
+        return out
 
     # -- capture (chemin réseau) ------------------------------------------
 
@@ -144,10 +118,7 @@ class TickCapture:
         row = {
             "ts": float(ts),
             "price": float(price),
-            "size": _num(item.get("size")),
-            "bid": _num(item.get("bidPrice")),
-            "ask": _num(item.get("askPrice")),
-            "side": item.get("aggressorSide") or None,
+            "volume": _vol(item.get("size")),
             "source": "dxfeed",
         }
         with self._lock:
@@ -158,7 +129,15 @@ class TickCapture:
 
         Réutilise `resolve_symbols`, qui lit le contrat actif via l'API
         authentifiée (`/NQU26:XCME`) — un future NON résolu est OMIS, jamais
-        rabattu sur le ticker action homonyme (cf. rtquote.resolve_symbols)."""
+        rabattu sur le ticker action homonyme (cf. rtquote.resolve_symbols).
+
+        Le cache de contrat front est PURGÉ pour nos futures avant résolution :
+        sans ça, une session recyclée pendant des semaines resterait collée à
+        l'ancien contrat après un roll. Purge partagée (le flux live la
+        rebâtira au besoin) — sans danger."""
+        from . import rtquote
+        for label in self.symbols:
+            rtquote._FUTURE_STREAM_CACHE.pop(label, None)
         syms = resolve_symbols(access)
         out: dict[str, str] = {}
         for label in self.symbols:
@@ -166,34 +145,29 @@ class TickCapture:
             if s:
                 out[s] = label
             else:
-                log.warning("Capture tick : %s non résolu — exclu de la fenêtre",
-                            label)
+                log.warning("Capture tick : %s non résolu — exclu", label)
         return out
 
     def _run(self) -> None:
         backoff = BACKOFF_START
-        while self.active:
+        while True:
             try:
                 asyncio.run(self._session())
                 backoff = BACKOFF_START
             except Exception as exc:  # noqa: BLE001 — la capture doit survivre à tout
-                if not self.active:
-                    break
                 self._state = "disconnected"
                 log.warning("Capture tick interrompue (%s) — reprise dans %.0f s",
                             exc, backoff)
                 time.sleep(backoff)
                 backoff = min(backoff * 2, BACKOFF_MAX)
-        self._state = "off"
 
     async def _session(self) -> None:
         """Une session : résout l'univers, s'abonne à TimeAndSale, écoute
-        jusqu'à la fermeture (`active=False`) ou la borne dure de session.
+        jusqu'au recyclage périodique (reconnexion pour reconstruire l'univers).
 
-        Modelée sur `flowtape._session`, mais : un SEUL type d'événement
-        (TimeAndSale, pas de Greeks), pas de recentrage (le contrat front ne
-        roule pas en une heure), et `recv` borné par un timeout pour relire le
-        drapeau `active` même quand le flux se tait."""
+        Modelée sur `flowtape._session`, mais un SEUL type d'événement
+        (TimeAndSale, pas de Greeks) et pas de recentrage (le sous-jacent est le
+        future lui-même, pas une fenêtre de strikes)."""
         import websockets
 
         token, url, access = quote_token()
@@ -211,13 +185,9 @@ class TickCapture:
                         "keepaliveTimeout": 60, "acceptKeepaliveTimeout": 60})
             auth_sent = False
             subscribed = False
-            deadline = time.monotonic() + MAX_SESSION_S
+            deadline = time.monotonic() + UNIVERSE_REFRESH_S
 
-            while self.active and time.monotonic() < deadline:
-                try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=RECV_TIMEOUT_S)
-                except asyncio.TimeoutError:
-                    continue  # rien reçu : on reboucle pour relire `active`
+            async for raw in ws:
                 m = json.loads(raw)
                 typ = m.get("type")
                 if typ == "AUTH_STATE":
@@ -242,7 +212,7 @@ class TickCapture:
                                 "add": [{"type": "TimeAndSale", "symbol": s}
                                         for s in universe]})
                     self._state = "connected"
-                    log.info("Capture tick active — %s",
+                    log.info("Capture tick continue active — %s",
                              ", ".join(f"{v}={k}" for k, v in universe.items()))
                 elif typ == "KEEPALIVE":
                     await send({"type": "KEEPALIVE", "channel": 0})
@@ -255,12 +225,18 @@ class TickCapture:
                                 and item.get("eventType") == "TimeAndSale"):
                             self.record(universe, item, now)
 
+                # Recyclage périodique : reconnexion + univers reconstruit (roll).
+                if time.monotonic() > deadline:
+                    log.info("Capture tick : renouvellement périodique de la session")
+                    return
 
-def _num(v) -> float | None:
-    """float propre, ou None (NaN et non-numérique compris) — pour ne jamais
-    écrire un NaN déguisé en mesure dans le parquet."""
-    return float(v) if isinstance(v, (int, float)) and v == v else None
+
+def _vol(v) -> int:
+    """Taille du print en entier (contrats), ou 0 si absente/invalide — la
+    colonne `volume` reste int64 (comme le jeu de référence), sans NaN. Un
+    future porte toujours une taille ; le 0 ne sert que de garde-fou."""
+    return int(v) if isinstance(v, (int, float)) and v == v and v >= 0 else 0
 
 
-# Singleton partagé : le scheduler arme (9h30 ET) et vide (10h30 ET).
+# Singleton partagé : démarré au boot (run.py / tt_web.py), vidé par le scheduler.
 CAPTURE = TickCapture()
