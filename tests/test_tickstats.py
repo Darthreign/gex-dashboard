@@ -24,26 +24,29 @@ def _print(stream, price, **kw):
 
 def test_record_mapping_et_schema():
     c = tickcapture.TickCapture()
-    c.record(_UNIV, _print("/NQU26:XCME", 100.0, size=3, time=1_700_000_000_000),
-             now=42.0)
+    c.record(_UNIV, _print("/NQU26:XCME", 100.0, size=3, bidPrice=99.75,
+                           askPrice=100.25, aggressorSide="BUY",
+                           time=1_700_000_000_000), now=42.0)
     c.record(_UNIV, _print("/ZZZ:XCME", 50.0), now=42.0)      # non suivi -> ignoré
     c.record(_UNIV, _print("/NQU26:XCME", float("nan")), now=42.0)  # NaN -> ignoré
     buf = c._buf
     assert list(buf) == ["NQ"] and len(buf["NQ"]) == 1
     row = buf["NQ"][0]
-    # schéma aligné sur ticks_full : ts, price, volume, source (rien d'autre)
-    assert set(row) == {"ts", "price", "volume", "source"}
+    # socle ticks_full + surensemble bid/ask/side : TOUT le brut conservé
+    assert set(row) == {"ts", "price", "volume", "bid", "ask", "side", "source"}
     assert row["price"] == 100.0 and row["volume"] == 3 and row["source"] == "dxfeed"
     assert isinstance(row["volume"], int)
+    assert row["bid"] == 99.75 and row["ask"] == 100.25 and row["side"] == "BUY"
     # horodatage d'ÉCHANGE (ms) prioritaire sur la réception locale
     assert row["ts"] == 1_700_000_000.0
 
 
-def test_record_repli_temps_local_et_volume_defaut():
+def test_record_repli_temps_local_et_defauts():
     c = tickcapture.TickCapture()
-    c.record(_UNIV, _print("/ESU26:XCME", 5000.0), now=99.5)   # pas de `time` ni `size`
+    c.record(_UNIV, _print("/ESU26:XCME", 5000.0), now=99.5)   # ni time, size, bid/ask, side
     row = c._buf["ES"][0]
     assert row["ts"] == 99.5 and row["volume"] == 0            # garde-fou int, pas de NaN
+    assert row["bid"] is None and row["ask"] is None and row["side"] is None
 
 
 def test_start_sans_identifiants_reste_inerte(monkeypatch):

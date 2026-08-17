@@ -11,12 +11,17 @@ s'abonne à `TimeAndSale` sur les deux contrats front, et on écoute en
 continu — sans jamais toucher `QUOTES`, pour que le dashboard reste en direct
 quoi qu'il arrive ici.
 
-Ce qu'on garde, aligné sur le jeu de référence `ticks_full` (Databento) pour
-que la capture live soit DIRECTEMENT exploitable par le backtest : `ts` (epoch
-s, heure d'échange), `price`, `volume`, `source`. C'est la seule donnée non
-reconstituable — ni CBOE ni le feed courtier ne rejouent un historique
-tick-par-tick (le courtier n'expose l'historique qu'en bougies `Candle`). Un
-tick non capté est perdu pour toujours : d'où « brut conservé, jamais recalculé ».
+Ce qu'on garde : TOUT le brut du print, sans rien jeter — `ts` (epoch s, heure
+d'échange), `price`, `volume`, `bid`, `ask`, `side` (côté agresseur), `source`.
+Le socle `ts/price/volume/source` est aligné sur le jeu de référence
+`ticks_full` (Databento), donc la capture reste DIRECTEMENT exploitable par le
+backtest ; `bid/ask/side` sont un SURENSEMBLE (colonnes en plus, ignorées par
+qui n'en veut pas). On les garde parce qu'un moteur de test qui évolue pourrait
+en avoir besoin un jour (ex. classer les prints par l'agresseur) : c'est la
+seule donnée non reconstituable — ni CBOE ni le feed courtier ne rejouent un
+historique tick-par-tick (le courtier n'expose l'historique qu'en bougies
+`Candle`). Un tick non capté est perdu pour toujours : d'où « brut conservé,
+jamais recalculé ».
 
 Volume : la session tourne ~23h/j, 5j/7, à quelques dizaines à centaines de
 prints/s par contrat en séance. On agrège donc en mémoire et on vide toutes
@@ -119,6 +124,9 @@ class TickCapture:
             "ts": float(ts),
             "price": float(price),
             "volume": _vol(item.get("size")),
+            "bid": _num(item.get("bidPrice")),
+            "ask": _num(item.get("askPrice")),
+            "side": item.get("aggressorSide") or None,
             "source": "dxfeed",
         }
         with self._lock:
@@ -236,6 +244,12 @@ def _vol(v) -> int:
     colonne `volume` reste int64 (comme le jeu de référence), sans NaN. Un
     future porte toujours une taille ; le 0 ne sert que de garde-fou."""
     return int(v) if isinstance(v, (int, float)) and v == v and v >= 0 else 0
+
+
+def _num(v) -> float | None:
+    """float propre, ou None (NaN et non-numérique compris) — pour bid/ask, où
+    l'absence doit rester une absence, jamais un NaN déguisé en cotation."""
+    return float(v) if isinstance(v, (int, float)) and v == v else None
 
 
 # Singleton partagé : démarré au boot (run.py / tt_web.py), vidé par le scheduler.
