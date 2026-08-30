@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime, time, timedelta
 
 import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -409,18 +409,29 @@ def flush_ticks() -> None:
     """Écrit sur disque le brut tick-par-tick accumulé par la capture continue
     (cf. gex/tickcapture). Même logique que flush_prices/flush_tape : le
     collecteur agrège en mémoire, seul le flush touche le disque — ici vers le
-    parquet JOURNALIER de chaque contrat, chaque tick rangé selon la date ET de
-    son horodatage d'échange (le passage de minuit répartit proprement)."""
+    parquet JOURNALIER de chaque contrat, chaque tick rangé selon sa SÉANCE CME,
+    définie en HEURE DE NEW YORK : 18:00 ET (ouverture) -> 16:59 ET (clôture) du
+    lendemain, soit `date = (heure ET + 6h).date()`.
+
+    ⚠️ Surtout PAS un découpage à l'heure de Paris : Paris ne vaut ET+6 que
+    lorsque les deux zones sont en heure d'été en même temps. Pendant les ~3
+    semaines par an où les bascules US et UE sont décalées (mi-mars, fin
+    octobre), l'écart tombe à 5 h et le fichier commence à 19:00 ET au lieu de
+    18:00 — la séance est alors coupée au mauvais endroit. L'ET est la seule
+    référence stable, parce que c'est celle du marché lui-même."""
     buf = CAPTURE.drain()
     for symbol, rows in buf.items():
-        by_day: dict[str, list[dict]] = {}
+        by_day: dict[str, list] = {}
         for r in rows:
-            ts_et = datetime.fromtimestamp(r["ts"], tz=UTC).astimezone(ET)
-            by_day.setdefault(ts_et.strftime("%Y-%m-%d"), []).append(r)
-        for rows_day in by_day.values():
-            ts_et = datetime.fromtimestamp(rows_day[0]["ts"], tz=UTC).astimezone(ET)
+            # +6 h : 18:00 ET (ouverture) bascule sur minuit, donc la date
+            # obtenue EST celle de la séance, y compris pour la partie du soir.
+            sess = datetime.fromtimestamp(r["ts"], tz=UTC).astimezone(ET) + timedelta(hours=6)
+            by_day.setdefault(sess.strftime("%Y-%m-%d"), []).append((sess, r))
+        for items in by_day.values():
+            ts_sess = items[0][0]
+            rows_day = [it[1] for it in items]
             try:
-                store.append_ticks(symbol, rows_day, ts_et)
+                store.append_ticks(symbol, rows_day, ts_sess)
             except Exception:  # noqa: BLE001 — une écriture ratée ne doit rien casser
                 log.exception("Capture tick : échec écriture %s", symbol)
 
