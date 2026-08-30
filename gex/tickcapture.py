@@ -7,9 +7,13 @@ le flux temps réel (`rtquote.QUOTES`) s'abonne à `Quote`/`Trade`, deux
 les quelques secondes), suffisant pour un spot d'affichage mais pas pour
 rejouer une séquence à la seconde. `TimeAndSale`, lui, livre CHAQUE
 transaction, avec sa taille. On ouvre donc notre propre connexion, on
-s'abonne à `TimeAndSale` sur les deux contrats front, et on écoute en
-continu — sans jamais toucher `QUOTES`, pour que le dashboard reste en direct
-quoi qu'il arrive ici.
+s'abonne à `TimeAndSale` sur NQ et ES, et on écoute en continu — sans jamais
+toucher `QUOTES`, pour que le dashboard reste en direct quoi qu'il arrive ici.
+
+Pour chaque future, on suit le contrat ACTIF **et le SUIVANT** : la série
+continue bascule AU VOLUME (comme le `NQ.v.0` de Databento), ce qui suppose de
+pouvoir comparer les deux. Seul le contrat dominant est écrit sur disque ; le
+choix de la séance est figé d'après le volume de la veille (cf. gex/roll).
 
 Ce qu'on garde : TOUT le brut du print, sans rien jeter — `ts` (epoch s, heure
 d'échange), `price`, `volume`, `bid`, `ask`, `side` (côté agresseur), `source`.
@@ -23,15 +27,13 @@ historique tick-par-tick (le courtier n'expose l'historique qu'en bougies
 `Candle`). Un tick non capté est perdu pour toujours : d'où « brut conservé,
 jamais recalculé ».
 
-Volume : la session tourne ~23h/j, 5j/7, à quelques dizaines à centaines de
-prints/s par contrat en séance. On agrège donc en mémoire et on vide toutes
-les ~30 s (cf. scheduler.flush_ticks) vers des CHUNKS PARTITIONNÉS
-(`data/ticks/NQ/<jour>/part-*.parquet`) — jamais un fichier journalier réécrit
-en boucle (O(n²) sur des millions de lignes). Le buffer mémoire ne porte donc
-jamais plus de ~30 s de flux.
+Débit : la session tourne ~23h/j, 5j/7, à quelques centaines de prints/s en
+séance. On agrège en mémoire et le scheduler vide toutes les 60 s vers le
+parquet JOURNALIER de la séance (cf. scheduler.flush_ticks) : le buffer ne
+porte jamais plus d'une minute de flux.
 
 La session se RECYCLE périodiquement (reconnexion) pour reconstruire l'univers :
-le contrat front roule chaque trimestre, et une reconnexion propre vaut mieux
+les contrats roulent chaque trimestre, et une reconnexion propre vaut mieux
 qu'un canal ouvert depuis des jours.
 
 ⚠️ Licence : données courtier, usage personnel, non redistribuables. Écrit
@@ -51,13 +53,12 @@ from .rtquote import (
     BACKOFF_START,
     credentials_present,
     quote_token,
-    resolve_symbols,
 )
 
 log = logging.getLogger(__name__)
 
-# Les deux futures suivis. La valeur EST le libellé de stockage (data/ticks/NQ),
-# la clé de résolution dans resolve_symbols -> symbole streamer (/NQU26:XCME).
+# Les deux futures suivis : le libellé sert de dossier de stockage
+# (data/ticks/NQ) et de code produit pour résoudre les contrats (cf. gex/roll).
 TRACKED_FUTURES: tuple[str, ...] = ("NQ", "ES")
 
 # La session se recycle (reconnexion + reconstruction d'univers) à ce rythme :
@@ -74,10 +75,20 @@ class TickCapture:
 
     def __init__(self, symbols: tuple[str, ...] = TRACKED_FUTURES) -> None:
         self.symbols = tuple(symbols)
-        self._buf: dict[str, list[dict]] = {}
+        self._buf: dict[str, dict[str, list[dict]]] = {}
+        # ordre OFFICIEL des contrats par sous-jacent : [actif, suivant], tel que
+        # le courtier les déclare. Sert de repli au choix de roll quand aucun
+        # volume de la veille n'est connu (cf. roll.dominant) — un ordre déduit
+        # du volume de la minute courante ne serait pas un repli fiable.
+        self._order: dict[str, list[str]] = {}
         self._lock = threading.Lock()
         self._started = False
         self._state = "off"
+
+    def contract_order(self, symbol: str) -> list[str]:
+        """[contrat actif, contrat suivant] pour `symbol`, ordre du courtier."""
+        with self._lock:
+            return list(self._order.get(symbol, []))
 
     # -- cycle de vie -----------------------------------------------------
 
@@ -95,26 +106,30 @@ class TickCapture:
         self._state = "connecting"
         threading.Thread(target=self._run, name="tickcapture", daemon=True).start()
 
-    def drain(self) -> dict[str, list[dict]]:
-        """Récupère et vide le buffer (appelé par le scheduler pour écrire sur
-        disque). Un swap sous verrou : la capture continue d'alimenter un
-        buffer neuf pendant l'écriture."""
+    def drain(self) -> dict[str, dict[str, list[dict]]]:
+        """Récupère et vide le buffer, sous la forme {sous-jacent: {contrat:
+        lignes}} (appelé par le scheduler pour écrire sur disque). Un swap sous
+        verrou : la capture continue d'alimenter un buffer neuf pendant
+        l'écriture."""
         with self._lock:
             out, self._buf = self._buf, {}
         return out
 
     # -- capture (chemin réseau) ------------------------------------------
 
-    def record(self, universe: dict[str, str], item: dict, now: float) -> None:
-        """Range un print TimeAndSale dans le buffer. Public : c'est le point
-        testable du module (mapping, filtrage, forme de ligne), sans réseau.
+    def record(self, universe: dict[str, tuple[str, str]], item: dict,
+               now: float) -> None:
+        """Range un print TimeAndSale dans le buffer, sous (sous-jacent,
+        contrat). Public : c'est le point testable du module (mapping, filtrage,
+        forme de ligne), sans réseau.
 
         `now` (réception locale) ne sert que de repli : on préfère l'heure
         d'ÉCHANGE (`time`, en ms) quand elle est présente — c'est elle qui fait
         foi pour rejouer une séquence."""
-        symbol = universe.get(item.get("eventSymbol"))
-        if symbol is None:
+        entry = universe.get(item.get("eventSymbol"))
+        if entry is None:
             return
+        symbol, contract = entry
         price = item.get("price")
         if not isinstance(price, (int, float)) or price != price:
             return  # pas de prix exploitable (NaN inclus) -> ignoré
@@ -130,30 +145,34 @@ class TickCapture:
             "source": "dxfeed",
         }
         with self._lock:
-            self._buf.setdefault(symbol, []).append(row)
+            self._buf.setdefault(symbol, {}).setdefault(contract, []).append(row)
 
-    def _build_universe(self, access: str) -> dict[str, str]:
-        """streamer -> libellé (NQ/ES), pour les seuls futures suivis.
+    def _build_universe(self, access: str) -> dict[str, tuple[str, str]]:
+        """streamer -> (libellé NQ/ES, code contrat), pour le contrat ACTIF ET
+        le SUIVANT de chaque future suivi.
 
-        Réutilise `resolve_symbols`, qui lit le contrat actif via l'API
-        authentifiée (`/NQU26:XCME`) — un future NON résolu est OMIS, jamais
-        rabattu sur le ticker action homonyme (cf. rtquote.resolve_symbols).
+        Les deux sont nécessaires : la série continue bascule au VOLUME (cf.
+        gex/roll), ce qui suppose de pouvoir comparer les deux contrats. Seul le
+        dominant est écrit sur disque, mais les volumes des deux sont mesurés.
 
-        Le cache de contrat front est PURGÉ pour nos futures avant résolution :
-        sans ça, une session recyclée pendant des semaines resterait collée à
-        l'ancien contrat après un roll. Purge partagée (le flux live la
-        rebâtira au besoin) — sans danger."""
-        from . import rtquote
+        Un future non résolu est OMIS, jamais rabattu sur le ticker action
+        homonyme (« NQ »/« ES » sont aussi des actions — cf.
+        rtquote.resolve_symbols)."""
+        from . import roll
+        out: dict[str, tuple[str, str]] = {}
         for label in self.symbols:
-            rtquote._FUTURE_STREAM_CACHE.pop(label, None)
-        syms = resolve_symbols(access)
-        out: dict[str, str] = {}
-        for label in self.symbols:
-            s = syms.get(label)
-            if s:
-                out[s] = label
-            else:
-                log.warning("Capture tick : %s non résolu — exclu", label)
+            try:
+                pair = roll.resolve_pair(label, access)
+            except Exception:  # noqa: BLE001 — un référentiel muet n'en condamne pas deux
+                log.exception("Capture tick : contrats %s non résolus — exclu", label)
+                continue
+            if not pair:
+                log.warning("Capture tick : aucun contrat %s — exclu", label)
+                continue
+            for streamer, code in pair:
+                out[streamer] = (label, code)
+            with self._lock:
+                self._order[label] = [code for _, code in pair]
         return out
 
     def _run(self) -> None:
@@ -221,7 +240,8 @@ class TickCapture:
                                         for s in universe]})
                     self._state = "connected"
                     log.info("Capture tick continue active — %s",
-                             ", ".join(f"{v}={k}" for k, v in universe.items()))
+                             ", ".join(f"{lbl}:{code}={s}"
+                                       for s, (lbl, code) in universe.items()))
                 elif typ == "KEEPALIVE":
                     await send({"type": "KEEPALIVE", "channel": 0})
                 elif typ == "ERROR":

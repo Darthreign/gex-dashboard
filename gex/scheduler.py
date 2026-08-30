@@ -15,7 +15,7 @@ from datetime import UTC, datetime, time, timedelta
 import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from . import backup, flowtape, idxopt, metrics, rates, store
+from . import backup, flowtape, idxopt, metrics, rates, roll, store
 from .config import SETTINGS, UNDERLYINGS
 from .ingest import ChainSnapshot, fetch_chain, fetch_index_spot
 from .metrics import ET, SummaryMetrics
@@ -420,18 +420,41 @@ def flush_ticks() -> None:
     18:00 — la séance est alors coupée au mauvais endroit. L'ET est la seule
     référence stable, parce que c'est celle du marché lui-même."""
     buf = CAPTURE.drain()
-    for symbol, rows in buf.items():
-        by_day: dict[str, list] = {}
-        for r in rows:
-            # +6 h : 18:00 ET (ouverture) bascule sur minuit, donc la date
-            # obtenue EST celle de la séance, y compris pour la partie du soir.
-            sess = datetime.fromtimestamp(r["ts"], tz=UTC).astimezone(ET) + timedelta(hours=6)
-            by_day.setdefault(sess.strftime("%Y-%m-%d"), []).append((sess, r))
-        for items in by_day.values():
-            ts_sess = items[0][0]
+    for symbol, per_contract in buf.items():
+        # 1. Regrouper par (séance, contrat) et cumuler le volume de CHAQUE
+        #    contrat — y compris celui qu'on n'écrira pas : c'est cette mesure
+        #    qui décidera du dominant de la séance suivante (cf. gex/roll).
+        by_day: dict[str, dict[str, list]] = {}
+        volumes: dict[str, dict[str, float]] = {}
+        for contract, rows in per_contract.items():
+            for r in rows:
+                # +6 h : 18:00 ET (ouverture) bascule sur minuit, donc la date
+                # obtenue EST celle de la séance, y compris la partie du soir.
+                sess = (datetime.fromtimestamp(r["ts"], tz=UTC).astimezone(ET)
+                        + timedelta(hours=6))
+                day = sess.strftime("%Y-%m-%d")
+                by_day.setdefault(day, {}).setdefault(contract, []).append((sess, r))
+                volumes.setdefault(day, {})[contract] = (
+                    volumes.setdefault(day, {}).get(contract, 0) + (r.get("volume") or 0))
+
+        for day, per_c in by_day.items():
+            try:
+                roll.record_volumes(symbol, day, volumes.get(day, {}))
+            except Exception:  # noqa: BLE001 — l'état de roll ne doit rien bloquer
+                log.exception("Capture tick : échec mémorisation des volumes %s", symbol)
+            # 2. N'écrire que le contrat dominant : la série sur disque reste
+            #    une série CONTINUE, comparable au jeu de référence. L'ordre
+            #    passé est celui du courtier ([actif, suivant]) : c'est lui qui
+            #    sert de repli tant qu'aucun volume de veille n'est connu.
+            contracts = [c for c in CAPTURE.contract_order(symbol) if c in per_c]
+            contracts += [c for c in per_c if c not in contracts]
+            keep = roll.dominant(symbol, day, contracts)
+            items = per_c.get(keep) or []
+            if not items:
+                continue
             rows_day = [it[1] for it in items]
             try:
-                store.append_ticks(symbol, rows_day, ts_sess)
+                store.append_ticks(symbol, rows_day, items[0][0])
             except Exception:  # noqa: BLE001 — une écriture ratée ne doit rien casser
                 log.exception("Capture tick : échec écriture %s", symbol)
 

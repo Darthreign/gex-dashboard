@@ -14,8 +14,9 @@ from gex import tickcapture, tickstats
 from gex.metrics import ET
 
 
-# Univers de test : streamer -> libellé, comme le construit _build_universe.
-_UNIV = {"/NQU26:XCME": "NQ", "/ESU26:XCME": "ES"}
+# Univers de test : streamer -> (libellé, contrat), comme _build_universe.
+_UNIV = {"/NQU26:XCME": ("NQ", "/NQU6"), "/NQZ26:XCME": ("NQ", "/NQZ6"),
+         "/ESU26:XCME": ("ES", "/ESU6")}
 
 
 def _print(stream, price, **kw):
@@ -30,8 +31,9 @@ def test_record_mapping_et_schema():
     c.record(_UNIV, _print("/ZZZ:XCME", 50.0), now=42.0)      # non suivi -> ignoré
     c.record(_UNIV, _print("/NQU26:XCME", float("nan")), now=42.0)  # NaN -> ignoré
     buf = c._buf
-    assert list(buf) == ["NQ"] and len(buf["NQ"]) == 1
-    row = buf["NQ"][0]
+    assert list(buf) == ["NQ"] and list(buf["NQ"]) == ["/NQU6"]
+    assert len(buf["NQ"]["/NQU6"]) == 1
+    row = buf["NQ"]["/NQU6"][0]
     # socle ticks_full + surensemble bid/ask/side : TOUT le brut conservé
     assert set(row) == {"ts", "price", "volume", "bid", "ask", "side", "source"}
     assert row["price"] == 100.0 and row["volume"] == 3 and row["source"] == "dxfeed"
@@ -44,7 +46,7 @@ def test_record_mapping_et_schema():
 def test_record_repli_temps_local_et_defauts():
     c = tickcapture.TickCapture()
     c.record(_UNIV, _print("/ESU26:XCME", 5000.0), now=99.5)   # ni time, size, bid/ask, side
-    row = c._buf["ES"][0]
+    row = c._buf["ES"]["/ESU6"][0]
     assert row["ts"] == 99.5 and row["volume"] == 0            # garde-fou int, pas de NaN
     assert row["bid"] is None and row["ask"] is None and row["side"] is None
 
@@ -61,7 +63,7 @@ def test_drain_vide_le_buffer():
     c.record(_UNIV, _print("/NQU26:XCME", 100.0, size=1), now=1.0)
     c.record(_UNIV, _print("/NQU26:XCME", 101.0, size=2), now=2.0)
     out = c.drain()
-    assert [r["price"] for r in out["NQ"]] == [100.0, 101.0]
+    assert [r["price"] for r in out["NQ"]["/NQU6"]] == [100.0, 101.0]
     assert c._buf == {} and c.drain() == {}            # vidé, re-drain vide
 
 
