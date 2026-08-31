@@ -115,6 +115,34 @@ POLL_QUESTIONS = (
 # Réaction -> colonne (dérivé ; l'ordre = ordre d'amorçage des réactions).
 POLL_EMOJIS = {emoji: col for _, opts in POLL_QUESTIONS for emoji, col, _ in opts}
 
+# Reglage d'alerte, persiste pour survivre a un redemarrage du bot.
+SETTINGS_PATH = Path(__file__).resolve().parent.parent / "data" / "bot_settings.json"
+
+
+def _load_settings() -> dict:
+    try:
+        return json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — un reglage illisible ne doit pas bloquer le bot
+        return {}
+
+
+def _save_settings(**kv) -> None:
+    s = _load_settings() | kv
+    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS_PATH.write_text(json.dumps(s, indent=1), encoding="utf-8")
+
+
+# Mode d'alerte sur changement de regime.
+#   False (defaut, « allege ») : on ne poste que si la LECTURE GLOBALE change
+#     de couleur (vert/orange/rouge). L'etat par symbole bouge en permanence —
+#     un symbole passant de « Fort Gamma Negatif » a « Gamma Negatif » ne change
+#     rien au verdict, et postait quand meme : plusieurs messages quasi
+#     identiques par heure.
+#   True (« complet ») : on poste au moindre changement d'etat d'un symbole.
+# Dans les deux cas le JOURNAL enregistre tous les changements : le mode ne
+# regle que le bruit sur Discord, jamais la finesse des donnees collectees.
+_alert_full: bool = bool(_load_settings().get("alert_full", False))
+
 _last_signature: tuple | None = None
 _last_digest: dict | None = None      # dernier digest, pour la raison d'un changement
 _posted: dict[str, set] = {}          # jour ISO -> {(h, min) déjà postés}
@@ -415,8 +443,16 @@ async def tick() -> None:
     # Changement de régime : uniquement en session, et seulement après un
     # premier relevé (sinon le tout premier tick posterait sans raison).
     if _en_session(now) and _last_signature is not None and signature != _last_signature:
-        await _post(d)
-        log.info("Changement de régime détecté -> post (%s)", d["color"])
+        # Le journal enregistre TOUS les changements (finesse preservee pour le
+        # backtest) ; seul le post Discord depend du mode d'alerte.
+        change_couleur = d.get("color") != (_last_digest or {}).get("color")
+        if _alert_full or change_couleur:
+            await _post(d)
+            log.info("Changement de régime détecté -> post (%s, mode %s)",
+                     d["color"], "complet" if _alert_full else "allégé")
+        else:
+            log.info("Changement de régime sans changement de couleur (%s) — "
+                     "post omis (mode allégé)", d["color"])
         reason = journal.compute_reason(_prev_for_reason(), d.get("color"),
                                         d.get("confidence"), d.get("families"))
         await _record_regime(now, "change", d, reason=reason)
@@ -644,6 +680,41 @@ for _name, (_chart, _leg) in CHARTS.items():
     _make_chart_command(_name, _chart, _leg)
 
 
+@bot.command(name="alert_full", aliases=["alertes", "alert"])
+async def alert_full_cmd(ctx: commands.Context, etat: str | None = None) -> None:
+    """`!alert_full on|off` — verbosite des alertes de changement de regime."""
+    global _alert_full
+    if etat is None:
+        mode = "complet" if _alert_full else "allégé"
+        await ctx.send(embed=discord.Embed(
+            description=(f"Alertes en mode **{mode}**." "\n"
+                         "`!alert_full on` — un message à chaque changement "
+                         "d'état d'un symbole." "\n"
+                         "`!alert_full off` — un message uniquement quand la "
+                         "lecture globale change de couleur (défaut)."),
+            color=0x3498DB))
+        return
+    val = etat.strip().lower()
+    if val in ("on", "1", "true", "oui", "complet"):
+        _alert_full = True
+    elif val in ("off", "0", "false", "non", "allege", "allégé"):
+        _alert_full = False
+    else:
+        await ctx.send(embed=discord.Embed(
+            description=f"« {etat} » ? C'est `on` ou `off`, pas un troisième "
+                        "état quantique. 🐈",
+            color=0xE67E22))
+        return
+    _save_settings(alert_full=_alert_full)
+    if _alert_full:
+        txt = ("Alertes en mode **complet** : un message à chaque changement "
+               "d'état d'un symbole (verbeux).")
+    else:
+        txt = ("Alertes en mode **allégé** : un message uniquement quand la "
+               "lecture globale change de couleur (vert/orange/rouge).")
+    await ctx.send(embed=discord.Embed(description=txt, color=0x2ECC71))
+
+
 @bot.command(name="cloture", aliases=["close"])
 async def cloture(ctx: commands.Context) -> None:
     """`!cloture` — poste le message de clôture à la demande (sinon auto à 16h)."""
@@ -812,7 +883,10 @@ async def aide(ctx: commands.Context) -> None:
                "DEX net, Zero Gamma).\n"
                "`!vix` — la volatilité (VIX), son régime (calme→panique) et sa "
                "position vs le seuil.\n"
-               "`!cloture` — le message de clôture (auto à 16h)."),
+               "`!cloture` — le message de clôture (auto à 16h).\n"
+               "`!alert_full on|off` — verbosité des alertes : *complet* "
+               "(chaque changement d'état) ou *allégé* (uniquement un "
+               "changement de couleur globale — défaut)."),
         inline=False,
     )
     e.add_field(
