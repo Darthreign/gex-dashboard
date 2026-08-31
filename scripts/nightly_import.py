@@ -63,7 +63,7 @@ def _live_session(day: str) -> pd.DataFrame:
     d0 = dt.date.fromisoformat(day)
     names = {(d0 + dt.timedelta(days=k)).isoformat() for k in (-1, 0, 1)}
     frames = []
-    for f in TICKS.glob("*.parquet"):
+    for f in sorted(TICKS.glob("*.parquet")):
         if f.stem in names:
             try:
                 frames.append(pd.read_parquet(f))
@@ -79,17 +79,81 @@ def _live_session(day: str) -> pd.DataFrame:
     # -dessus avait supprimé 27 % d'une séance (135 942 trades le 2026-08-18).
     # Le risque de doublon n'existe pas : chaque tick n'est écrit qu'une fois,
     # dans le fichier de sa séance.
-    return df.sort_values("ts").reset_index(drop=True)
+    # tri STABLE : 42 % des prints partagent leur horodatage (jusqu'a 271 sur
+    # une meme milliseconde), et le moteur de backtest rejoue tick par tick a la
+    # ms — l'ordre AU SEIN d'une ms est donc porteur d'information (sequence
+    # reelle du marche). Un tri non stable (defaut pandas) pourrait le permuter.
+    return df.sort_values("ts", kind="stable").reset_index(drop=True)
 
 
-def _complete(df: pd.DataFrame) -> bool:
-    """Séance complète si le premier tick est proche de l'ouverture (18:00 ET),
-    mesuré dans le même repère décalé que la date de séance (ET + 6 h)."""
+# Recoupement avec Databento : notre flux dxFeed produit ~1,29 fois plus de
+# prints que Databento pour le MEME volume — dxFeed livre les fills un par un
+# la ou Databento agrege ceux d'un meme ordre agresseur (mesure le 2026-08-31
+# sur une fenetre continue : ratio volume 0,997, ratio prints 1,294 ; ratio
+# stable 1,25-1,30 sur six seances). Une seance saine est donc largement
+# au-dessus de 1 ; sous ce seuil, il manque des donnees.
+MIN_RATIO = 0.9
+# Repli hors ligne : trou interne au-dela duquel la seance est jugee incomplete.
+# Genereux a dessein — une nuit de veille de jour ferie peut legitimement ne
+# rien traiter pendant des heures (Thanksgiving 2025 : 28 trades en 10,8 h).
+MAX_GAP_S = 6 * 3600
+
+
+def _expected_count(day: str) -> int | None:
+    """Nombre de trades de la seance chez Databento. `get_record_count` est un
+    appel de metadonnees : il ne facture rien et ne telecharge rien."""
+    try:
+        import databento as db
+        c = db.Historical(_db_key())
+        start, end = _session_window(day)
+        return c.metadata.get_record_count(
+            dataset="GLBX.MDP3", symbols=["NQ.v.0"], stype_in="continuous",
+            schema="trades", start=start.isoformat(), end=end.isoformat())
+    except Exception as e:  # noqa: BLE001 — le controle ne doit jamais bloquer
+        log(f"   (controle) comptage Databento indisponible : {type(e).__name__}: {e}")
+        return None
+
+
+def _complete(df: pd.DataFrame, day: str) -> bool:
+    """La seance capturee est-elle exploitable telle quelle ?
+
+    Verifier le seul premier tick ne suffit pas : le 2026-08-28 demarrait bien
+    a 18:00 ET mais avait un trou de 14,5 h au milieu (serveur eteint la nuit),
+    et il a ete ecrit comme « complet ». On recoupe donc le NOMBRE de prints
+    avec Databento, ce qui detecte un manque ou qu'il soit dans la seance.
+    """
     if df.empty:
         return False
-    first = pd.to_datetime(df["ts"].min(), unit="s", utc=True).tz_convert(ET) \
-        + pd.Timedelta(hours=6)
-    return (first.hour * 60 + first.minute) <= 10  # <= 18:10 ET
+    first = pd.to_datetime(df["ts"].min(), unit="s", utc=True).tz_convert(ET)         + pd.Timedelta(hours=6)
+    if (first.hour * 60 + first.minute) > 10:      # demarrage apres 18:10 ET
+        return False
+
+    attendu = _expected_count(day)
+    if attendu:
+        ratio = len(df) / attendu
+        if ratio < MIN_RATIO:
+            log(f"   (controle) {len(df):,} prints captures pour {attendu:,} "
+                f"attendus (ratio {ratio:.2f}) -> seance incomplete")
+            return False
+        log(f"   (controle) {len(df):,} prints vs {attendu:,} Databento "
+            f"(ratio {ratio:.2f}) -> seance complete")
+        return True
+
+    # Sans le comptage de reference : au moins verifier l'absence de gros trou.
+    trou = df["ts"].sort_values().diff().max()
+    if trou and trou > MAX_GAP_S:
+        log(f"   (controle) trou interne de {trou / 3600:.1f} h -> seance incomplete")
+        return False
+    return True
+
+
+def _session_window(day: str) -> tuple[dt.datetime, dt.datetime]:
+    """Bornes UTC de la seance CME `day` : 18:00 ET la veille -> 17:00 ET le
+    jour meme. Jamais en heure de Paris (cf. _session_date)."""
+    d0 = dt.date.fromisoformat(day)
+    start = dt.datetime.combine(d0 - dt.timedelta(days=1), dt.time(18, 0), ET)         .astimezone(dt.timezone.utc)
+    end = dt.datetime.combine(d0, dt.time(17, 0), ET).astimezone(dt.timezone.utc)
+    return start, end
 
 
 def _db_key() -> str | None:
@@ -109,12 +173,7 @@ def _databento_session(day: str) -> pd.DataFrame:
     import databento as db
     key = _db_key()
     client = db.Historical(key) if key else db.Historical()
-    # Fenêtre de la séance en ET (la référence du marché) : 18:00 ET la veille
-    # -> 17:00 ET le jour même. Jamais en heure de Paris (cf. _session_date).
-    d0 = dt.date.fromisoformat(day)
-    start = dt.datetime.combine(d0 - dt.timedelta(days=1), dt.time(18, 0), ET) \
-        .astimezone(dt.timezone.utc)
-    end = dt.datetime.combine(d0, dt.time(17, 0), ET).astimezone(dt.timezone.utc)
+    start, end = _session_window(day)
     RAW.mkdir(parents=True, exist_ok=True)
     params = dict(dataset="GLBX.MDP3", symbols=["NQ.v.0"], stype_in="continuous",
                   schema="trades", start=start.isoformat(), end=end.isoformat())
@@ -141,7 +200,7 @@ def _write_if_new(df: pd.DataFrame, day: str, origin: str) -> None:
         return
     base = [c for c in ["ts", "price", "volume", "side", "source"] if c in df.columns]
     extra = [c for c in ["bid", "ask"] if c in df.columns]
-    df = df[base + extra].sort_values("ts").reset_index(drop=True)
+    df = df[base + extra].sort_values("ts", kind="stable").reset_index(drop=True)
     df.to_parquet(out, index=False)
     log(f"{day} : ÉCRIT ({origin}) — {len(df):,} lignes, colonnes {list(df.columns)}")
 
@@ -158,7 +217,7 @@ def main() -> None:
             log(f"{day} : déjà présent dans import — NON réécrit.")
         else:
             live = _live_session(day)
-            if _complete(live):
+            if _complete(live, day):
                 _write_if_new(live, day, "dxfeed live, bid/ask conservés")
             else:
                 where = "" if live.empty else (
