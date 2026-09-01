@@ -44,6 +44,13 @@ def _replace_with_retry(tmp: Path, path: Path) -> None:
             return
         except PermissionError:
             if essai == REPLACE_RETRIES - 1:
+                # Dernier instant ou le verrou est OBSERVABLE : on demande a
+                # Windows qui tient le fichier et on l'ecrit dans
+                # logs/lockdiag.log (cf. gex/lockdiag). En differe, la question
+                # est sans reponse — c'est ce qui a rendu l'incident du
+                # 2026-08-31 inexplicable apres coup.
+                from . import lockdiag
+                lockdiag.report_async(path)
                 log.error(
                     "%s verrouille par un autre processus apres %d tentatives "
                     "— ecriture perdue. Bougies de prix recuperables via "
