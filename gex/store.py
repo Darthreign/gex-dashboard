@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +24,33 @@ log = logging.getLogger(__name__)
 def _ensure(p: Path) -> Path:
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
+
+
+# Sous Windows, `os.replace` echoue (WinError 5) tant qu'un AUTRE processus
+# garde la destination ouverte : lecteur concurrent (serveur MCP, script
+# d'analyse), sauvegarde rclone, antivirus ou indexeur. Ces verrous sont
+# generalement brefs, mais sans reprise chaque echec perd definitivement les
+# donnees du cycle : le 2026-08-31, trois heures de bougies 1 min ont ete
+# perdues sur les 21 symboles (recuperees depuis via gex.pricehist).
+REPLACE_RETRIES = 6
+REPLACE_DELAY_S = 0.25
+
+
+def _replace_with_retry(tmp: Path, path: Path) -> None:
+    """`os.replace`, en reessayant sur verrou transitoire (~5 s au total)."""
+    for essai in range(REPLACE_RETRIES):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if essai == REPLACE_RETRIES - 1:
+                log.error(
+                    "%s verrouille par un autre processus apres %d tentatives "
+                    "— ecriture perdue. Bougies de prix recuperables via "
+                    "`python -m gex.pricehist --days 3`.",
+                    path.name, REPLACE_RETRIES)
+                raise
+            time.sleep(REPLACE_DELAY_S * (essai + 1))
 
 
 def _write_atomic(df: pd.DataFrame, path: Path) -> None:
@@ -47,7 +75,7 @@ def _write_atomic(df: pd.DataFrame, path: Path) -> None:
                            f".{uuid.uuid4().hex[:8]}.tmp")
     try:
         df.to_parquet(tmp, index=False)
-        os.replace(tmp, path)
+        _replace_with_retry(tmp, path)
     except BaseException:
         # ne jamais laisser traîner un temporaire à moitié écrit
         tmp.unlink(missing_ok=True)
