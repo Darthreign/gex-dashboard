@@ -16,7 +16,8 @@ pouvoir comparer les deux. Seul le contrat dominant est écrit sur disque ; le
 choix de la séance est figé d'après le volume de la veille (cf. gex/roll).
 
 Ce qu'on garde : TOUT le brut du print, sans rien jeter — `ts` (epoch s, heure
-d'échange), `price`, `volume`, `bid`, `ask`, `side` (côté agresseur), `source`.
+d'échange), `price`, `volume`, `bid`, `ask`, `side` (côté agresseur),
+`ts_recv` (heure de réception locale, pour mesurer la latence), `source`.
 Le socle `ts/price/volume/source` est aligné sur le jeu de référence
 `ticks_full` (Databento), donc la capture reste DIRECTEMENT exploitable par le
 backtest ; `bid/ask/side` sont un SURENSEMBLE (colonnes en plus, ignorées par
@@ -142,6 +143,12 @@ class TickCapture:
             "bid": _num(item.get("bidPrice")),
             "ask": _num(item.get("askPrice")),
             "side": item.get("aggressorSide") or None,
+            # Heure de RECEPTION locale, a cote de l'heure d'echange. L'ecart
+            # entre les deux EST la latence : en backtest le moteur agit a `ts`,
+            # en live il ne voit le tick qu'a `ts_recv`. Sans cette colonne le
+            # backtest suppose implicitement une latence nulle — biais
+            # systematiquement optimiste, et non mesurable apres coup.
+            "ts_recv": float(now),
             "source": "dxfeed",
         }
         with self._lock:

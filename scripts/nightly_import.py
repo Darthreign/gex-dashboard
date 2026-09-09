@@ -199,7 +199,7 @@ def _write_if_new(df: pd.DataFrame, day: str, origin: str) -> None:
         log(f"{day} : déjà présent dans import — NON réécrit.")
         return
     base = [c for c in ["ts", "price", "volume", "side", "source"] if c in df.columns]
-    extra = [c for c in ["bid", "ask"] if c in df.columns]
+    extra = [c for c in ["bid", "ask", "ts_recv"] if c in df.columns]
     df = df[base + extra].sort_values("ts", kind="stable").reset_index(drop=True)
     df.to_parquet(out, index=False)
     log(f"{day} : ÉCRIT ({origin}) — {len(df):,} lignes, colonnes {list(df.columns)}")
