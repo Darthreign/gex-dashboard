@@ -38,6 +38,7 @@ import logging
 import os
 import random
 import re
+import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -71,6 +72,25 @@ DASHBOARD = os.environ.get("DASHBOARD_URL", "http://127.0.0.1:8050").rstrip("/")
 SCHEDULE = {(8, 30), (15, 25), (15, 35)}
 # Message de « clôture » (Paris) : stop contrarien + sens des MM + bonne soirée.
 CLOSE_POST = (16, 0)
+# Briefs prémarket rédigés par une routine Claude (cf. .claude/skills/
+# premarket-nq). Le bot ne les PRODUIT pas : il les relaie s'ils sont frais.
+# Une routine ne tourne que si l'app Claude Code est ouverte — d'où la garde de
+# fraîcheur : app fermée => fichier périmé => le bot poste son digest seul,
+# plutôt que de republier le brief de la veille.
+BRIEFS_DIR = Path(__file__).resolve().parent.parent / "data" / "briefs"
+BRIEF_MAX_AGE_S = 900          # 15 min : la routine tourne 5 min avant le post
+BRIEF_SLOTS = {(15, 25): "prebrief", (15, 35): "ajustement"}
+# Une routine planifiee subit un delai de dispatch de plusieurs minutes, non
+# desactivable (« deterministic delay … to balance server load »). Le brief peut
+# donc arriver APRES son creneau : chaque brief a une fenetre de rattrapage
+# pendant laquelle le bot le poste des qu'il apparait, plutot que de le perdre.
+BRIEF_FENETRES = {
+    "prebrief":   (dt.time(15, 25), dt.time(15, 34)),
+    "ajustement": (dt.time(15, 35), dt.time(16, 0)),
+}
+# Limite Discord d'une description d'embed (4096) ; marge pour le titre.
+EMBED_MAX = 3900
+
 # Session US en heure de Paris (15h30 = 9h30 ET open ; ~22h = 16h ET close).
 SESSION_START, SESSION_END = dt.time(15, 30), dt.time(22, 0)
 
@@ -146,6 +166,7 @@ _alert_full: bool = bool(_load_settings().get("alert_full", False))
 _last_signature: tuple | None = None
 _last_digest: dict | None = None      # dernier digest, pour la raison d'un changement
 _posted: dict[str, set] = {}          # jour ISO -> {(h, min) déjà postés}
+_briefs_postes: dict[str, set] = {}   # jour ISO -> {noms de briefs déjà postés}
 _JC = None                            # connexion SQLite (ouverte à la 1re demande)
 
 
@@ -192,6 +213,55 @@ async def _post(d: dict) -> None:
                     CHANNEL_ID)
         return
     await channel.send(embed=_embed(d))
+
+
+def _lire_brief(nom: str) -> str | None:
+    """Contenu du brief `nom` s'il existe ET s'il est récent, sinon None.
+
+    Silencieux par conception : l'absence de brief est le cas NORMAL (routine
+    non lancée), pas une anomalie — elle ne doit ni alerter ni bloquer le post.
+    """
+    f = BRIEFS_DIR / f"{nom}.md"
+    try:
+        if not f.exists():
+            return None
+        age = time.time() - f.stat().st_mtime
+        if age > BRIEF_MAX_AGE_S:
+            log.info("Brief %s ignoré : %.0f min (> %.0f)", nom, age / 60,
+                     BRIEF_MAX_AGE_S / 60)
+            return None
+        return f.read_text(encoding="utf-8").strip() or None
+    except Exception:  # noqa: BLE001 — un brief illisible ne doit rien casser
+        log.exception("Lecture du brief %s", nom)
+        return None
+
+
+async def _post_brief(nom: str, jour: str) -> bool:
+    """Poste le brief `nom` (une seule fois par jour). True si posté."""
+    faits = _briefs_postes.setdefault(jour, set())
+    if nom in faits:
+        return False
+    texte = _lire_brief(nom)
+    if not texte:
+        return False
+    faits.add(nom)
+    channel = bot.get_channel(CHANNEL_ID)
+    if channel is None:
+        return False
+    # Découpe sur les sauts de ligne pour ne jamais casser un tableau en deux.
+    blocs, courant = [], ""
+    for ligne in texte.splitlines(keepends=True):
+        if len(courant) + len(ligne) > EMBED_MAX:
+            blocs.append(courant)
+            courant = ""
+        courant += ligne
+    if courant:
+        blocs.append(courant)
+    for i, bloc in enumerate(blocs):
+        await channel.send(embed=discord.Embed(description=bloc, color=0x5865F2))
+    log.info("Brief %s posté (%d message(s), %d caractères)", nom, len(blocs),
+             len(texte))
+    return True
 
 
 async def _post_close(d: dict) -> None:
@@ -437,8 +507,26 @@ async def tick() -> None:
         deja.add(slot)
         await _post(d)
         log.info("Post fixe %02dh%02d (%s)", slot[0], slot[1], d["color"])
+        # Brief prémarket en complément, s'il a été rédigé et qu'il est frais.
+        nom = BRIEF_SLOTS.get(slot)
+        if nom:
+            try:
+                await _post_brief(nom, jour)
+            except Exception:  # noqa: BLE001 — le digest prime, le brief est un bonus
+                log.exception("Post du brief %s", nom)
         _last_signature, _last_digest = signature, d
         return
+
+    # Rattrapage : la routine a pu rendre son brief APRES le créneau (délai de
+    # dispatch). Tant qu'on est dans sa fenêtre, on le poste dès qu'il paraît.
+    for nom, (debut, fin) in BRIEF_FENETRES.items():
+        if debut <= now.time() <= fin:
+            try:
+                if await _post_brief(nom, jour):
+                    log.info("Brief %s posté en rattrapage (%02dh%02d)", nom,
+                             now.hour, now.minute)
+            except Exception:  # noqa: BLE001
+                log.exception("Rattrapage du brief %s", nom)
 
     # Changement de régime : uniquement en session, et seulement après un
     # premier relevé (sinon le tout premier tick posterait sans raison).
