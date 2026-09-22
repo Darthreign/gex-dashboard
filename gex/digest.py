@@ -24,9 +24,15 @@ symboles (poids indice cash > ETF > future) en un score, puis les deux familles
 principal : s'il passe en fort négatif, sa famille l'est.
 
 Décodage du format utilisateur, vérifié cohérent sur les 8 lignes des
-exemples : le glose « (Dealers long/short gamma) » suit le signe du DELTA
-(Delta+ → « long gamma », Delta− → « short gamma »), pas du gamma. Reproduit
-tel quel — c'est le texte public de l'utilisateur.
+exemples : la glose suit le signe du DELTA (Delta+ → long, Delta− → short).
+
+Elle disait « Dealers long/short GAMMA » jusqu'au 2026-09-22, repris tel quel
+des exemples d'origine. Mais le libellé contredisait l'usage standard, où
+« dealers long gamma » suit le GAMMA (gamma positif = dealers longs gamma =
+ils amortissent) : une ligne « Gamma Positif … (Dealers short gamma) » se
+lisait donc comme une contradiction. Corrigé en « long/short DELTA » sur
+demande de l'utilisateur : la mécanique est inchangée, seul le mot était
+faux. Des dealers short delta se couvrent à l'inverse du cash.
 
 ⚠️ Pas un conseil : décrit la mécanique de couverture des dealers, jamais une
 prise de position. La ligne de verdict qualifie le RISQUE du contrarien, pas
@@ -161,8 +167,9 @@ def classify(net_gex: float, net_dex: float, hist=None) -> dict:
         gamma = "Gamma Positif"
     delta_pos = net_dex >= 0
     delta = "Delta Positif" if delta_pos else "Delta Négatif"
-    # glose calquée sur le texte utilisateur : suit le DELTA, pas le gamma
-    gloss = "Dealers long gamma" if delta_pos else "Dealers short gamma"
+    # la glose traduit le DELTA en positionnement dealer (cf. docstring du
+    # module : disait « gamma » par erreur jusqu'au 2026-09-22)
+    gloss = "Dealers long delta" if delta_pos else "Dealers short delta"
     return {"gamma": gamma, "delta": delta, "gloss": gloss,
             "neg": net_gex < 0, "fort": fort}
 

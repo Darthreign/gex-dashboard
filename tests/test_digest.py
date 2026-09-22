@@ -2,7 +2,7 @@
 
 Le cœur : reproduire EXACTEMENT le format demandé par l'utilisateur (4
 exemples du 2026-07-30), y compris le décodage subtil — la glose
-« (Dealers long/short gamma) » suit le signe du DELTA, pas du gamma.
+« (Dealers long/short delta) » suit le signe du DELTA.
 """
 from __future__ import annotations
 
@@ -20,13 +20,13 @@ def _row(sym, gex, dex, hist=None):
     return {"symbol": sym, "net_gex": gex, "net_dex": dex, "hist": hist}
 
 
-def test_glose_suit_le_delta_pas_le_gamma():
-    """Décodage clé : Delta+ → 'long gamma', Delta− → 'short gamma', quel que
-    soit le signe du gamma."""
-    assert classify_gloss(gex=+1, dex=+1) == "Dealers long gamma"
-    assert classify_gloss(gex=-1, dex=+1) == "Dealers long gamma"   # gamma−, delta+ → long
-    assert classify_gloss(gex=-1, dex=-1) == "Dealers short gamma"
-    assert classify_gloss(gex=+1, dex=-1) == "Dealers short gamma"  # gamma+, delta− → short
+def test_glose_traduit_le_delta():
+    """La glose traduit le DELTA : Delta+ → 'long delta', Delta− → 'short
+    delta', quel que soit le signe du gamma."""
+    assert classify_gloss(gex=+1, dex=+1) == "Dealers long delta"
+    assert classify_gloss(gex=-1, dex=+1) == "Dealers long delta"   # gamma−, delta+ → long delta
+    assert classify_gloss(gex=-1, dex=-1) == "Dealers short delta"
+    assert classify_gloss(gex=+1, dex=-1) == "Dealers short delta"  # gamma+, delta− → short delta
 
 
 def classify_gloss(gex, dex):
@@ -40,8 +40,8 @@ def test_exemple_1_vert():
     d = digest.build_digest(rows, vix=14.0)
     assert d.color == "green"
     assert "peu de risque" in d.verdict
-    assert "Gamma Positif - Delta Positif (Dealers long gamma) sur SPX, SPY, NDX, ES et NQ" in d.lines
-    assert "Gamma Négatif - Delta Positif (Dealers long gamma) sur QQQ" in d.lines
+    assert "Gamma Positif - Delta Positif (Dealers long delta) sur SPX, SPY, NDX, ES et NQ" in d.lines
+    assert "Gamma Négatif - Delta Positif (Dealers long delta) sur QQQ" in d.lines
     # lecture de risque ajoutée sous l'état Gamma+ (et pas sous le Gamma−)
     assert any("Short avec très peu de risque" in ln for ln in d.lines)
     assert d.vix_line is None
@@ -50,10 +50,10 @@ def test_exemple_1_vert():
 def test_symbol_reading_fr_et_en_suivent_le_digest():
     """Le bandeau (symbol_reading) dit EXACTEMENT ce que le bot dit, FR et EN."""
     fr = digest.symbol_reading(+1e9, -1e9, lang="fr")
-    assert fr["text"].startswith("Gamma Positif - Delta Négatif (Dealers short gamma)")
+    assert fr["text"].startswith("Gamma Positif - Delta Négatif (Dealers short delta)")
     assert "→ Réduire le risque sur les shorts | Long avec très peu de risque" in fr["text"]
     en = digest.symbol_reading(+1e9, -1e9, lang="en")
-    assert en["text"].startswith("Positive Gamma - Negative Delta (Dealers short gamma)")
+    assert en["text"].startswith("Positive Gamma - Negative Delta (Dealers short delta)")
     assert "→ Reduce risk on shorts | Long with very little risk" in en["text"]
     assert fr["gamma"] == en["gamma"] == "Gamma Positif"   # clé interne (couleur)
     # cohérence avec le bot : la 1re ligne FR est incluse dans la ligne du digest
@@ -116,7 +116,7 @@ def test_orange_une_seule_famille_negative():
     assert d.color == "orange"
     assert d.verdict == "Trading contrarien risqué sur session US."
     # NDX et QQQ (delta−) regroupés sur la ligne short
-    assert any("Delta Négatif (Dealers short gamma) sur NDX et QQQ" in ln for ln in d.lines)
+    assert any("Delta Négatif (Dealers short delta) sur NDX et QQQ" in ln for ln in d.lines)
 
 
 def test_deux_familles_negatives_rouge():
@@ -159,7 +159,7 @@ def test_vix_au_dessus_de_20_force_orange():
     d = digest.build_digest(rows, vix=22.0)
     assert d.color == "orange"
     assert "forte amplitude" in d.verdict.lower()
-    assert any("Delta Négatif (Dealers short gamma) sur QQQ" in ln for ln in d.lines)
+    assert any("Delta Négatif (Dealers short delta) sur QQQ" in ln for ln in d.lines)
 
 
 def test_fort_exige_de_l_historique():
