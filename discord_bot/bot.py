@@ -79,12 +79,15 @@ CLOSE_POST = (16, 0)
 # plutôt que de republier le brief de la veille.
 BRIEFS_DIR = Path(__file__).resolve().parent.parent / "data" / "briefs"
 BRIEF_MAX_AGE_S = 900          # 15 min : la routine tourne 5 min avant le post
-BRIEF_SLOTS = {(15, 25): "prebrief", (15, 35): "ajustement"}
+BRIEF_SLOTS = {(8, 30): "matin", (15, 25): "prebrief", (15, 35): "ajustement"}
 # Une routine planifiee subit un delai de dispatch de plusieurs minutes, non
 # desactivable (« deterministic delay … to balance server load »). Le brief peut
 # donc arriver APRES son creneau : chaque brief a une fenetre de rattrapage
 # pendant laquelle le bot le poste des qu'il apparait, plutot que de le perdre.
 BRIEF_FENETRES = {
+    # Le brief du matin se perime vite : lu a 8h30 il planifie la journee, lu a
+    # 11h il ne sert plus a rien. Fenetre courte, quitte a le sauter.
+    "matin":      (dt.time(8, 30), dt.time(9, 15)),
     "prebrief":   (dt.time(15, 25), dt.time(15, 34)),
     "ajustement": (dt.time(15, 35), dt.time(16, 0)),
 }

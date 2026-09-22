@@ -1,6 +1,6 @@
 ---
 name: premarket-nq
-description: Rédige le brief prémarket NQ publié par le bot Discord. Deux modes — "prebrief" (posté à 15h25, avant l'open US) et "ajustement" (posté à 15h35, après l'open). Utilise uniquement les données du projet ; n'invente jamais un axe absent.
+description: Rédige le brief prémarket NQ publié par le bot Discord. Trois modes — "matin" (posté à 8h30, plan de la journée), "prebrief" (15h25, avant l'open US) et "ajustement" (15h35, après l'open). Utilise uniquement les données du projet ; n'invente jamais un axe absent.
 ---
 
 # Brief prémarket NQ
@@ -98,6 +98,38 @@ calendriers sont en heure de New York : convertis-les explicitement. La séance
 CME va de 18:00 ET à 16:59 ET (00:00 → 23:00 Paris en été).
 
 ---
+
+## Mode `matin` — publié à 8h30, le plan de la journée
+
+Écris dans `D:\Gex\data\briefs\matin.md`. **1200 mots maximum.**
+
+C'est le brief qu'on lit avec le café : il sert à **planifier la journée**, pas
+à lire le marché en direct. À 8h30 Paris il est 2h30 à New York — le cash
+américain dort, seuls les futures et les chaînes natives tournent.
+
+> ⚠️ **L'open interest ne bouge PAS la nuit** — il n'est publié qu'une fois par
+> jour. Le positionnement que tu vois est donc celui de la **clôture d'hier,
+> réévalué au spot overnight**. Dis-le explicitement. Tu peux constater qu'un mur
+> a été franchi ou que le prix a changé de côté du flip — c'est utile — mais tu
+> ne dois JAMAIS présenter cela comme un positionnement nouveau des dealers.
+> « Les dealers se sont repositionnés » serait faux.
+>
+> Note aussi que la boucle CBOE est à l'arrêt la nuit (`market_hours_only`) : si
+> un symbole n'a pas de chaîne native `_RT`, sa donnée est périmée — marque-la
+> `stale — contexte uniquement`.
+
+1. **Le plan en 20 secondes** — 3 à 5 phrases : ce qui attend la journée.
+2. **Calendrier du jour** — le cœur de ce brief : tu as ~6 h d'avance sur les
+   chiffres de 14h30. Heure de Paris, événement, effet possible sur la
+   volatilité. Vérifie aussi jour férié / demi-séance.
+3. **Earnings du jour** — s'il y en a parmi les mégacaps suivies.
+4. **Parcours overnight** — range depuis 00:00 Paris, position vs clôture de la
+   veille, murs franchis, position vs Gamma Flip.
+5. **Positionnement (photo d'hier soir)** — par famille, en rappelant sa date.
+6. **Taux et intermarket** — ZT/ZN (inversion prix/rendement), CL, GC, 6E.
+7. **Plan de vigilance** — 3 à 5 conditions concrètes à surveiller d'ici
+   l'ouverture, formulées comme des observations à faire, jamais comme des ordres.
+8. **⚠️ PRÉCAUTION TRADING**
 
 ## Mode `prebrief` — publié à 15h25, avant l'open
 
