@@ -69,7 +69,15 @@ continue avec ce que tu as :
 **MCP `gex-data`** : `get_market_context`, `get_gex_summary`, `get_gex_by_strike`,
 `get_flow_delta`, `get_history`.
 
-**Calendriers** (`D:\Outils de backtest\data\`) :
+**Calendriers** (`D:\Outils de backtest\data\`) — dossier EXTERNE au projet,
+autorisé via `permissions.additionalDirectories` dans `.claude/settings.local.json`.
+
+> ⚠️ **Ne bloque JAMAIS sur cet accès.** Tu tournes sans personne devant
+> l'écran : si la lecture échoue ou demande une autorisation, n'insiste pas,
+> n'essaie pas de contourner. Écris « Calendrier non disponible » dans la
+> section concernée et **continue le brief**. Un brief ampute vaut infiniment
+> mieux qu'une routine suspendue qui ne publie rien.
+
 - `econ_calendar.json` — champs `date`, `event`, `time_et`, `impact`
   (`noir`/`orange`). ⚠️ `impact` est **peu discriminant** : presque tout est
   « noir ». Ne présente donc pas « noir » comme un blackout absolu — cite
