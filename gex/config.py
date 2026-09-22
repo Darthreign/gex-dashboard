@@ -57,6 +57,12 @@ class Underlying:
     #             hors de question dans la boucle à 60 s : pull_native_options
     #             s'en charge séparément, toutes les 15 min, dans son propre
     #             thread (cf. scheduler.py). pull_all les ignore entièrement.
+    # "future"  : le sous-jacent EST un future, suivi en spot seul — aucune
+    #             chaîne d'options n'est collectée. Sert aux axes intermarket
+    #             (taux, WTI, or, devises). Comme "futopt", la clé ne doit
+    #             JAMAIS servir de symbole dxFeed telle quelle (cf.
+    #             rtquote._is_future_key) : "ZN", "GC", "CL" sont aussi des
+    #             tickers d'actions sans rapport.
     source: str = "cboe"
 
 
@@ -106,6 +112,28 @@ UNDERLYINGS: dict[str, Underlying] = {
         # (cf. role="context" et scheduler.pull_vix, qui utilise directement
         # le symbole CBOE "_VIX").
         Underlying("VIX", "VIX", "VIX", family="SP", role="context"),
+        # Axes intermarket, en spot seul (aucune chaîne d'options collectée).
+        # Résolus en contrat front par resolve_symbols et abonnés au flux dxFeed
+        # comme n'importe quel future — c'est la seule source gratuite et
+        # temps réel dont nous disposions pour ces marches : la CDN CBOE ne sert
+        # que _VIX (tout le reste répond 403, vérifié le 2026-09-22).
+        #
+        # ⚠️ ZT/ZN cotent un PRIX d'obligation, pas un rendement : prix en
+        # hausse = taux en BAISSE. Toute lecture de divergence doit inverser.
+        #
+        # Le dollar index (DX) n'est pas porté par le courtier (produit ICE) :
+        # 6E (EUR/USD) en tient lieu, l'euro pesant ~57 % du panier, en sens
+        # inverse.
+        Underlying("ZT", "ZT", "2Y T-Note", future="ZT", family="SP",
+                   role="context", source="future"),
+        Underlying("ZN", "ZN", "10Y T-Note", future="ZN", family="SP",
+                   role="context", source="future"),
+        Underlying("CL", "CL", "WTI", future="CL", family="SP",
+                   role="context", source="future"),
+        Underlying("GC", "GC", "Or", future="GC", family="SP",
+                   role="context", source="future"),
+        Underlying("6E", "6E", "EUR/USD", future="6E", family="SP",
+                   role="context", source="future"),
     ]
 }
 

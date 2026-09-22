@@ -25,9 +25,32 @@ moins que rien dans un message de trading.
 | Options / positionnement dealers | ✅ le cœur du projet |
 | NQ vs ES (leadership) | ✅ |
 | Semis / mégacaps (SMH, NVDA, AMD, AVGO, MU, TSM, AAPL, MSFT, AMZN, META, GOOGL, TSLA) | ✅ |
-| Volatilité implicite | ⚠️ VIX seulement (VXN inaccessible) |
+| **Taux 2Y / 10Y** | ✅ futures **ZT / ZN** |
+| **Intermarket** | ✅ **CL** (WTI), **GC** (or), **6E** (EUR/USD) |
+| Volatilité implicite | ⚠️ VIX seulement (VXN et VOLQ inaccessibles) |
 | Calendrier macro + jours fériés + earnings | ✅ |
-| Taux 2Y/10Y · breadth/TICK · DXY/WTI/or/BTC | ❌ **Non disponible** |
+| **Breadth de marché réel** (TICK, A/D, TRIN) | ❌ **Non disponible** — substitut ci-dessous |
+
+### ⚠️ Trois pivèges sur ces axes
+
+**1. ZT et ZN cotent un PRIX d'obligation, pas un rendement.** Prix en hausse =
+taux en **BAISSE**. Si tu oublies l'inversion, toutes tes lectures de
+divergence seront à l'envers. Formule-le en clair : « ZN en hausse (taux 10Y en
+détente) ».
+
+**2. Le dollar index (DX) n'est pas disponible** — produit ICE, non porté par le
+courtier. **6E** (EUR/USD) en tient lieu : l'euro pèse ~57 % du panier DXY,
+**en sens inverse** (6E en hausse = dollar en baisse). Dis « 6E » ou
+« EUR/USD », jamais « DXY ».
+
+**3. Le breadth de marché n'existe pas ici.** Ni la CDN CBOE ni le flux courtier
+ne servent TICK/ADD/TRIN (vérifié le 2026-09-22). Écris « Non disponible » pour
+le breadth, et utilise à la place la **participation du complexe Nasdaq** :
+combien des 12 constituants suivis (SMH, NVDA, AVGO, AMD, MU, TSM, AAPL, MSFT,
+AMZN, META, GOOGL, TSLA) sont en hausse vs leur clôture de la veille, avec les
+extrêmes. Ce n'est PAS du breadth de marché — 12 valeurs, pas 3 000 — et tu dois
+le présenter comme tel. Mais pour un scalpeur NQ, « les mégacaps confirment-elles ? »
+pese plus lourd que l'advance/decline du NYSE.
 
 ## Sources
 
@@ -38,6 +61,10 @@ continue avec ce que tu as :
 - `/api/v1/NQ/session_context` — contexte de séance
 - `/api/v1/vix` — VIX et son grade
 - `/api/v1/NQ/summary`, `/api/v1/NQ/strikes`, `/api/v1/NQ/regime`
+
+**Taux et intermarket** — spots temps réel via le flux courtier, clés `ZT`,
+`ZN`, `CL`, `GC`, `6E` : `/api/v1/<cle>/summary`, ou les bougies 1 min dans
+`D:\Gex\data\prices\<cle>\<jour>.parquet` pour la variation du jour.
 
 **MCP `gex-data`** : `get_market_context`, `get_gex_summary`, `get_gex_by_strike`,
 `get_flow_delta`, `get_history`.
@@ -80,10 +107,15 @@ maximum**, lisible en 90 secondes sur mobile.
 5. **Volatilité** — VIX et son grade ; volatilité réalisée overnight si tu la
    calcules. Précise que le VIX est un implicite **S&P 30 jours** : il ne dit
    rien de l'intraday Nasdaq.
-6. **Calendrier du jour** — heure Paris, événement, et fenêtres de risque.
-7. **Semis / mégacaps** — uniquement ce qui est significatif.
-8. **Ce qu'il faudra vérifier à l'ouverture** — 3 à 5 points concrets.
-9. **⚠️ PRÉCAUTION TRADING** — conclusion obligatoire (voir plus bas).
+6. **Taux et intermarket** — ZT/ZN (en rappelant l'inversion prix/rendement),
+   CL, GC, 6E. Cherche la **confirmation ou la divergence** avec le NQ, sans
+   jamais affirmer une causalité : « cohérent avec », « semble contribuer à ».
+7. **Participation Nasdaq** — combien des 12 constituants en hausse, et les
+   extrêmes. Rappelle que ce n'est pas du breadth de marché.
+8. **Calendrier du jour** — heure Paris, événement, et fenêtres de risque.
+9. **Semis / mégacaps** — uniquement ce qui est significatif.
+10. **Ce qu'il faudra vérifier à l'ouverture** — 3 à 5 points concrets.
+11. **⚠️ PRÉCAUTION TRADING** — conclusion obligatoire (voir plus bas).
 
 ## Mode `ajustement` — publié à 15h35, après l'open
 

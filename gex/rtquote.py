@@ -181,7 +181,7 @@ def _is_future_key(key: str) -> bool:
     coïncident avec des tickers d'actions sans rapport (cf. resolve_symbols).
     """
     u = UNDERLYINGS.get(key)
-    return u is not None and u.source == "futopt"
+    return u is not None and u.source in ("futopt", "future")
 
 
 # Symbole streamer du contrat actif, mémorisé une fois résolu. L'API
