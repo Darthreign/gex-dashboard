@@ -290,3 +290,38 @@ def test_figure_for_nom_inconnu_renvoie_none():
     pas de kaleido). L'endpoint renverra 404."""
     from gex.app import _figure_for
     assert _figure_for("SPX", "pas-un-graphe") is None
+
+
+def test_lecture_risque_couvre_le_gamma_negatif():
+    """Le gamma NEGATIF doit dire quelque chose du risque.
+
+    Jusqu'au 2026-09-22, _LECTURE_RISQUE ne contenait que des cles « Gamma
+    Positif » : le regime qui amplifie le plus les mouvements etait le seul a
+    ne rien dire du risque, alors que c'est la qu'il est le plus eleve.
+    """
+    hist = [1e9] * 40
+    for dex in (+1, -1):
+        for gex in (-1, -5e9):
+            txt = digest.symbol_reading(gex, dex, hist)["text"]
+            assert "\n" in txt, f"pas de ligne de risque (gex={gex}, dex={dex})"
+            risque = txt.splitlines()[1]
+            assert "amplification" in risque.lower() or "amplifi" in risque.lower()
+            assert "sans filet" in risque
+
+
+def test_gamma_negatif_symetrique_contrairement_au_positif():
+    """En gamma negatif le risque est eleve des DEUX cotes : le texte ne doit
+    pas dependre du delta. En gamma positif il est asymetrique : il en depend."""
+    neg_a = digest.symbol_reading(-1, +1)["text"].splitlines()[1]
+    neg_b = digest.symbol_reading(-1, -1)["text"].splitlines()[1]
+    assert neg_a == neg_b
+
+    pos_a = digest.symbol_reading(+1, +1)["text"].splitlines()[1]
+    pos_b = digest.symbol_reading(+1, -1)["text"].splitlines()[1]
+    assert pos_a != pos_b
+
+
+def test_lecture_risque_traduite_en_anglais():
+    """Le bandeau EN doit dire la meme chose que le bot FR."""
+    en = digest.symbol_reading(-1, -1, lang="en")["text"]
+    assert "Moves amplified both ways" in en and "No cushion" in en

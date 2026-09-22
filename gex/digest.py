@@ -76,9 +76,26 @@ COLORS = {"green": 0x2ECC71, "orange": 0xE67E22, "red": 0xE74C3C}
 # marché « aide » un sens de couverture, donc l'autre sens travaille à
 # contre-courant. C'est une asymétrie de RISQUE, pas un ordre (aucun « achète /
 # vends »). Sur Gamma négatif, rien : le verdict contrarien couvre déjà le cas.
+# Lecture du RISQUE, pas un signal : décrit ce que la couverture des dealers
+# fait au marché, jamais une direction à prendre.
+#
+# Gamma POSITIF : les dealers amortissent (ils vendent les hausses, achètent
+# les creux). Le risque est donc asymétrique — un sens est coussiné, l'autre
+# non — et le signe du delta dit lequel.
+#
+# Gamma NÉGATIF : ils couvrent DANS le sens du mouvement, qui s'étend au lieu
+# de se refermer. L'amplification joue à la hausse comme à la baisse : le
+# risque n'est plus asymétrique, il est élevé des deux côtés. D'où un texte
+# identique quel que soit le delta — celui-ci indique l'inventaire courant des
+# dealers, pas un côté protégé. Ce cas n'était pas couvert jusqu'au
+# 2026-09-22 : le régime qui amplifie le plus ne disait rien du risque.
 _LECTURE_RISQUE = {
     ("Gamma Positif", "Delta Négatif"): "Réduire le risque sur les shorts | Long avec très peu de risque",
     ("Gamma Positif", "Delta Positif"): "Réduire le risque sur les longs | Short avec très peu de risque",
+    ("Gamma Négatif", "Delta Négatif"): "Mouvements amplifiés dans les deux sens | Contrarien sans filet",
+    ("Gamma Négatif", "Delta Positif"): "Mouvements amplifiés dans les deux sens | Contrarien sans filet",
+    ("Fort Gamma Négatif", "Delta Négatif"): "Forte amplification dans les deux sens | Contrarien sans filet",
+    ("Fort Gamma Négatif", "Delta Positif"): "Forte amplification dans les deux sens | Contrarien sans filet",
 }
 
 # Familles indépendantes. Le régime réel tient à DEUX classes d'actifs, pas à
@@ -179,9 +196,14 @@ def classify(net_gex: float, net_dex: float, hist=None) -> dict:
 _GAMMA_EN = {"Gamma Positif": "Positive Gamma", "Gamma Négatif": "Negative Gamma",
              "Fort Gamma Négatif": "Strong Negative Gamma"}
 _DELTA_EN = {"Delta Positif": "Positive Delta", "Delta Négatif": "Negative Delta"}
+# Clés en FR (ce sont les libellés de classify), valeurs en EN.
 _LECTURE_RISQUE_EN = {
     ("Gamma Positif", "Delta Négatif"): "Reduce risk on shorts | Long with very little risk",
     ("Gamma Positif", "Delta Positif"): "Reduce risk on longs | Short with very little risk",
+    ("Gamma Négatif", "Delta Négatif"): "Moves amplified both ways | No cushion for contrarians",
+    ("Gamma Négatif", "Delta Positif"): "Moves amplified both ways | No cushion for contrarians",
+    ("Fort Gamma Négatif", "Delta Négatif"): "Strong amplification both ways | No cushion for contrarians",
+    ("Fort Gamma Négatif", "Delta Positif"): "Strong amplification both ways | No cushion for contrarians",
 }
 
 
