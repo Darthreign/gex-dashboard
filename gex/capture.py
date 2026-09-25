@@ -23,7 +23,7 @@ import time
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from .capturebus import DEFAULT_HOST, DEFAULT_PORT, serve
+from .capturebus import DEFAULT_PORT, bind_hosts, serve
 from .flowtape import TAPE
 from .logsetup import setup_logging
 from .rtquote import QUOTES
@@ -53,7 +53,7 @@ def attendre_spot(quotes=QUOTES, symboles=("SPX", "NDX", "SPY", "QQQ"),
     return False
 
 
-def main(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
+def main(host=None, port: int = DEFAULT_PORT) -> None:
     setup_logging(filename="capture.log")
     log.info("Process capture : démarrage")
     sched = BackgroundScheduler(timezone="America/New_York")
@@ -64,7 +64,7 @@ def main(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
     attendre_spot()         # le tape, lui, a besoin du premier prix pour son univers
     TAPE.start()
     threading.current_thread().name = "capture-main"
-    serve(TAPE, host, port)  # bloque : c'est ce qui garde le process en vie
+    serve(TAPE, host or bind_hosts(), port)  # bloque : c'est ce qui garde le process en vie
 
 
 if __name__ == "__main__":

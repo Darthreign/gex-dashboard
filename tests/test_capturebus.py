@@ -163,3 +163,22 @@ def test_attendre_spot_abandonne_apres_le_delai_sans_bloquer():
                                  horloge=lambda: t[0],
                                  dormir=lambda d: t.__setitem__(0, t[0] + d)) is False
     assert t[0] >= 5
+
+
+def test_adresse_indisponible_ignoree_la_capture_sert_quand_meme():
+    """Tailscale pas monté au démarrage : l'adresse Tailscale échoue, 127.0.0.1
+    sert quand même (la capture ne doit pas mourir pour ça)."""
+    t = _tape()
+    port = _free_port()
+    capturebus.serve_in_thread(t, ["127.0.0.1", "203.0.113.7"], port)   # IP non locale
+    t.ingest_print(_p(".SPXW260729C7400", "BUY"), now=time.time())
+    r = RemoteTape(f"ws://127.0.0.1:{port}")
+    r.start()
+    assert _attendre(lambda: len(r.recent_prints("SPX")) == 1)
+
+
+def test_bind_hosts_par_defaut_et_liste(monkeypatch):
+    monkeypatch.setattr(capturebus, "_env", lambda n: None)
+    assert capturebus.bind_hosts() == ["127.0.0.1"]
+    monkeypatch.setattr(capturebus, "_env", lambda n: "127.0.0.1, 100.109.109.123")
+    assert capturebus.bind_hosts() == ["127.0.0.1", "100.109.109.123"]

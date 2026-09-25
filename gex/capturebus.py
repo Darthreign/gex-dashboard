@@ -14,8 +14,9 @@ dernier envoi à CE client, et un instantané complet à la connexion. Le miroir
 sait pas s'il lit un collecteur local ou distant.
 
 Sans `GEX_CAPTURE_URL`, rien de tout cela n'est utilisé : le dashboard reste
-autonome comme avant (promesse du README). La liaison n'écoute que sur
-127.0.0.1 : aucun port exposé, ni sur le réseau local ni via Tailscale.
+autonome comme avant (promesse du README). Par défaut la liaison
+n'écoute que sur 127.0.0.1 ; pour la joindre via Tailscale, GEX_CAPTURE_BIND y
+ajoute l'IP Tailscale (jamais 0.0.0.0 : Wi-Fi et réseau local seraient exposés).
 """
 from __future__ import annotations
 
@@ -59,8 +60,20 @@ async def _handler(ws, tape: FlowTape) -> None:
         await asyncio.sleep(PUSH_INTERVAL_S)
 
 
-async def _serve(tape: FlowTape, host: str, port: int) -> None:
+def bind_hosts() -> list[str]:
+    """Adresses d'écoute, depuis GEX_CAPTURE_BIND (séparées par des virgules) ;
+    127.0.0.1 par défaut. Pour joindre la capture via Tailscale, y ajouter l'IP
+    Tailscale du PC (ex. « 127.0.0.1,100.109.109.123 ») : ne PAS mettre 0.0.0.0,
+    qui exposerait aussi le Wi-Fi et le réseau local (flux courtier, sans mot de
+    passe, usage personnel)."""
+    brut = _env("GEX_CAPTURE_BIND") or DEFAULT_HOST
+    hosts = [h.strip() for h in brut.split(",") if h.strip()]
+    return hosts or [DEFAULT_HOST]
+
+
+async def _serve(tape: FlowTape, host, port: int) -> None:
     import websockets
+    from contextlib import AsyncExitStack
 
     async def handler(ws):
         try:
@@ -68,18 +81,34 @@ async def _serve(tape: FlowTape, host: str, port: int) -> None:
         except websockets.ConnectionClosed:
             pass
 
-    async with websockets.serve(handler, host, port, max_size=MAX_MESSAGE,
-                                ping_interval=20, ping_timeout=20):
-        log.info("Liaison capture : écoute sur ws://%s:%d", host, port)
+    hosts = [host] if isinstance(host, str) else list(host)
+    async with AsyncExitStack() as stack:
+        ecoutes = []
+        for h in hosts:
+            try:
+                await stack.enter_async_context(websockets.serve(
+                    handler, h, port, max_size=MAX_MESSAGE,
+                    ping_interval=20, ping_timeout=20))
+                ecoutes.append(h)
+            except OSError as exc:
+                # p. ex. Tailscale pas encore monté au démarrage du PC : on ne
+                # renonce pas à la capture pour une adresse indisponible
+                log.warning("Liaison capture : impossible d'écouter sur %s:%d (%s)",
+                            h, port, exc)
+        if not ecoutes:
+            raise RuntimeError("liaison capture : aucune adresse d'écoute disponible")
+        log.info("Liaison capture : écoute sur %s",
+                 ", ".join(f"ws://{h}:{port}" for h in ecoutes))
         await asyncio.Future()                     # tourne indéfiniment
 
 
-def serve(tape: FlowTape, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
-    """Bloque : sert `tape` aux abonnés. À lancer dans le process capture."""
+def serve(tape: FlowTape, host=DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
+    """Bloque : sert `tape` aux abonnés. À lancer dans le process capture.
+    `host` : une adresse, ou une liste (chacune indisponible est ignorée)."""
     asyncio.run(_serve(tape, host, port))
 
 
-def serve_in_thread(tape: FlowTape, host: str = DEFAULT_HOST,
+def serve_in_thread(tape: FlowTape, host=DEFAULT_HOST,
                     port: int = DEFAULT_PORT) -> threading.Thread:
     th = threading.Thread(target=serve, args=(tape, host, port),
                           name="capturebus", daemon=True)
