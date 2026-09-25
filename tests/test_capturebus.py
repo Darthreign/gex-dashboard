@@ -133,3 +133,33 @@ def test_remote_url_absente_par_defaut(monkeypatch):
     monkeypatch.delenv("GEX_CAPTURE_URL", raising=False)
     monkeypatch.setattr(capturebus, "_env", lambda n: None)
     assert capturebus.remote_url() is None
+
+
+def test_attendre_spot_rend_la_main_des_que_tous_les_prix_sont_la():
+    from gex import capture
+
+    class Q:
+        def __init__(self):
+            self.n = 0
+
+        def price(self, s):
+            self.n += 1
+            return 1.0 if self.n > 6 else None      # les prix arrivent au 2e passage
+
+    t = [0.0]
+    assert capture.attendre_spot(Q(), ("SPX", "NDX"), timeout=10, pas=1,
+                                 horloge=lambda: t[0],
+                                 dormir=lambda d: t.__setitem__(0, t[0] + d))
+    assert t[0] < 10                                # rendu avant l'échéance
+
+
+def test_attendre_spot_abandonne_apres_le_delai_sans_bloquer():
+    from gex import capture
+    class Q:
+        def price(self, s):
+            return None
+    t = [0.0]
+    assert capture.attendre_spot(Q(), ("SPX",), timeout=5, pas=1,
+                                 horloge=lambda: t[0],
+                                 dormir=lambda d: t.__setitem__(0, t[0] + d)) is False
+    assert t[0] >= 5
