@@ -569,6 +569,18 @@ body {
   .topbar, .page { padding-left: 14px; padding-right: 14px; }
   .toolbar { gap: 12px; }
   .stat-value { font-size: 21px; }
+
+  /* Téléphone : rien ne doit dépasser la largeur de l'écran, sinon Safari
+     dézoome TOUTE la page pour le faire entrer (contenu à 65 % de la largeur). */
+  html, body { max-width: 100vw; overflow-x: hidden; }
+  .brand { flex-wrap: wrap; white-space: normal; row-gap: 4px; }
+  .brand-sub { flex-basis: 100%; border-left: 0; padding-left: 0; margin-left: 0; }
+  .daybar, .toolbar { flex-wrap: wrap; row-gap: 8px; min-width: 0; max-width: 100%; }
+  .seg, .check { flex-wrap: wrap; max-width: 100%; }
+  .tape-table { display: block; overflow-x: auto; max-width: 100%; }
+  /* la barre d'outils Plotly recouvre les titres ; le tactile pince/glisse déjà */
+  .modebar-container { display: none !important; }
+  .js-plotly-plot .gtitle { font-size: 12px !important; }
 }
 
 /* mention de transposition d'échelle (au-dessus des niveaux) */

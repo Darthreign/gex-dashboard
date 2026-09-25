@@ -7,6 +7,7 @@ Interface FR/EN (gex/i18n.py) ; termes de trading standards dans les deux.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -122,7 +123,22 @@ def guided(title: str, key: str) -> str:
     return f'<a href="{url}" target="_blank" style="color:inherit">{title} ↗</a>'
 
 
+def _split_title(title: str) -> str:
+    """Titre long sur deux lignes (coupé au dernier « — ») : sur téléphone un titre
+    d'une seule ligne dépasse la largeur du graphe. Les titres courts, et ceux
+    sans tiret cadratin, restent tels quels."""
+    plain = re.sub(r"<[^>]+>", "", title)
+    if len(plain) <= 52 or " — " not in title:
+        return title
+    if "<a " in title:                      # titre cliquable : coupe au premier tiret
+        return title.replace(" — ", "<br>", 1)
+    head, _, tail = title.rpartition(" — ")
+    return f"{head}<br><sub>{tail}</sub>"
+
+
 def base_layout(title: str, height: int = 420) -> dict:
+    title = _split_title(title)
+    deux_lignes = "<br>" in title
     return dict(
         title=dict(text=title, font=dict(size=13, color=C["ink"], family=FONT),
                    x=0.012, y=0.97, xanchor="left"),
@@ -130,7 +146,7 @@ def base_layout(title: str, height: int = 420) -> dict:
         paper_bgcolor=C["surface"],
         plot_bgcolor=C["surface"],
         font=dict(family=FONT, size=11, color=C["ink2"]),
-        margin=dict(l=58, r=18, t=42, b=38),
+        margin=dict(l=58, r=18, t=58 if deux_lignes else 42, b=38),
         height=height,
         xaxis=dict(gridcolor=C["grid"], zerolinecolor=C["axis"], linecolor=C["axis"], tickfont=dict(color=C["muted"])),
         yaxis=dict(gridcolor=C["grid"], zerolinecolor=C["axis"], linecolor=C["axis"], tickfont=dict(color=C["muted"])),
@@ -185,7 +201,7 @@ def with_legend(lay: dict) -> dict:
     """Légende en haut à droite + marge suffisante : le titre est aligné à
     gauche, une légende centrée viendrait le chevaucher."""
     lay["showlegend"] = True
-    lay["margin"]["t"] = 62
+    lay["margin"]["t"] = max(62, lay["margin"]["t"] + 20)
     lay["legend"] = dict(orientation="h", y=1.13, x=1, xanchor="right",
                          font=dict(color=C["ink2"], size=11))
     return lay
