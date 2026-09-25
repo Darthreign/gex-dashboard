@@ -67,11 +67,19 @@ CHANNEL_ID = int(os.environ.get("DISCORD_CHANNEL_ID", "0"))
 DASHBOARD = os.environ.get("DASHBOARD_URL", "http://127.0.0.1:8050").rstrip("/")
 
 # Heures Paris des posts fixes (h, min). Modifiable sans toucher au reste.
-# 15h25 = juste avant l'open US (15h30 = 9h30 ET) ; 15h35 = mise à jour juste
-# après l'open.
-SCHEDULE = {(8, 30), (15, 25), (15, 35)}
+# 15h15 = préparation de l'open (9h15 ET), 15h30 = open US (9h30 ET) ;
+# 15h45 = ajustement standard peu après l'open (décalé de 15h40 le 2026-09-24 :
+# le délai de dispatch de la routine, variable et non désactivable, laisse
+# sinon trop peu de marge pour finir la rédaction avant le post). Ancien
+# schéma : 15h25/15h35.
+SCHEDULE = {(8, 30), (15, 15), (15, 45)}
 # Message de « clôture » (Paris) : stop contrarien + sens des MM + bonne soirée.
 CLOSE_POST = (16, 0)
+# Post Discord à chaque CHANGEMENT DE RÉGIME : désactivé le 2026-09-24 (trop
+# imprécis, ça spamait). Le journal, lui, continue d'enregistrer chaque changement
+# (statistiques / backtest) ; les digests à heure fixe (SCHEDULE) restent actifs.
+# `!alert_full` n'a d'effet que si ce drapeau repasse à True.
+POST_CHANGEMENT_REGIME = False
 # Briefs prémarket rédigés par une routine Claude (cf. .claude/skills/
 # premarket-nq). Le bot ne les PRODUIT pas : il les relaie s'ils sont frais.
 # Une routine ne tourne que si l'app Claude Code est ouverte — d'où la garde de
@@ -79,14 +87,31 @@ CLOSE_POST = (16, 0)
 # plutôt que de republier le brief de la veille.
 BRIEFS_DIR = Path(__file__).resolve().parent.parent / "data" / "briefs"
 BRIEF_MAX_AGE_S = 900          # 15 min : la routine tourne 5 min avant le post
-BRIEF_SLOTS = {(8, 30): "matin", (10, 0): "matin", (15, 25): "prebrief",
-              (15, 35): "ajustement"}
+# Fraicheur plus large pour certains briefs :
+# - ajustement2 : il ne se poste qu'a 16h15 alors que la routine peut l'avoir
+#   ecrit des ~16h00 (delai de dispatch variable) ;
+# - matin : si le bot est arrete ou redemarre en retard (25/09 : mort de 6h07 a
+#   8h39, brief ecrit a 8h21 = 18 min > 15), il doit pouvoir le poster quand meme.
+#   Sans risque de republier celui de la veille : la fenetre du matin ne s'ouvre
+#   qu'a 8h30, donc un fichier de moins de 90 min a forcement ete ecrit apres 7h.
+BRIEF_MAX_AGE_PAR_NOM = {"matin": 5400, "ajustement2": 2400}
+BRIEF_SLOTS = {(8, 30): "matin", (10, 0): "matin", (15, 15): "prebrief",
+              (15, 45): "ajustement"}
 # (10, 0) partage le meme nom "matin" que (8, 30) : la publication est idempotente
 # par jour (cf. _post_brief). C est le filet de secours — la routine
 # premarket-nq-matin (une SEULE tache) retente elle-meme plusieurs fois dans la
 # matinee (cron a plages multiples, chaque tir verifiant d abord si le brief est
 # deja frais avant de regenerer) ; ce creneau se contente de poster le resultat
 # des que dispo. Si 8h30 a deja reussi, ce creneau ne fait rien.
+#
+# "ajustement2" (ajout du 2026-09-24) n'a PAS d'entree ici : son heure de
+# declenchement depend d'une actualite macro (Flash PMI, nominalement 9h45 ET =
+# 15h45 Paris, mais la meme runtime que l'ajustement standard peut viser une
+# autre heure si le calendrier econ_calendar.json indique un time_et different
+# ce jour-la). Impossible a figer dans BRIEF_SLOTS -> il ne vit que dans
+# BRIEF_FENETRES ci-dessous, capte des que le fichier apparait dans sa fenetre,
+# sans post de digest complementaire (pas de creneau SCHEDULE associe).
+#
 # Une routine planifiee subit un delai de dispatch de plusieurs minutes, non
 # desactivable (« deterministic delay … to balance server load »). Le brief peut
 # donc arriver APRES son creneau : chaque brief a une fenetre de rattrapage
@@ -96,9 +121,19 @@ BRIEF_FENETRES = {
     # 11h il ne sert plus a rien. Fenetre courte, quitte a le sauter.
     # Fenetre etendue jusqu a 10h15 pour couvrir LES DEUX tentatives (8h30 et le
     # filet de secours ~10h00), chacune avec sa propre marge de rattrapage.
-    "matin":      (dt.time(8, 30), dt.time(10, 15)),
-    "prebrief":   (dt.time(15, 25), dt.time(15, 34)),
-    "ajustement": (dt.time(15, 35), dt.time(16, 0)),
+    "matin":       (dt.time(8, 30), dt.time(10, 15)),
+    "prebrief":    (dt.time(15, 15), dt.time(15, 24)),
+    # Post par défaut a 15h45 ; fenetre jusqu'a 16h00 car le delai de dispatch
+    # de la routine (jusqu'a ~12 min) peut la faire demarrer vers 15h48.
+    "ajustement":  (dt.time(15, 45), dt.time(16, 0)),
+    # Poste a partir de 16h15 (decale de 15h50 le 2026-09-24, cote bot SEUL : la
+    # routine, elle, ecrit quand son delai de dispatch le lui permet — variable
+    # et non desactivable — donc le bot attend 16h15 pour laisser le temps aux
+    # verifications d'actualite). Fenetre jusqu'a 16h45 : couvre aussi un
+    # decalage du calendrier (ex. 10h00 ET -> reaction ~16h05) et la marge du
+    # dernier creneau de verification (16h20). Le fichier doit encore avoir
+    # moins de 15 min (BRIEF_MAX_AGE_S) au moment ou le bot le lit.
+    "ajustement2": (dt.time(16, 15), dt.time(16, 45)),
 }
 # Limite Discord d'une description d'embed (4096) ; marge pour le titre.
 EMBED_MAX = 3900
@@ -211,6 +246,39 @@ def _embed(d: dict) -> discord.Embed:
     return discord.Embed(description=d["text"], color=d.get("discord_color", 0x95A5A6))
 
 
+NIVEAUX_SLOT = (15, 15)     # photo des niveaux NQ juste avant l'open (bilan de fin de séance)
+
+
+def _snapshot_niveaux(jour: str, ts: str) -> None:
+    """Photographie les niveaux NQ à 15h15 dans `daily_metrics` (`lvl_1515_*`).
+
+    Sert au bilan de fin de séance (scripts/eod_review.py) : sans cette photo, on
+    ne pourrait pas juger a posteriori si un mur ou le flip a été respecté (les
+    niveaux bougent toute la journée). Sans effet si le dashboard ou le journal
+    est indisponible — rater une photo ne doit jamais gêner le bot."""
+    jc = _journal()
+    lv = fetch("/api/v1/NQ/levels")
+    if jc is None or not lv:
+        log.warning("Photo des niveaux 15h15 : dashboard ou journal indisponible")
+        return
+    kl = lv.get("key_levels") or {}
+    vals = {"zero_gamma": lv.get("zero_gamma"), "hvl": lv.get("hvl"),
+            "call_wall": kl.get("call_wall"), "put_support": kl.get("put_support"),
+            "d1_min": kl.get("d1_min"), "d1_max": kl.get("d1_max"),
+            "spot": lv.get("spot")}
+    for nom, v in vals.items():
+        if v is not None:
+            journal.set_metric(jc, date=jour, symbol="NQ", name=f"lvl_1515_{nom}",
+                               value_num=float(v), ts=ts)
+    murs = [{"strike": w.get("strike"), "gex": w.get("gex"), "expiry": w.get("expiry")}
+            for w in (lv.get("gex_walls") or [])]
+    if murs:
+        journal.set_metric(jc, date=jour, symbol="NQ", name="lvl_1515_murs",
+                           value_txt=json.dumps(murs), ts=ts)
+    log.info("Photo des niveaux 15h15 enregistrée (%d niveaux, %d murs)",
+             sum(v is not None for v in vals.values()), len(murs))
+
+
 intents = discord.Intents.default()
 intents.message_content = True        # nécessaire pour lire les commandes « ! »
 # help_command=None : on remplace le !help auto de discord.py par le nôtre, plus
@@ -238,9 +306,10 @@ def _lire_brief(nom: str) -> str | None:
         if not f.exists():
             return None
         age = time.time() - f.stat().st_mtime
-        if age > BRIEF_MAX_AGE_S:
+        max_age = BRIEF_MAX_AGE_PAR_NOM.get(nom, BRIEF_MAX_AGE_S)
+        if age > max_age:
             log.info("Brief %s ignoré : %.0f min (> %.0f)", nom, age / 60,
-                     BRIEF_MAX_AGE_S / 60)
+                     max_age / 60)
             return None
         return f.read_text(encoding="utf-8").strip() or None
     except Exception:  # noqa: BLE001 — un brief illisible ne doit rien casser
@@ -248,8 +317,34 @@ def _lire_brief(nom: str) -> str | None:
         return None
 
 
+def _decouper_en_blocs(texte: str) -> list[str]:
+    """Découpe sur les sauts de ligne pour ne jamais casser un tableau en deux,
+    en blocs d'au plus EMBED_MAX caractères (limite d'un embed Discord)."""
+    blocs, courant = [], ""
+    for ligne in texte.splitlines(keepends=True):
+        if len(courant) + len(ligne) > EMBED_MAX:
+            blocs.append(courant)
+            courant = ""
+        courant += ligne
+    if courant:
+        blocs.append(courant)
+    return blocs
+
+
+async def _envoyer_brief(sender, texte: str) -> int:
+    """Envoie `texte` en un ou plusieurs embeds via `sender.send` — `sender`
+    est un salon (relais automatique) ou un `ctx` de commande (à la demande),
+    les deux exposant la même signature `.send(embed=...)`. Renvoie le nombre
+    de blocs envoyés."""
+    blocs = _decouper_en_blocs(texte)
+    for bloc in blocs:
+        await sender.send(embed=discord.Embed(description=bloc, color=0x5865F2))
+    return len(blocs)
+
+
 async def _post_brief(nom: str, jour: str) -> bool:
-    """Poste le brief `nom` (une seule fois par jour). True si posté."""
+    """Poste le brief `nom` (une seule fois par jour, relais AUTOMATIQUE —
+    cf. tick()). True si posté."""
     faits = _briefs_postes.setdefault(jour, set())
     if nom in faits:
         return False
@@ -260,20 +355,27 @@ async def _post_brief(nom: str, jour: str) -> bool:
     channel = bot.get_channel(CHANNEL_ID)
     if channel is None:
         return False
-    # Découpe sur les sauts de ligne pour ne jamais casser un tableau en deux.
-    blocs, courant = [], ""
-    for ligne in texte.splitlines(keepends=True):
-        if len(courant) + len(ligne) > EMBED_MAX:
-            blocs.append(courant)
-            courant = ""
-        courant += ligne
-    if courant:
-        blocs.append(courant)
-    for i, bloc in enumerate(blocs):
-        await channel.send(embed=discord.Embed(description=bloc, color=0x5865F2))
-    log.info("Brief %s posté (%d message(s), %d caractères)", nom, len(blocs),
-             len(texte))
+    n = await _envoyer_brief(channel, texte)
+    log.info("Brief %s posté (%d message(s), %d caractères)", nom, n, len(texte))
     return True
+
+
+_BRIEF_NOMS = ("matin", "prebrief", "ajustement", "ajustement2")
+
+
+async def _poster_brief_sur_demande(ctx: commands.Context, nom: str) -> None:
+    """Poste un brief À LA DEMANDE (commandes !matin/!prebrief/...) — SANS la
+    fenêtre horaire ni le dédoublonnage quotidien de `_post_brief` : un humain
+    demande explicitement, donc on le sert même hors créneau, quitte à le
+    reposter dans la même journée. Respecte quand même la fraîcheur (cf.
+    `_lire_brief`, 15 min) — sinon on afficherait un brief périmé sans le dire.
+    """
+    texte = _lire_brief(nom)
+    if not texte:
+        await ctx.send(f"Pas de brief « {nom} » disponible ou trop ancien "
+                       f"(> {BRIEF_MAX_AGE_S // 60} min) — régénère-le d'abord.")
+        return
+    await _envoyer_brief(ctx, texte)
 
 
 async def _post_close(d: dict) -> None:
@@ -519,6 +621,11 @@ async def tick() -> None:
         deja.add(slot)
         await _post(d)
         log.info("Post fixe %02dh%02d (%s)", slot[0], slot[1], d["color"])
+        if slot == NIVEAUX_SLOT:
+            try:
+                _snapshot_niveaux(jour, now.isoformat())
+            except Exception:  # noqa: BLE001 — la photo est un bonus, jamais bloquante
+                log.exception("Photo des niveaux 15h15")
         # Brief prémarket en complément, s'il a été rédigé et qu'il est frais.
         nom = BRIEF_SLOTS.get(slot)
         if nom:
@@ -546,13 +653,14 @@ async def tick() -> None:
         # Le journal enregistre TOUS les changements (finesse preservee pour le
         # backtest) ; seul le post Discord depend du mode d'alerte.
         change_couleur = d.get("color") != (_last_digest or {}).get("color")
-        if _alert_full or change_couleur:
+        if POST_CHANGEMENT_REGIME and (_alert_full or change_couleur):
             await _post(d)
             log.info("Changement de régime détecté -> post (%s, mode %s)",
                      d["color"], "complet" if _alert_full else "allégé")
         else:
-            log.info("Changement de régime sans changement de couleur (%s) — "
-                     "post omis (mode allégé)", d["color"])
+            log.info("Changement de régime (%s%s) — post Discord %s", d["color"],
+                     ", couleur inchangée" if not change_couleur else "",
+                     "omis (mode allégé)" if POST_CHANGEMENT_REGIME else "désactivé")
         reason = journal.compute_reason(_prev_for_reason(), d.get("color"),
                                         d.get("confidence"), d.get("families"))
         await _record_regime(now, "change", d, reason=reason)
@@ -567,6 +675,39 @@ async def etat(ctx: commands.Context) -> None:
         await ctx.send("Dashboard injoignable pour l'instant.")
         return
     await ctx.send(embed=_embed(d))
+
+
+@bot.command(name="matin")
+async def matin_cmd(ctx: commands.Context) -> None:
+    """`!matin` — poste le brief du matin maintenant, même hors de 8h30/10h00."""
+    await _poster_brief_sur_demande(ctx, "matin")
+
+
+@bot.command(name="prebrief")
+async def prebrief_cmd(ctx: commands.Context) -> None:
+    """`!prebrief` — poste le pré-brief maintenant, même hors de 15h15."""
+    await _poster_brief_sur_demande(ctx, "prebrief")
+
+
+@bot.command(name="ajustement")
+async def ajustement_cmd(ctx: commands.Context) -> None:
+    """`!ajustement` — poste l'ajustement maintenant, même hors de 15h45."""
+    await _poster_brief_sur_demande(ctx, "ajustement")
+
+
+@bot.command(name="ajustement2")
+async def ajustement2_cmd(ctx: commands.Context) -> None:
+    """`!ajustement2` — poste le second ajustement (réaction actualité) maintenant."""
+    await _poster_brief_sur_demande(ctx, "ajustement2")
+
+
+@bot.command(name="brief")
+async def brief_cmd(ctx: commands.Context, nom: str | None = None) -> None:
+    """`!brief <nom>` — alias générique de !matin/!prebrief/!ajustement/!ajustement2."""
+    if nom is None or nom.lower() not in _BRIEF_NOMS:
+        await ctx.send(f"Précise un nom : {', '.join(_BRIEF_NOMS)}.")
+        return
+    await _poster_brief_sur_demande(ctx, nom.lower())
 
 
 @bot.command(name="vix")
@@ -984,9 +1125,20 @@ async def aide(ctx: commands.Context) -> None:
                "`!vix` — la volatilité (VIX), son régime (calme→panique) et sa "
                "position vs le seuil.\n"
                "`!cloture` — le message de clôture (auto à 16h).\n"
-               "`!alert_full on|off` — verbosité des alertes : *complet* "
+               "`!alert_full on|off` — (inactif : les posts de changement de "
+               "régime sont désactivés) verbosité des alertes : *complet* "
                "(chaque changement d'état) ou *allégé* (uniquement un "
                "changement de couleur globale — défaut)."),
+        inline=False,
+    )
+    e.add_field(
+        name="📰 Briefs prémarket (rédigés par une routine Claude)",
+        value=("`!matin`, `!prebrief`, `!ajustement`, `!ajustement2` — poste "
+               "le brief correspondant MAINTENANT, même hors de son créneau "
+               "normal (8h30, 15h15, 15h45, 15h50-16h20). `!brief <nom>` fait "
+               "la même chose avec le nom en argument.\n"
+               "Chaque brief doit avoir moins de 15 min pour être posté — "
+               "sinon le bot le dit plutôt que de relayer une version périmée."),
         inline=False,
     )
     e.add_field(

@@ -52,8 +52,11 @@ PARIS = ZoneInfo("Europe/Paris")
 SYMBOLS = ("SPX", "SPY", "NDX", "QQQ", "ES", "NQ")
 
 # Seuils — configurables, valeurs par défaut calées sur les exemples.
-VIX_SEUIL = 16.0          # au-dessus : ligne d'alerte « fin du confort » (info)
-VIX_IMPACT = 20.0         # au-dessus : force au moins l'orange (VIX vraiment élevé)
+# Lecture du VIX pour le scalping CONTRARIEN (corrigée le 2026-09-25) : un VIX
+# élevé = plus d'allers-retours = favorable ; un VIX bas = marché calme, donc
+# direction possible = prudence. Le VIX ne change JAMAIS la couleur : lignes d'info.
+VIX_SEUIL = 16.0          # au-dessus : ligne « allers-retours favorables » (info)
+VIX_BAS = 14.0            # en dessous : ligne « marché calme, direction possible » (info)
 
 # Paliers de régime VIX (borne SUP exclue, label, emoji) — le dernier attrape le
 # reste. « élevé » commence vraiment vers 20 (au-dessus de la moyenne long
@@ -260,8 +263,14 @@ def build_digest(rows: list[dict], vix: float | None = None,
         if lecture:
             lines.append(f"→ {lecture}")
 
-    vix_line = (f"VIX supérieur à {int(vix_seuil)} ! (actuellement {vix:.2f})"
-                if vix is not None and vix > vix_seuil else None)
+    vix_line = None
+    if vix is not None and vix > vix_seuil:
+        vix_line = (f"VIX supérieur à {int(vix_seuil)} (actuellement {vix:.2f}) : "
+                    "allers-retours favorables au contrarien.")
+    elif vix is not None and vix < VIX_BAS:
+        vix_line = (f"VIX inférieur à {int(VIX_BAS)} (actuellement {vix:.2f}) : "
+                    "marché calme, mouvement directionnel possible — prudence "
+                    "pour le contrarien.")
 
     color, verdict, familles = _verdict(etats, vix, vix_seuil)
     confidence = _confiance_globale(familles)
@@ -350,12 +359,12 @@ def _verdict(etats: dict[str, dict], vix: float | None,
     symboles) plus le VIX :
 
     - rouge  : les 2 familles négatives, OU une famille en fort négatif ;
-    - orange : 1 famille négative, OU VIX vraiment élevé (≥ VIX_IMPACT = 20) ;
+    - orange : 1 famille négative ;
     - vert   : sinon.
 
-    Le VIX ne force la couleur qu'à partir de VIX_IMPACT (20, « élevé ») : entre
-    VIX_SEUIL (16) et 20, la ligne d'alerte s'affiche (fin du confort) mais un
-    verdict sain reste vert. `vix_seuil` (info) n'entre donc pas dans la couleur.
+    Le VIX n'entre PAS dans la couleur : un VIX élevé favorise le contrarien
+    (allers-retours) et un VIX bas n'est qu'une information de prudence
+    (ligne `vix_line`). `vix` reste en paramètre pour cette ligne.
 
     Retourne aussi le détail par famille (pour la confiance et la signature).
     """
@@ -367,16 +376,11 @@ def _verdict(etats: dict[str, dict], vix: float | None,
 
     n_neg = sum(1 for f in familles.values() if f["statut"] in ("neg", "fort_neg"))
     fort = any(f["statut"] == "fort_neg" for f in familles.values())
-    vix_haut = vix is not None and vix >= VIX_IMPACT
 
     if fort or n_neg >= 2:
         return "red", "Trading contrarien déconseillé sur session US.", familles
     if n_neg == 1:
         return "orange", "Trading contrarien risqué sur session US.", familles
-    if vix_haut:
-        return ("orange",
-                "Trading contrarien risqué sur session US — forte amplitude attendue.",
-                familles)
     return "green", _verdict_vert(etats), familles
 
 

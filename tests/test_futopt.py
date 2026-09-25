@@ -57,6 +57,36 @@ def test_chaine_vide_geree():
     assert futopt.filter_chain(vide, spot=100.0).empty
 
 
+def test_fenetre_rapide_en_jours_de_bourse():
+    """trading_days remplace max_days par un horizon en jours DE BOURSE —
+    0DTE/1DTE pour la collecte rapide, cf. futopt.FAST_TRADING_DAYS. Bornes
+    calculées depuis l'horaire RÉEL du test (pas de date en dur) : seul
+    `_trading_day_horizon` (testé séparément, lui déterministe) sait dire ce
+    qu'est « demain ouvré »."""
+    now = datetime.now(ET)
+    proche = futopt._trading_day_horizon(1, now_et=now)
+    loin = now.date() + pd.Timedelta(days=60)   # bien au-delà, quel que soit "today"
+    chain = _chain(28700.0)
+    proche_row = chain.iloc[[0]].copy()
+    proche_row["expiry"] = proche
+    loin_row = chain.iloc[[0]].copy()
+    loin_row["expiry"] = loin
+    chain = pd.concat([chain, proche_row, loin_row], ignore_index=True)
+
+    out = futopt.filter_chain(chain, spot=28700.0, trading_days=1)
+    assert proche in out["expiry"].values
+    assert loin not in out["expiry"].values
+
+
+def test_horizon_jours_de_bourse_saute_le_week_end():
+    """Un vendredi, D+1 (jour de bourse) est le lundi suivant — 3 jours
+    calendaires plus tard. Un seuil calendaire de 1 ou 2 l'exclurait à tort ;
+    l'horizon en jours de bourse doit l'inclure."""
+    vendredi = datetime(2026, 7, 24, 10, 0, tzinfo=ET)
+    horizon = futopt._trading_day_horizon(1, now_et=vendredi)
+    assert horizon == date(2026, 7, 27)  # lundi, pas samedi
+
+
 def test_multiplicateur_nq_distinct_des_indices():
     """Piège identifié : les options d'indice utilisent 100, les futures leur
     propre multiplicateur (20 pour NQ, 50 pour ES) — jamais 100 par défaut."""

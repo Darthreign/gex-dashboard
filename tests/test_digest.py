@@ -141,25 +141,26 @@ def test_exemple_3_rouge_fort_gamma_negatif():
     assert any("Fort Gamma Négatif" in ln and "NDX, QQQ et NQ" in ln for ln in d.lines)
 
 
-def test_vix_entre_16_et_20_reste_vert_si_structure_saine():
-    """VIX 16-20 : ligne d'alerte affichée (fin du confort), MAIS un verdict sain
-    reste VERT — le VIX ne force la couleur qu'à partir de 20."""
+def test_vix_eleve_favorable_au_contrarien_ne_change_pas_la_couleur():
+    """VIX élevé = allers-retours = favorable au contrarien : ligne d'info, et un
+    verdict sain reste VERT (le VIX ne dégrade plus la couleur)."""
     rows = [_row(s, +1e9, +1e9) for s in ("SPX", "SPY", "NDX", "ES", "NQ")]
     rows.append(_row("QQQ", +1e9, -1e9))
-    d = digest.build_digest(rows, vix=18.5)
-    assert d.color == "green"
-    assert "peu de risque" in d.verdict
-    assert d.vix_line == "VIX supérieur à 16 ! (actuellement 18.50)"   # info conservée
-
-
-def test_vix_au_dessus_de_20_force_orange():
-    """VIX ≥ 20 (vraiment élevé) → orange + forte amplitude, même tout Gamma+."""
-    rows = [_row(s, +1e9, +1e9) for s in ("SPX", "SPY", "NDX", "ES", "NQ")]
-    rows.append(_row("QQQ", +1e9, -1e9))
-    d = digest.build_digest(rows, vix=22.0)
-    assert d.color == "orange"
-    assert "forte amplitude" in d.verdict.lower()
+    for vix in (18.5, 22.0, 30.0):
+        d = digest.build_digest(rows, vix=vix)
+        assert d.color == "green"
+        assert "peu de risque" in d.verdict
+        assert "favorables au contrarien" in d.vix_line
     assert any("Delta Négatif (Dealers short delta) sur QQQ" in ln for ln in d.lines)
+
+
+def test_vix_bas_prudence_contrarien_sans_changer_la_couleur():
+    """VIX bas = marché calme, direction possible : info de prudence seulement."""
+    rows = [_row(s, +1e9, +1e9) for s in ("SPX", "SPY", "NDX", "ES", "NQ")]
+    d = digest.build_digest(rows, vix=11.0)
+    assert d.color == "green"
+    assert "directionnel possible" in d.vix_line and "prudence" in d.vix_line
+    assert digest.build_digest(rows, vix=15.0).vix_line is None
 
 
 def test_fort_exige_de_l_historique():

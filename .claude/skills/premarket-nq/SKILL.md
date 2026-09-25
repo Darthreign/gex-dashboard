@@ -1,6 +1,6 @@
 ---
 name: premarket-nq
-description: Rédige le brief prémarket NQ publié par le bot Discord. Trois modes — "matin" (posté à 8h30, plan de la journée), "prebrief" (15h25, avant l'open US) et "ajustement" (15h35, après l'open). Utilise uniquement les données du projet ; n'invente jamais un axe absent.
+description: Rédige le brief prémarket NQ publié par le bot Discord. Quatre modes — "matin" (posté à 8h30, plan de la journée), "prebrief" (15h15, avant l'open US), "ajustement" (15h40, après l'open) et "ajustement2" (15h50-16h20, réaction à une actualité macro si le calendrier en justifie une). Utilise uniquement les données du projet ; n'invente jamais un axe absent.
 ---
 
 # Brief prémarket NQ
@@ -54,6 +54,26 @@ pese plus lourd que l'advance/decline du NYSE.
 
 ## Sources
 
+> ⚠️ **Timeout obligatoire sur TOUT appel réseau ou lecture de fichier.**
+> Incident du 2026-09-24 : une exécution bloquée plus de 30 minutes sans
+> erreur ni résultat, sur un appel dont même le timing exact est resté
+> invisible après coup — aucune trace ne permettait de savoir lequel des
+> appels pendait. Deux règles pour ne pas reproduire ça :
+> - Tout `curl` vers le dashboard local prend `-m 10` (10 s max). Toute
+>   lecture MCP ou fichier qui semble ne jamais répondre : abandonne après
+>   quelques secondes plutôt que d'attendre indéfiniment (déjà demandé
+>   plus haut, répété ici parce que c'est concrètement ce qui a coincé).
+>   Un timeout qui se déclenche = source « Non disponible », PAS une
+>   erreur qui bloque le brief.
+> - **Journalise chaque étape** en ajoutant une ligne à
+>   `D:\Gex\logs\premarket-nq.log` (créer le dossier `logs/` s'il n'existe
+>   pas) via Bash, par exemple :
+>   `echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) matin debut-dashboard" >> D:\Gex\logs\premarket-nq.log`
+>   Une ligne avant et après CHAQUE source consultée (dashboard, calendriers,
+>   ticks, MCP gex-data), plus une au tout début et une à l'écriture finale
+>   du fichier. Si une exécution se bloque à nouveau, ce log dira exactement
+>   sur quelle étape — ce qu'on n'a pas pu déterminer cette fois.
+
 **Dashboard local** (`http://127.0.0.1:8050`) — s'il ne répond pas, écris-le et
 continue avec ce que tu as :
 - `/api/v1/digest` — état par symbole, couleur, confiance, verdict
@@ -63,8 +83,11 @@ continue avec ce que tu as :
 - `/api/v1/NQ/summary`, `/api/v1/NQ/strikes`, `/api/v1/NQ/regime`
 
 **Taux et intermarket** — spots temps réel via le flux courtier, clés `ZT`,
-`ZN`, `CL`, `GC`, `6E` : `/api/v1/<cle>/summary`, ou les bougies 1 min dans
-`D:\Gex\data\prices\<cle>\<jour>.parquet` pour la variation du jour.
+`ZN`, `CL`, `GC`, `6E` : `/api/v1/<cle>/spot` (spot + variation vs l'ouverture
+du jour). ⚠️ PAS `/summary` — ces 5 axes n'ont pas de chaîne d'options
+(`role="context"` dans `gex/config.py`), `/summary` renvoie systématiquement
+404 pour eux (confirmé le 2026-09-23). Repli si l'endpoint ne répond pas : les
+bougies 1 min dans `D:\Gex\data\prices\<cle>\<jour>.parquet`.
 
 **MCP `gex-data`** : `get_market_context`, `get_gex_summary`, `get_gex_by_strike`,
 `get_flow_delta`, `get_history`.
@@ -79,10 +102,21 @@ autorisé via `permissions.additionalDirectories` dans `.claude/settings.local.j
 > mieux qu'une routine suspendue qui ne publie rien.
 
 - `econ_calendar.json` — champs `date`, `event`, `time_et`, `impact`
-  (`noir`/`orange`). ⚠️ `impact` est **peu discriminant** : presque tout est
-  « noir ». Ne présente donc pas « noir » comme un blackout absolu — cite
-  l'événement et laisse le lecteur juger. Beaucoup d'entrées Financial Juice
-  n'ont **pas** de `time_et` : dis « heure non précisée » plutôt que d'inventer.
+  (`noir`/`orange`), `forecast`, `previous`, `actual`. ⚠️ `impact` est **peu
+  discriminant** : presque tout est « noir ». Ne présente donc pas « noir »
+  comme un blackout absolu — cite l'événement et laisse le lecteur juger.
+  Beaucoup d'entrées Financial Juice n'ont **pas** de `time_et` : dis « heure
+  non précisée » plutôt que d'inventer.
+  > ⚠️ **Un événement dont `actual` est déjà rempli est un FAIT PASSÉ, pas une
+  > échéance à venir** — `forecast`/`previous` sont connus à l'avance, `actual`
+  > ne se remplit qu'une fois l'événement publié. Ça arrive régulièrement en
+  > cours de brief : à 15h15 (prébrief) comme à 15h40 (ajustement), un
+  > événement du matin ou du début d'après-midi US (ex. Jobless Claims à
+  > 8h30 ET = 14h30 Paris) est déjà sorti. Dans ce cas, rapporte-le comme
+  > acquis — « Jobless Claims sorties à X vs Y attendu » — jamais comme
+  > « à surveiller ». Si `actual` est vide, c'est l'inverse : ne l'annonce
+  > jamais comme connu, meme si l'heure semble déjà passée (délai de
+  > publication de la source, pas forcément l'heure pile).
 - `earnings_calendar.json` — rafraîchi à 07:00.
 - `us_market_holidays.json` — vérifie toujours si le jour est férié ou une
   demi-séance.
@@ -131,7 +165,7 @@ américain dort, seuls les futures et les chaînes natives tournent.
    l'ouverture, formulées comme des observations à faire, jamais comme des ordres.
 8. **⚠️ PRÉCAUTION TRADING**
 
-## Mode `prebrief` — publié à 15h25, avant l'open
+## Mode `prebrief` — publié à 15h15, avant l'open
 
 Écris dans `D:\Gex\data\briefs\prebrief.md`. Format Markdown, **1500 mots
 maximum**, lisible en 90 secondes sur mobile.
@@ -146,7 +180,11 @@ maximum**, lisible en 90 secondes sur mobile.
 4. **Leadership NQ vs ES** — qui mène sur la nuit, y a-t-il divergence.
 5. **Volatilité** — VIX et son grade ; volatilité réalisée overnight si tu la
    calcules. Précise que le VIX est un implicite **S&P 30 jours** : il ne dit
-   rien de l'intraday Nasdaq.
+   rien de l'intraday Nasdaq. **Lecture pour le scalping contrarien** : VIX
+   élevé = plus d'allers-retours = **favorable** au contrarien ; VIX bas = marché
+   calme, donc mouvement directionnel possible = **prudence** pour le contrarien
+   (à rapprocher de `EXPANSION POSSIBLE`). Ne présente jamais un VIX élevé comme
+   un frein au contrarien.
 6. **Taux et intermarket** — ZT/ZN (en rappelant l'inversion prix/rendement),
    CL, GC, 6E. Cherche la **confirmation ou la divergence** avec le NQ, sans
    jamais affirmer une causalité : « cohérent avec », « semble contribuer à ».
@@ -157,7 +195,7 @@ maximum**, lisible en 90 secondes sur mobile.
 10. **Ce qu'il faudra vérifier à l'ouverture** — 3 à 5 points concrets.
 11. **⚠️ PRÉCAUTION TRADING** — conclusion obligatoire (voir plus bas).
 
-## Mode `ajustement` — publié à 15h35, après l'open
+## Mode `ajustement` — publié à 15h40, après l'open
 
 Lis d'abord `prebrief.md` : c'est ta **mémoire** du créneau précédent, car
 chaque exécution démarre sans contexte. Écris dans
@@ -167,15 +205,51 @@ N'écris **que ce qui a changé**. Ne reconstruis pas le brief.
 
 1. **Ce que l'open a confirmé ou infirmé** vs le prébrief.
 2. **Niveaux franchis, acceptés ou rejetés.**
-3. **Le régime a-t-il changé** depuis 15h25 (couleur, confiance, famille) ?
+3. **Le régime a-t-il changé** depuis 15h15 (couleur, confiance, famille) ?
 4. **Zones encore actives.**
-5. **⚠️ PRÉCAUTION TRADING.**
+5. **Actualité déjà sortie depuis le prébrief** — vérifie `econ_calendar.json` :
+   un événement du début d'après-midi US (ex. Jobless Claims, 8h30 ET =
+   14h30 Paris) est souvent déjà publié à 15h40 alors qu'il ne l'était pas
+   encore au prébrief de 15h15. Si `actual` est rempli et que le prébrief ne
+   le mentionnait pas comme connu, dis-le (« Jobless Claims sorties à X vs Y
+   attendu depuis le prébrief ») — sinon, rien à ajouter sur cet axe.
+6. **⚠️ PRÉCAUTION TRADING.**
 
 > ⚠️ **Cinq minutes de cash, c'est très peu.** Reste **factuel** — « le prix a
 > dépassé/rejeté tel niveau », « le régime est passé de X à Y ». Ne prétends
 > **pas** confirmer un régime : ni la participation, ni le momentum, ni
 > l'acceptation ne sont lisibles en 5 minutes. Mieux vaut « trop tôt pour
 > conclure » qu'une confirmation fabriquée sur du bruit.
+
+## Mode `ajustement2` — réaction à une actualité macro, publié entre 15h50 et 16h20
+
+Ajout du 2026-09-24, à la demande des collègues : le NQ/ES bouge parfois
+franchement sur une publication macro (Flash PMI à 9h45 ET = 15h45 Paris,
+p. ex.), et l'ajustement de 15h40 est déjà passé — trop tôt pour la capter.
+Ce mode réagit SPÉCIFIQUEMENT à cette actualité, pas à un créneau horaire fixe.
+
+Le ROLE (invoquer ce mode ou non) est décidé par la tâche planifiée, pas par
+ce skill — cf. le fichier de tâche `premarket-nq-ajustement` pour la lecture
+du calendrier et le filtre anti-répétition. Si tu es invoqué en `ajustement2`,
+c'est que la tâche a déjà identifié l'événement à commenter (`actual` présent
+dans `econ_calendar.json`, la seule confirmation fiable qu'il est publié) et
+te le passe en argument : nom, heure Paris, et les trois chiffres
+`forecast`/`previous`/`actual` tels quels.
+
+Écris dans `D:\Gex\data\briefs\ajustement2.md`. **400 mots maximum** — plus
+court que l'ajustement standard : une réaction ciblée à UN événement, pas un
+état complet. Lis `ajustement.md` (le point précédent) comme mémoire.
+
+1. **L'actualité** — nom, heure Paris, `actual` vs `forecast` (et `previous`
+   si la comparaison éclaire), qualifiés simplement (au-dessus / en ligne /
+   en dessous des attentes) — sans interprétation au-delà de ce constat.
+2. **Réaction du marché** — mouvement NQ/ES depuis `ajustement.md`, en points
+   ET en %.
+3. **Le régime a-t-il changé** depuis le point précédent ?
+4. **⚠️ PRÉCAUTION TRADING.**
+
+Mêmes règles que le mode `ajustement` : reste factuel, ne fabrique aucune
+donnée, « trop tôt pour conclure » vaut mieux qu'une confirmation inventée.
 
 ---
 

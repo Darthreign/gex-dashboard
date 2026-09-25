@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import datetime
 
 import pandas as pd
+import pytest
 from flask import Flask
 
 from gex import metrics
@@ -106,6 +107,50 @@ def test_vix_endpoint(monkeypatch):
     # indisponible -> available False
     monkeypatch.setattr(digest, "_current_vix", lambda: None)
     assert _client().get("/api/v1/vix").get_json()["available"] is False
+
+
+def test_spot_context_live_avec_variation_du_jour(monkeypatch):
+    """`/api/v1/<symbol>/spot` — pour les sous-jacents SANS chaîne d'options
+    (ZT, ZN, CL, GC, 6E), pour lesquels `/summary` renvoie 404 (STATE n'est
+    jamais peuplé, cf. api._context_spot). Régression du 2026-09-23 : le
+    skill premarket-nq visait `/summary` pour ces 5 axes, qui échouait
+    systématiquement."""
+    from gex import rtquote, store
+
+    monkeypatch.setattr(rtquote, "credentials_present", lambda: True)
+    monkeypatch.setattr(rtquote.QUOTES, "price", lambda sym: 110.25)
+    monkeypatch.setattr(store, "load_prices", lambda sym, day: pd.DataFrame(
+        {"open": [110.0], "close": [110.25]}))
+
+    r = _client().get("/api/v1/ZN/spot")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["spot"] == 110.25 and body["live"] is True
+    assert body["open"] == 110.0
+    assert body["change"] == pytest.approx(0.25)
+
+
+def test_spot_context_repli_sur_bougies_sans_flux_live(monkeypatch):
+    """Sans compte courtier connecté, repli sur la dernière bougie 1 min du
+    jour au lieu du flux live."""
+    from gex import rtquote, store
+
+    monkeypatch.setattr(rtquote, "credentials_present", lambda: False)
+    monkeypatch.setattr(store, "load_prices", lambda sym, day: pd.DataFrame(
+        {"open": [80.0], "close": [80.5]}))
+
+    body = _client().get("/api/v1/ZT/spot").get_json()
+    assert body["spot"] == 80.5 and body["live"] is False
+
+
+def test_spot_context_sans_donnee_404(monkeypatch):
+    from gex import rtquote, store
+
+    monkeypatch.setattr(rtquote, "credentials_present", lambda: False)
+    monkeypatch.setattr(store, "load_prices", lambda sym, day: pd.DataFrame())
+
+    r = _client().get("/api/v1/GC/spot")
+    assert r.status_code == 404
 
 
 def test_digest_expose_les_familles():

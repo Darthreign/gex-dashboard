@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -61,6 +61,16 @@ IDLE_TIMEOUT_S = 20.0
 # ne fait qu'allonger la collecte pour des strikes jamais affichés.
 DEFAULT_WINDOW = 0.08
 DEFAULT_MAX_DAYS = 14
+
+# Cadence rapide (scalping intraday) : seul le 0DTE/1DTE pèse vraiment sur le
+# gamma net à cet horizon — le confirmer a demandé de constater qu'à 16h14 le
+# 2026-09-23, NQ/ES affichaient encore le régime d'avant l'ouverture faute
+# d'avoir été rafraîchis depuis le dernier pull natif (cadence 15 min). Une
+# fenêtre à 2 jours DE BOURSE (D0 + D+1) au lieu de 14 jours calendaires
+# réduit fortement le nombre de contrats à souscrire, donc le temps de la
+# salve dxFeed — voir _trading_day_horizon pour la raison du calcul en jours
+# de bourse plutôt qu'en jours calendaires.
+FAST_TRADING_DAYS = 2
 
 # dxFeed livre fiablement une salve de souscriptions envoyée D'UN SEUL COUP à
 # la connexion (constaté : jusqu'à 9 000 passent, 15 000 sont rejetées avec
@@ -129,19 +139,45 @@ def fetch_chain_instruments(product_code: str, access_token: str) -> pd.DataFram
     return pd.DataFrame(rows)
 
 
+def _trading_day_horizon(n_days: int, now_et: datetime | None = None) -> date:
+    """Horizon d'échéance à N JOURS DE BOURSE (week-ends sautés), pas
+    calendaires. Un seuil calendaire trop court coupe le vendredi : D+1 (le
+    lundi suivant) tombe alors à 3 jours calendaires et serait exclu par un
+    seuil de 1 ou 2. Les jours fériés US ne sont PAS gérés ici (un jour de
+    moins dans une fenêtre déjà courte est un écart mineur, sans commune
+    mesure avec le risque d'une fenêtre trop courte un vendredi)."""
+    now_et = now_et or datetime.now(ET)
+    d = now_et.date()
+    remaining = n_days
+    while remaining > 0:
+        d += timedelta(days=1)
+        if d.weekday() < 5:
+            remaining -= 1
+    return d
+
+
 def filter_chain(chain: pd.DataFrame, spot: float, window: float = DEFAULT_WINDOW,
-                 max_days: int = DEFAULT_MAX_DAYS) -> pd.DataFrame:
+                 max_days: int = DEFAULT_MAX_DAYS,
+                 trading_days: int | None = None) -> pd.DataFrame:
     """Restreint aux strikes et échéances qui comptent réellement.
 
     Contrôle le volume de souscriptions : la chaîne NQ complète avoisine les
     7 000 contrats, alors que les niveaux affichés ne portent jamais sur des
     strikes à plus de 15 % du spot ni des échéances à plus de 45 jours.
+
+    `trading_days`, si fourni, REMPLACE `max_days` par un horizon en jours de
+    bourse (cf. `_trading_day_horizon`) — c'est la fenêtre resserrée utilisée
+    par la collecte rapide (FAST_TRADING_DAYS), `max_days` restant la fenêtre
+    large (défaut 14 j calendaires) pour la collecte peu fréquente.
     """
     if chain.empty:
         return chain
     lo, hi = spot * (1 - window), spot * (1 + window)
-    horizon = (pd.Timestamp.now(tz=ET).date()
-               + pd.Timedelta(days=max_days))
+    if trading_days is not None:
+        horizon = _trading_day_horizon(trading_days)
+    else:
+        horizon = (pd.Timestamp.now(tz=ET).date()
+                   + pd.Timedelta(days=max_days))
     return chain[chain["strike"].between(lo, hi)
                 & (chain["expiry"] <= horizon)].reset_index(drop=True)
 
@@ -424,11 +460,14 @@ def _reference_spot(product_code: str, access_token: str) -> float | None:
 
 
 def build_native_chain(product_code: str, window: float = DEFAULT_WINDOW,
-                       max_days: int = DEFAULT_MAX_DAYS) -> pd.DataFrame | None:
-    """Chaîne d'options natives complète, prête pour les fonctions de `metrics`.
+                       max_days: int = DEFAULT_MAX_DAYS,
+                       trading_days: int | None = None) -> pd.DataFrame | None:
+    """Chaîne d'options natives, prête pour les fonctions de `metrics`.
 
     Renvoie None si le spot ou le multiplicateur sont indisponibles — mieux
-    vaut ne rien produire que des niveaux faux.
+    vaut ne rien produire que des niveaux faux. `trading_days` : cf.
+    `filter_chain` — fenêtre resserrée (jours de bourse) pour la collecte
+    rapide, au lieu des `max_days` calendaires de la collecte large.
     """
     _, _, access = quote_token()
     spot = _reference_spot(product_code, access)
@@ -441,7 +480,7 @@ def build_native_chain(product_code: str, window: float = DEFAULT_WINDOW,
         return None
 
     chain = fetch_chain_instruments(product_code, access)
-    chain = filter_chain(chain, spot, window, max_days)
+    chain = filter_chain(chain, spot, window, max_days, trading_days)
     if chain.empty:
         log.warning("%s : aucun contrat dans la fenêtre", product_code)
         return None

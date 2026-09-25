@@ -371,6 +371,34 @@ def register_api(app) -> None:
                         "above": bool(v > digest_mod.VIX_SEUIL),
                         "grade": digest_mod.vix_grade(float(v))})
 
+    @server.route("/api/v1/<symbol>/spot")
+    def _context_spot(symbol):
+        """Spot temps réel + variation du jour pour un sous-jacent SANS chaîne
+        d'options (role="context" — ZT, ZN, CL, GC, 6E, cf. gex/config.py) :
+        `/summary` renvoie 404 pour ces symboles, `STATE` n'étant jamais
+        peuplé pour eux (`pull_all` les saute explicitement, ils ne sont
+        souscrits qu'au flux dxFeed live). Corrige l'impasse découverte le
+        2026-09-23 : le skill premarket-nq visait `/summary` pour ces 5 axes
+        intermarket, qui échouait systématiquement (« pas encore de premier
+        pull »)."""
+        from . import store
+        from .rtquote import QUOTES, credentials_present
+        symbol = symbol.upper()
+        live = QUOTES.price(symbol) if credentials_present() else None
+        day = request.args.get("date") or datetime.now(ET).date().isoformat()
+        bars = store.load_prices(symbol, day)
+        open_ = float(bars["open"].iloc[0]) if not bars.empty else None
+        spot = live if live is not None else (
+            float(bars["close"].iloc[-1]) if not bars.empty else None)
+        if spot is None:
+            return jsonify({"error": "indisponible (pas de cotation aujourd'hui)"}), 404
+        out = {"symbol": symbol, "spot": round(float(spot), 4), "live": live is not None}
+        if open_ is not None:
+            out["open"] = round(open_, 4)
+            out["change"] = round(float(spot) - open_, 4)
+            out["change_pct"] = round((float(spot) - open_) / open_ * 100, 3) if open_ else None
+        return jsonify(out)
+
     @server.route("/api/v1/digest")
     def _digest():
         """Verdict d'état du gamma prêt à diffuser (cf. gex/digest.py).
