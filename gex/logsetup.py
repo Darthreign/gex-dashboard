@@ -25,15 +25,19 @@ REPORTS_FILE = LOG_DIR / "reports.md"
 _FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 
-def setup_logging(level: int = logging.INFO, console: bool = True) -> None:
-    """Configure le logging racine : console + fichier rotatif (5 Mo × 3)."""
+def setup_logging(level: int = logging.INFO, console: bool = True,
+                  filename: str = "gex.log") -> None:
+    """Configure le logging racine : console + fichier rotatif (5 Mo × 3).
+
+    `filename` : un fichier PAR process (le process capture écrit capture.log) —
+    deux process sur un même fichier rotatif se disputeraient la rotation."""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     root = logging.getLogger()
     root.setLevel(level)
     # évite les doublons si appelé deux fois (dashboard + backfill importé)
     if any(isinstance(h, RotatingFileHandler) for h in root.handlers):
         return
-    fh = RotatingFileHandler(LOG_FILE, maxBytes=5_000_000, backupCount=3,
+    fh = RotatingFileHandler(LOG_DIR / filename, maxBytes=5_000_000, backupCount=3,
                              encoding="utf-8")
     fh.setFormatter(logging.Formatter(_FORMAT))
     root.addHandler(fh)

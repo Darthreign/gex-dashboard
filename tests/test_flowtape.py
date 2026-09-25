@@ -388,3 +388,74 @@ def test_recent_prints_borne_au_tampon():
 
 def test_recent_prints_symbole_vide():
     assert FlowTape().recent_prints("SPX") == []
+
+
+def _hedge_tape() -> FlowTape:
+    t = _tape()
+    t._spot["SPX"] = 7400.0
+    t._delta[".SPXW260729C7400"] = 0.50
+    t._delta[".SPXW260729P7400"] = -0.50
+    return t
+
+
+@pytest.mark.parametrize("sym,side,champ,signe", [
+    (".SPXW260729C7400", "BUY", "hedge_call_buy", +1),    # dealer court delta -> rachète
+    (".SPXW260729C7400", "SELL", "hedge_call_sell", -1),  # dealer long delta -> vend
+    (".SPXW260729P7400", "BUY", "hedge_put_buy", -1),     # dealer long delta -> vend
+    (".SPXW260729P7400", "SELL", "hedge_put_sell", +1),   # dealer court delta -> rachète
+])
+def test_pression_de_couverture_par_type_et_sens(sym, side, champ, signe):
+    """Achats de calls / ventes de puts = les dealers ACHÈTENT le sous-jacent ;
+    ventes de calls / achats de puts = ils le VENDENT. Une seule case reçoit le
+    print, et la pression est l'opposée exacte du delta dealer."""
+    t = _hedge_tape()
+    t.ingest_print(_print(sym, side, 10), now=60.0)
+    bar = t.bars["SPX"]
+    attendu = signe * 10 * 0.50 * 100 * 7400.0
+    assert getattr(bar, champ) == pytest.approx(attendu)
+    autres = [c for c in ("hedge_call_buy", "hedge_call_sell", "hedge_put_buy",
+                          "hedge_put_sell") if c != champ]
+    assert all(getattr(bar, c) == 0.0 for c in autres)
+    assert bar.net_delta == pytest.approx(-attendu)
+
+
+def test_live_rows_inclut_la_minute_en_cours():
+    t = _hedge_tape()
+    t.ingest_print(_print(".SPXW260729C7400", "BUY", 5), now=60.0)
+    t.ingest_print(_print(".SPXW260729P7400", "BUY", 5), now=130.0)   # minute suivante
+    rows = t.live_rows("SPX")
+    assert len(rows) == 2
+    assert rows[0]["hedge_call_buy"] > 0 and rows[1]["hedge_put_buy"] < 0
+    assert t.live_rows("ES") == []
+
+
+def test_live_seconds_une_entree_par_seconde_avec_trous_a_zero():
+    t = _hedge_tape()
+    t.ingest_print(_print(".SPXW260729C7400", "BUY", 10), now=1000.2)
+    t.ingest_print(_print(".SPXW260729C7400", "BUY", 10), now=1000.9)    # même seconde : cumulé
+    t.ingest_print(_print(".SPXW260729P7400", "BUY", 10), now=1003.5)
+    rows = t.live_seconds("SPX", window_s=5, now=1004.0)
+    assert [r["t"] for r in rows] == [1000, 1001, 1002, 1003, 1004]
+    un = 10 * 0.50 * 100 * 7400.0
+    assert rows[0]["hedge_call_buy"] == pytest.approx(2 * un)
+    assert rows[1]["hedge_call_buy"] == 0.0 and rows[2]["hedge_put_buy"] == 0.0
+    assert rows[3]["hedge_put_buy"] == pytest.approx(-un)
+
+
+def test_live_seconds_purge_au_dela_de_la_fenetre_gardee():
+    t = _hedge_tape()
+    t.ingest_print(_print(".SPXW260729C7400", "BUY", 1), now=1000.0)
+    t.ingest_print(_print(".SPXW260729C7400", "BUY", 1), now=1000.0 + t.SECONDS_KEPT + 10)
+    assert len(t._secs["SPX"]) == 1
+
+
+def test_live_points_un_point_par_print_dans_la_fenetre():
+    t = _hedge_tape()
+    t.ingest_print(_print(".SPXW260729C7400", "BUY", 1), now=1000.0)
+    t.ingest_print(_print(".SPXW260729P7400", "BUY", 1), now=1200.5)
+    t.ingest_print(_print(".SPXW260729C7400", "SELL", 1), now=1290.0)
+    pts = t.live_points("SPX", window_s=100, now=1300.0)
+    assert [p[0] for p in pts] == [1200.5, 1290.0]
+    assert pts[0][1] < 0 and pts[1][1] < 0                # put acheté / call vendu : vend
+    assert [p[2] for p in pts] == [2, 3]                  # catégories : puts achetés, calls vendus
+    assert len(t.live_points("SPX", window_s=400, now=1300.0)) == 3

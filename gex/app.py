@@ -7,6 +7,7 @@ Interface FR/EN (gex/i18n.py) ; termes de trading standards dans les deux.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -759,14 +760,24 @@ def tape_fig(symbol: str, lang: str, day: str | None = None,
     # qui en fait une mesure d'impact de couverture (cf. gex/flowtape.py).
     # Les journées collectées avant l'ajout de cette colonne retombent sur le
     # décompte de contrats plutôt que d'afficher une courbe plate.
+    # Cumul remis à zéro à l'open US (9h30 ET) : le pré-marché se cumule à part,
+    # la séance repart de 0 (deux segments, la courbe saute à l'ouverture).
+    apres_open = (tape["timestamp"] >= pd.Timestamp(f"{day} 09:30")).to_numpy()
+
+    def cum(col: str) -> np.ndarray:
+        v = tape[col].fillna(0.0).to_numpy()
+        out = np.cumsum(np.where(apres_open, 0.0, v))
+        out[apres_open] = np.cumsum(v[apres_open])
+        return out
+
     if "net_delta" in tape.columns:
-        net = np.cumsum(tape["net_delta"].fillna(0.0).to_numpy()) / 1e6
+        net = cum("net_delta") / 1e6
         unit, axis = t(lang, "unit_musd"), t(lang, "axis_tape_delta")
     else:
-        net = np.cumsum(tape["net_contracts"].fillna(0.0).to_numpy())
+        net = cum("net_contracts")
         unit, axis = t(lang, "unit_contracts"), t(lang, "axis_tape")
-    calls = np.cumsum(tape["net_calls"].fillna(0.0).to_numpy())
-    puts = np.cumsum(tape["net_puts"].fillna(0.0).to_numpy())
+    calls = cum("net_calls")
+    puts = cum("net_puts")
 
     fig = go.Figure()
     if "net" in series:
@@ -795,6 +806,116 @@ def tape_fig(symbol: str, lang: str, day: str | None = None,
                          zeroline=False, tickfont=dict(color=C["muted"]),
                          title=dict(text=t(lang, "axis_tape"),
                                     font=dict(color=C["muted"]), standoff=8))
+    fig.update_layout(**lay)
+    fig.add_hline(y=0, line_color=C["axis"], line_width=1)
+    return fig
+
+
+HEDGE_COLS = ("hedge_call_buy", "hedge_put_sell", "hedge_put_buy", "hedge_call_sell")
+LIVE_WINDOW_S = 300        # mode live : 5 min glissantes, une barre par seconde
+
+
+def hedge_frame(symbol: str, day: str, window_min: int = 15) -> pd.DataFrame:
+    """Barres 1 min de couverture dealers du jour : disque + minute en cours
+    (mémoire). Les journées écrites avant l'ajout des colonnes `hedge_*` donnent
+    des zéros plutôt qu'une erreur. `window_min` = 0 : toute la séance."""
+    from .flowtape import TAPE
+    disk = store.load_tape(symbol, day)
+    live = pd.DataFrame(TAPE.live_rows(symbol))
+    if not live.empty:
+        # la minute en cours (et celles en attente de flush) écrasent le disque
+        disk = live if disk.empty else pd.concat([disk, live], ignore_index=True)
+    if disk.empty:
+        return disk
+    df = disk.drop_duplicates(subset="timestamp", keep="last").sort_values("timestamp")
+    for c in HEDGE_COLS:
+        if c not in df.columns:
+            df[c] = 0.0
+        df[c] = df[c].fillna(0.0)
+    # Reset à l'open US (9h30 ET = 15h30 Paris) : une fois la séance ouverte,
+    # ni la fenêtre glissante ni le cumul ne remontent avant l'ouverture. Avant
+    # l'open, on garde tout le pré-marché du jour.
+    start = None
+    if window_min:
+        start = df["timestamp"].max() - pd.Timedelta(minutes=window_min)
+    open_ts = pd.Timestamp(f"{day} 09:30")
+    if (df["timestamp"] >= open_ts).any():
+        start = open_ts if start is None else max(start, open_ts)
+    if start is not None:
+        df = df[df["timestamp"] >= start]
+    return df.reset_index(drop=True)
+
+
+def hedge_fig(symbol: str, lang: str, window_min: int = 15,
+              day: str | None = None) -> go.Figure:
+    """Pression de couverture des dealers sur le sous-jacent, en direct.
+
+    Courbe BLANCHE = net cumulé (M$ de sous-jacent que les dealers doivent
+    acheter au-dessus de zéro, vendre en dessous). Quatre courbes de couleur =
+    le cumul de chaque catégorie : calls achetés (bleu) et puts vendus (bleu
+    clair) poussent à l'achat ; puts achetés (rouge) et calls vendus (rose)
+    poussent à la vente.
+
+    Mode live (`window_min` < 0) : un point PAR PRINT sur 5 min glissantes, remise
+    à zéro au bord gauche. Autres fenêtres : une marche par minute. Lecture de
+    flux, pas un signal : on ne sait pas si le dealer ouvre ou ferme, ni à quel
+    rythme il se couvre."""
+    day = day or datetime.now(ET).strftime("%Y-%m-%d")
+    title = t(lang, "hedge_title")
+    live = window_min < 0          # mode « live » : un point PAR PRINT, fenêtre glissante
+    now = time.time()
+    if live:
+        from .flowtape import TAPE
+        pts = TAPE.live_points(symbol, LIVE_WINDOW_S, now)
+        if not pts:
+            return empty_fig(t(lang, "hedge_empty"), title)
+        x0 = now - LIVE_WINDOW_S
+        # départ à 0 au bord gauche, un point par print, prolongé jusqu'à
+        # « maintenant » : les courbes défilent même sans nouveau print
+        epochs = [x0] + [p[0] for p in pts] + [now]
+        cats = []
+        for k in range(len(HEDGE_COLS)):
+            v = np.array([p[1] if p[2] == k else 0.0 for p in pts]) / 1e6
+            c = np.concatenate([[0.0], np.cumsum(v)])
+            cats.append(np.append(c, c[-1]))
+        ts = (pd.to_datetime(epochs, unit="s", utc=True)
+              .tz_convert(LOCAL_TZ).tz_localize(None))
+        xrange = [ts[0], ts[-1]]
+    else:
+        df = hedge_frame(symbol, day, window_min)
+        if df.empty or not any(df[c].abs().sum() > 0 for c in HEDGE_COLS):
+            return empty_fig(t(lang, "hedge_empty"), title)
+        ts = to_local(df["timestamp"])
+        cats = [np.cumsum(df[c].to_numpy()) / 1e6 for c in HEDGE_COLS]
+        xrange = None
+    cum = sum(cats)
+    total = float(cum[-1])
+    verdict = t(lang, "hedge_buy" if total >= 0 else "hedge_sell")
+    lab = (f"live {LIVE_WINDOW_S // 60} min" if live else
+           f"{window_min} min" if window_min else t(lang, "hedge_session"))
+    hfmt = "%H:%M:%S" if live else "%H:%M"
+    fig = go.Figure()
+    # 4 courbes de cumul par catégorie (mêmes couleurs que les anciennes barres)
+    # + la courbe BLANCHE du net ; toutes en marches : un print = un cran
+    spec = (("hedge_leg_call_buy", C["pos"]), ("hedge_leg_put_sell", "#8dbbf0"),
+            ("hedge_leg_put_buy", C["neg"]), ("hedge_leg_call_sell", "#f0a3a3"))
+    for (key, color), y in zip(spec, cats):
+        fig.add_scatter(x=ts, y=y, mode="lines", name=t(lang, key),
+                        line=dict(color=color, width=1.4, shape="hv"),
+                        hovertemplate=(f"%{{x|{hfmt}}}<br>{t(lang, key)}: "
+                                       f"%{{y:+.1f}} $M<extra></extra>"))
+    fig.add_scatter(x=ts, y=cum, mode="lines", name=t(lang, "hedge_cum"),
+                    line=dict(color=C["ink"], width=2.6, shape="hv"),
+                    hovertemplate=(f"%{{x|{hfmt}}}<br>{t(lang, 'hedge_cum')}: "
+                                   f"%{{y:+.1f}} $M<extra></extra>"))
+    lay = with_legend(base_layout(
+        f"{title} — {lab} : {total:+.0f} $M → {verdict}", height=340))
+    lay["yaxis"]["title"] = dict(text=t(lang, "hedge_axis_cum"),
+                                 font=dict(color=C["muted"]))
+    if xrange:
+        lay["xaxis"]["range"] = xrange
+    # horodatage à la SECONDE sur l'axe en live (sinon la minute)
+    lay["xaxis"]["tickformat"] = "%H:%M:%S" if live else "%H:%M"
     fig.update_layout(**lay)
     fig.add_hline(y=0, line_color=C["axis"], line_width=1)
     return fig
@@ -1538,6 +1659,19 @@ def create_app() -> Dash:
 
             html.Div(id="pane-tape", children=[
                 html.Div(id="tape-hint", className="hint"),
+                # Pression de couverture des dealers : rafraîchie comme le
+                # tableau (toutes les 2 s), minute en cours comprise.
+                html.Div([
+                    dcc.RadioItems(id="hedge-window", className="seg", inline=True,
+                                   value=15,
+                                   options=[{"label": "● Live 1 s", "value": -1},
+                                            {"label": "5 min", "value": 5},
+                                            {"label": "15 min", "value": 15},
+                                            {"label": "30 min", "value": 30},
+                                            {"label": "Σ", "value": 0}]),
+                ], className="daybar"),
+                dcc.Graph(config=GRAPH_CONFIG, id="hedge-graph",
+                          style={"marginBottom": "12px"}),
                 html.Div([
                     html.Span(id="lbl-tape-size", className="ctl-label"),
                     dcc.RadioItems(id="tape-min-size", className="seg", inline=True,
@@ -1997,6 +2131,17 @@ def create_app() -> Dash:
         chg = metrics.oi_change(prev_df, df)
         return (oi_change_fig(chg, snap.spot, lang, prev_day, window, xf),
                 t(lang, "pos_hint"))
+
+    @app.callback(
+        Output("hedge-graph", "figure"),
+        [Input("tape-tick", "n_intervals"), Input("tab", "value"),
+         Input("symbol", "value"), Input("hedge-window", "value"),
+         Input("lang", "value")],
+    )
+    def refresh_hedge(_, tab, symbol, window, lang):
+        if tab != "tape":
+            raise PreventUpdate
+        return hedge_fig(symbol, lang, int(window or 0))    # -1 = live à la seconde
 
     @app.callback(
         Output("tape-table", "children"),

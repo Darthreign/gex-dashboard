@@ -255,20 +255,23 @@ def _seed_native_state(code: str, df: pd.DataFrame, ts: datetime) -> SummaryMetr
 
 
 def pull_native_options() -> None:
-    """Chaînes d'options natives NQ et ES : construit, met à jour STATE, et
-    persiste — sans identifiants courtier, ne fait rien.
+    """Chaînes d'options natives NQ et ES — FENÊTRE LARGE (14 j calendaires,
+    cf. futopt.DEFAULT_MAX_DAYS) : construit, met à jour STATE, et persiste
+    (snapshot + historique). Sans identifiants courtier, ne fait rien.
 
     Coûte du temps (~90-280 s par sous-jacent, dominé par le rythme de
     livraison du serveur, pas par notre code) : APScheduler l'exécute dans
-    son propre thread, ce qui ne retarde pas les pulls CBOE de 60 s.
+    son propre thread. Cadence volontairement RARE (1-2 fois/jour, cf.
+    start_scheduler) depuis le 2026-09-23 : c'est `pull_native_options_fast`
+    qui tient STATE à jour entre-temps avec une fenêtre resserrée au 0DTE/1DTE
+    — cette fonction-ci ne sert plus qu'à rafraîchir périodiquement le
+    contexte lointain (ex. mur d'OPEX mensuel) et à archiver l'historique.
 
     Avant de payer ce coût, on regarde si un snapshot persisté a moins de
     `NATIVE_CACHE_FRESH_S` : un redémarrage du process perd STATE (mémoire
     pure) mais pas le disque — sans ce court-circuit, chaque redémarrage
     (déploiement, crash) rejouait une collecte complète même si la dernière
-    date d'il y a deux minutes. La cadence normale (15 min) dépasse toujours
-    ce seuil, donc ce court-circuit ne saute jamais un vrai cycle de
-    rafraîchissement, seulement les redémarrages rapprochés.
+    date d'il y a deux minutes.
 
     Limite connue : ne calcule pas de flux delta (`flow_delta` suppose une
     colonne `contract` façon CBOE, absente ici) — les onglets Flux et Gamma
@@ -301,6 +304,41 @@ def pull_native_options() -> None:
                      f"{summary.zero_gamma:.0f}" if summary.zero_gamma else "n/a")
         except Exception:  # noqa: BLE001 — un échec ne doit rien casser d'autre
             log.exception("%s : échec de la collecte native", code)
+
+
+def pull_native_options_fast() -> None:
+    """Chaînes d'options natives NQ et ES — FENÊTRE RESSERRÉE (0DTE/1DTE,
+    `futopt.FAST_TRADING_DAYS` jours de BOURSE) : moins de contrats à
+    souscrire que la fenêtre large, donc une salve dxFeed nettement plus
+    courte — voir la note du 2026-09-23 dans `futopt.FAST_TRADING_DAYS` pour
+    l'incident qui motive ce découpage (NQ/ES affichaient encore, à 16h14, le
+    régime d'avant une accélération de marché survenue ~40 min plus tôt,
+    faute d'avoir été rafraîchis depuis le dernier pull à fenêtre large).
+
+    Met à jour STATE (donc le digest et les niveaux affichés) mais ne
+    PERSISTE rien sur disque : à une cadence de quelques minutes, écrire un
+    snapshot par cycle ferait grossir le dépôt sans utilité (NQ est
+    VERSIONNÉ dans data/.gitignore) — `pull_native_options` reste la seule
+    source archivée, à sa cadence basse.
+
+    Effet de bord accepté : entre deux passages de `pull_native_options`,
+    les vues NQ/ES qui lisent STATE (niveaux, murs, heatmap) ne voient plus
+    que la fenêtre 0DTE/1DTE — un mur d'OPEX mensuel au-delà de cette fenêtre
+    n'apparaît que juste après le pull large, pas en continu.
+    """
+    if not credentials_present():
+        return
+    for code in ("NQ", "ES"):
+        try:
+            df = futopt.build_native_chain(code, trading_days=futopt.FAST_TRADING_DAYS)
+            if df is None or df.empty:
+                continue
+            now = datetime.now(ET)
+            summary = _seed_native_state(code, df, now)
+            log.info("%s (natif, rapide) pull ok — spot=%.2f netGEX=%.2f Bn",
+                     code, summary.spot, summary.net_gex / 1e9)
+        except Exception:  # noqa: BLE001 — un échec ne doit rien casser d'autre
+            log.exception("%s : échec de la collecte native rapide", code)
 
 
 def native_index_key(symbol: str) -> str:
@@ -459,7 +497,30 @@ def flush_ticks() -> None:
                 log.exception("Capture tick : échec écriture %s", symbol)
 
 
-def start_scheduler() -> BackgroundScheduler:
+def add_flush_jobs(sched: BackgroundScheduler) -> None:
+    """Jobs d'écriture disque des flux temps réel (bougies, tape, ticks). Portés
+    par le process qui possède les collecteurs : le dashboard en mode autonome,
+    ou le process capture quand il est séparé (cf. gex/capture.py)."""
+    # Vidange plus fréquente que la minute : une bougie n'est écrite qu'une
+    # fois close, ce décalage borne simplement la perte en cas d'arrêt brutal.
+    sched.add_job(flush_prices, "interval", seconds=30, max_instances=1, coalesce=True)
+    sched.add_job(flush_tape, "interval", seconds=30, max_instances=1, coalesce=True)
+    # Capture tick-par-tick CONTINUE (24/5) : le collecteur agrège en mémoire, ce
+    # job vide vers le parquet journalier de NQ/ES toutes les 60 s. Session dxLink
+    # dédiée, sans jamais toucher le flux spot du dashboard.
+    sched.add_job(flush_ticks, "interval", seconds=60, max_instances=1, coalesce=True)
+
+
+def discard_bars() -> None:
+    """Dashboard SANS capture embarquée : les bougies du flux spot sont écrites
+    par le process capture ; on vide seulement le tampon local pour qu'il ne
+    grossisse pas en mémoire."""
+    QUOTES.drain_bars()
+
+
+def start_scheduler(embedded_capture: bool = True) -> BackgroundScheduler:
+    """`embedded_capture=False` : la capture (ticks, tape, bougies) vit dans un
+    autre process, le dashboard n'écrit donc AUCUN de ces flux."""
     sched = BackgroundScheduler(timezone="America/New_York")
     sched.add_job(
         pull_all,
@@ -468,25 +529,30 @@ def start_scheduler() -> BackgroundScheduler:
         max_instances=1,
         coalesce=True,
     )
-    # Vidange plus fréquente que la minute : une bougie n'est écrite qu'une
-    # fois close, ce décalage borne simplement la perte en cas d'arrêt brutal.
-    sched.add_job(flush_prices, "interval", seconds=30, max_instances=1, coalesce=True)
-    sched.add_job(flush_tape, "interval", seconds=30, max_instances=1, coalesce=True)
-    # Options natives NQ/ES : cadence lâche (chaque cycle prend lui-même
-    # ~90 s x 2), max_instances=1 empêche un cycle en cours d'en chevaucher
-    # un autre si jamais il dépassait l'intervalle.
-    sched.add_job(pull_native_options, "interval", minutes=15,
+    if embedded_capture:
+        add_flush_jobs(sched)
+    else:
+        sched.add_job(discard_bars, "interval", seconds=30, max_instances=1,
+                      coalesce=True)
+    # Options natives NQ/ES — fenêtre LARGE (14 j) : 2 fois/jour seulement
+    # depuis le 2026-09-23 (cf. pull_native_options), la fraîcheur intraday
+    # étant désormais du ressort de pull_native_options_fast ci-dessous.
+    # Horaires ET choisis pour couvrir l'ouverture (contexte de la séance) et
+    # le milieu d'après-midi (avant l'ajustement post-open) sans se substituer
+    # au rythme rapide.
+    sched.add_job(pull_native_options, "cron", day_of_week="mon-fri",
+                  hour="10,14", minute=0, max_instances=1, coalesce=True)
+    # Options natives NQ/ES — fenêtre RESSERRÉE (0DTE/1DTE) : c'est elle qui
+    # tient le digest à jour en continu. Fenêtre courte -> salve dxFeed
+    # nettement plus rapide que les ~90-280 s de la fenêtre large, d'où une
+    # cadence bien plus serrée sans reproduire le coût qui justifiait 15 min.
+    sched.add_job(pull_native_options_fast, "interval", minutes=3,
                   max_instances=1, coalesce=True)
     # Chaînes d'indice natives : ~20 s par chaîne (contre ~90 s sur future),
     # donc une cadence bien plus serrée — supprimer un retard de 15 min pour
     # rafraîchir toutes les 15 min n'aurait aucun sens.
     sched.add_job(pull_native_index, "interval", minutes=3,
                   max_instances=1, coalesce=True)
-    # Capture tick-par-tick CONTINUE (24/5) : le collecteur (démarré au boot,
-    # cf. run.py) agrège en mémoire, ce job vide vers le parquet journalier de
-    # NQ/ES toutes les 60 s. Session dxLink dédiée, sans jamais toucher le flux
-    # spot du dashboard.
-    sched.add_job(flush_ticks, "interval", seconds=60, max_instances=1, coalesce=True)
     sched.add_job(push_data_repo, "cron", day_of_week="mon-fri", hour=16, minute=20)
     # Sauvegarde distante après le push git : elle porte ce que GitHub refuse
     # (archives Databento de plus de 100 Mo). Sans rclone configuré, l'appel
@@ -503,7 +569,10 @@ def start_scheduler() -> BackgroundScheduler:
     # Premier pull immédiat (même hors marché : affiche le dernier état connu).
     threading.Thread(target=pull_all, kwargs={"force": True}, daemon=True).start()
     # Idem pour NQ/ES natifs : sans cet appel, ils resteraient invisibles dans
-    # l'interface jusqu'à la première exécution planifiée (jusqu'à 15 min).
+    # l'interface jusqu'à la première exécution planifiée. La version rapide
+    # (fenêtre resserrée) suffit à amorcer STATE ; la large tourne aussi une
+    # fois pour ne pas attendre jusqu'à 10h/14h le contexte lointain.
+    threading.Thread(target=pull_native_options_fast, daemon=True).start()
     threading.Thread(target=pull_native_options, daemon=True).start()
     threading.Thread(target=pull_native_index, daemon=True).start()
     return sched

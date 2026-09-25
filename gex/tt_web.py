@@ -187,7 +187,9 @@ def _demarrer_les_flux() -> None:
             from .tickcapture import CAPTURE
 
             QUOTES.start()
-            TAPE.start()
-            CAPTURE.start()
+            from .capturebus import remote_url
+            if remote_url() is None:     # mode séparé : le process capture s'en charge
+                TAPE.start()
+                CAPTURE.start()
     except Exception:  # noqa: BLE001 — un flux qui refuse de démarrer ne doit
         log.exception("Démarrage des flux après connexion")

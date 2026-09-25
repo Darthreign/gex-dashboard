@@ -137,6 +137,18 @@ class FlowBar:
     net_gamma: float = 0.0
     net_gamma_calls: float = 0.0
     net_gamma_puts: float = 0.0
+    # PRESSION DE COUVERTURE des dealers sur le SOUS-JACENT, en $, découpée par
+    # (type, sens du preneur). Positif = les dealers doivent ACHETER du
+    # sous-jacent pour se recouvrir, négatif = le VENDRE. C'est l'opposé du delta
+    # dealer (net_delta) : un preneur qui achète un call rend le dealer court
+    # delta, qui rachète (hedge > 0) ; un preneur qui achète un put le rend long
+    # delta, qui vend (hedge < 0). Ce qui permet de lire, en direct, QUI pousse
+    # le sous-jacent : achats de calls / ventes de puts = pression haussière,
+    # ventes de calls / achats de puts = pression baissière.
+    hedge_call_buy: float = 0.0     # preneur ACHÈTE des calls  (dealer vend des calls)
+    hedge_call_sell: float = 0.0    # preneur VEND des calls    (dealer achète des calls)
+    hedge_put_buy: float = 0.0      # preneur ACHÈTE des puts   (dealer vend des puts)
+    hedge_put_sell: float = 0.0     # preneur VEND des puts     (dealer achète des puts)
     buy_contracts: float = 0.0      # bruts, pour retrouver le volume total
     sell_contracts: float = 0.0
     prints: int = 0
@@ -153,6 +165,10 @@ class FlowBar:
             "net_gamma": self.net_gamma,
             "net_gamma_calls": self.net_gamma_calls,
             "net_gamma_puts": self.net_gamma_puts,
+            "hedge_call_buy": self.hedge_call_buy,
+            "hedge_call_sell": self.hedge_call_sell,
+            "hedge_put_buy": self.hedge_put_buy,
+            "hedge_put_sell": self.hedge_put_sell,
             "delta_prints": float(self.delta_prints),
             "no_delta_prints": float(self.no_delta_prints),
             "buy_contracts": self.buy_contracts, "sell_contracts": self.sell_contracts,
@@ -270,6 +286,15 @@ class FlowTape:
     # Distinct de l'agrégation en barres : ici on garde le détail par print,
     # là on cumule. Volatil, jamais persisté.
     _prints: dict[str, deque] = field(default_factory=dict)
+    # pression de couverture par seconde (tampon d'affichage du mode « live »)
+    _secs: dict[str, deque] = field(default_factory=dict)
+    # et par PRINT : (epoch, pression) — alimente la courbe live, mise à jour à
+    # chaque transaction plutôt qu'à la seconde
+    _pts: dict[str, deque] = field(default_factory=dict)
+    # compteurs cumulés d'éléments ajoutés (jamais remis à zéro) : le process
+    # capture s'en sert pour n'envoyer aux abonnés que ce qui est NOUVEAU
+    _seq_prints: dict[str, int] = field(default_factory=dict)
+    _seq_pts: dict[str, int] = field(default_factory=dict)
     # spot autour duquel la fenêtre de souscription courante a été centrée. On
     # y compare le spot LIVE pour décider d'un recentrage : `_spot` peut être
     # figé au spot de construction, `_center` l'est délibérément — c'est le
@@ -391,6 +416,20 @@ class FlowTape:
             else:
                 bar.net_delta += -sign * size * delta * mult * spot
                 bar.delta_prints += 1
+                # pression de couverture = delta PRIS par le preneur (l'opposé du
+                # delta dealer ci-dessus), rangée par type et par sens
+                hedge = sign * size * delta * mult * spot
+                if typ == "C":
+                    if sign > 0:
+                        bar.hedge_call_buy += hedge
+                    else:
+                        bar.hedge_call_sell += hedge
+                elif typ == "P":
+                    if sign > 0:
+                        bar.hedge_put_buy += hedge
+                    else:
+                        bar.hedge_put_sell += hedge
+                self._record_second(symbol, typ, sign, hedge, now)
 
             # Gamma signé, à l'échelle du GEX ($ par 1 % de move). Même signe-
             # type que metrics.enrich (call +, put −) : un call acheté ajoute du
@@ -432,6 +471,7 @@ class FlowTape:
             "notional": notional,
             "combo": bool(item.get("spreadLeg")),
         })
+        self._seq_prints[symbol] = self._seq_prints.get(symbol, 0) + 1
 
     def recent_prints(self, symbol: str, min_size: float = 0.0,
                       include_combos: bool = True, limit: int = 60) -> list[dict]:
@@ -483,6 +523,109 @@ class FlowTape:
                 out += list(self.bars.items())
                 self.bars = {}
         return out
+
+    SECONDS_KEPT = 600      # fenêtre gardée en mémoire pour le mode « live » (10 min)
+
+    def _record_second(self, symbol: str, typ: str | None, sign: float,
+                       hedge: float, now: float) -> None:
+        """Cumule la pression de couverture dans la SECONDE du print (appelé sous
+        `self.lock`). Volatil, jamais persisté : c'est un tampon d'affichage,
+        les barres d'une minute restent la référence écrite sur disque."""
+        if typ not in ("C", "P"):
+            return
+        idx = (0 if sign > 0 else 3) if typ == "C" else (2 if sign > 0 else 1)
+        q = self._secs.setdefault(symbol, deque())
+        sec = int(now)
+        if not q or q[-1][0] != sec:
+            q.append([sec, 0.0, 0.0, 0.0, 0.0])
+        q[-1][1 + idx] += hedge
+        while q and q[0][0] < sec - self.SECONDS_KEPT:
+            q.popleft()
+        p = self._pts.setdefault(symbol, deque())
+        p.append((now, hedge, idx))
+        self._seq_pts[symbol] = self._seq_pts.get(symbol, 0) + 1
+        while p and p[0][0] < now - self.SECONDS_KEPT:
+            p.popleft()
+
+    def live_points(self, symbol: str, window_s: int = 300,
+                    now: float | None = None) -> list[tuple[float, float, int]]:
+        """(epoch, pression de couverture, catégorie) de CHAQUE print des
+        `window_s` dernières secondes, du plus ancien au plus récent. Catégorie =
+        rang dans HEDGE_COLS : 0 calls achetés, 1 puts vendus, 2 puts achetés,
+        3 calls vendus."""
+        now = time.time() if now is None else now
+        with self.lock:
+            return [p for p in self._pts.get(symbol, ()) if p[0] >= now - window_s]
+
+    def live_seconds(self, symbol: str, window_s: int = 300,
+                     now: float | None = None) -> list[dict]:
+        """Pression de couverture PAR SECONDE sur les `window_s` dernières
+        secondes, une entrée par seconde (les secondes sans print à zéro pour
+        que l'axe défile régulièrement). Ordre des champs = HEDGE_COLS."""
+        now = time.time() if now is None else now
+        end = int(now)
+        start = end - window_s + 1
+        with self.lock:
+            by_sec = {r[0]: r for r in self._secs.get(symbol, ()) if r[0] >= start}
+        out = []
+        for s in range(start, end + 1):
+            r = by_sec.get(s)
+            out.append({"t": s, "hedge_call_buy": r[1] if r else 0.0,
+                        "hedge_put_sell": r[2] if r else 0.0,
+                        "hedge_put_buy": r[3] if r else 0.0,
+                        "hedge_call_sell": r[4] if r else 0.0})
+        return out
+
+    SNAPSHOT_PRINTS = 1500      # prints envoyés à un abonné qui se (re)connecte
+
+    def export_delta(self, marks: dict | None) -> tuple[dict, dict]:
+        """(charge utile, nouvelles marques) pour un abonné du process capture.
+
+        `marks=None` : instantané (tout ce que le tampon contient d'utile pour
+        reconstruire l'affichage : derniers prints, points de la fenêtre live,
+        barres en cours). Ensuite `marks` (renvoyées par l'appel précédent) ne
+        laisse passer que le NOUVEAU. Aucune donnée n'est rejouée deux fois."""
+        snap = marks is None
+        mp = {} if snap else marks.get("prints", {})
+        mt = {} if snap else marks.get("pts", {})
+        prints, pts = {}, {}
+        with self.lock:
+            symbols = set(self._prints) | set(self._pts) | set(self.bars) | {
+                s for s, _ in self.done}
+            for s in symbols:
+                buf = self._prints.get(s, ())
+                n = (min(len(buf), self.SNAPSHOT_PRINTS) if snap
+                     else min(len(buf), self._seq_prints.get(s, 0) - mp.get(s, 0)))
+                if n > 0:
+                    prints[s] = [dict(buf[i]) for i in range(len(buf) - n, len(buf))]
+                q = self._pts.get(s, ())
+                m = (len(q) if snap
+                     else min(len(q), self._seq_pts.get(s, 0) - mt.get(s, 0)))
+                if m > 0:
+                    pts[s] = [list(q[i]) for i in range(len(q) - m, len(q))]
+            new_marks = {"prints": dict(self._seq_prints), "pts": dict(self._seq_pts)}
+        rows = {}
+        for s in symbols:
+            rows[s] = [{**r, "timestamp": r["timestamp"].isoformat()}
+                       for r in self.live_rows(s)]
+        state, n = self.status()
+        return ({"snapshot": snap, "prints": prints, "pts": pts, "rows": rows,
+                 "status": [state, n]}, new_marks)
+
+    def live_rows(self, symbol: str) -> list[dict]:
+        """Barres de `symbol` pas encore écrites sur disque : les achevées en
+        attente de flush + la minute EN COURS. C'est ce qui rend le graphe de
+        couverture vivant à la seconde près, sans attendre le prochain flush."""
+        from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
+        et = ZoneInfo("America/New_York")
+        with self.lock:
+            bars = [b for s, b in self.done if s == symbol]
+            cur = self.bars.get(symbol)
+            if cur is not None:
+                bars.append(cur)
+            return [b.as_row(symbol, datetime.fromtimestamp(b.minute, tz=timezone.utc)
+                             .astimezone(et).replace(tzinfo=None)) for b in bars]
 
     # ------------------------------------------------------------------
     # Flux
