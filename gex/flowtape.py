@@ -293,6 +293,8 @@ class FlowTape:
     _pts: dict[str, deque] = field(default_factory=dict)
     # compteurs cumulés d'éléments ajoutés (jamais remis à zéro) : le process
     # capture s'en sert pour n'envoyer aux abonnés que ce qui est NOUVEAU
+    # prints BRUTS en attente d'écriture disque (cf. drain_raw / scheduler.flush_optprints)
+    _raw: list = field(default_factory=list)
     _seq_prints: dict[str, int] = field(default_factory=dict)
     _seq_pts: dict[str, int] = field(default_factory=dict)
     # spot autour duquel la fenêtre de souscription courante a été centrée. On
@@ -344,6 +346,10 @@ class FlowTape:
 
             bar.prints += 1
             size = float(size)
+
+            # Brut : CHAQUE print, avant tout filtre (combos et agresseur inconnu
+            # compris), pour pouvoir tout reconstruire après coup.
+            self._record_raw(symbol, stream, item, price, size, now)
 
             # Tape : on garde la transaction TELLE QUELLE avant tout filtrage
             # d'agrégation — combos et côté indéterminé compris, marqués pour
@@ -574,6 +580,46 @@ class FlowTape:
                         "hedge_put_sell": r[2] if r else 0.0,
                         "hedge_put_buy": r[3] if r else 0.0,
                         "hedge_call_sell": r[4] if r else 0.0})
+        return out
+
+    RAW_MAX = 500_000        # garde-fou mémoire si l'écriture disque prend du retard
+
+    def _record_raw(self, symbol: str, stream: str, item: dict, price,
+                    size: float, now: float) -> None:
+        """Ajoute le print brut au tampon d'écriture (appelé sous `self.lock`).
+
+        On garde ce que le flux donne (heure d'échange, cotation bid/ask au
+        moment du print, côté agresseur, jambe de spread, conditions de vente,
+        type NEW/CORRECTION/CANCEL) ET le contexte que rien ne permettra de
+        retrouver après coup : delta/gamma du contrat et spot du sous-jacent
+        AU MOMENT du print. C'est ce qui rend la pression de couverture
+        reconstruisible à l'identique."""
+        if len(self._raw) >= self.RAW_MAX:
+            return
+        exch = item.get("time")
+        ts = exch / 1000.0 if isinstance(exch, (int, float)) and exch == exch else now
+
+        def num(v):
+            return float(v) if isinstance(v, (int, float)) and v == v else None
+
+        self._raw.append({
+            "ts": float(ts), "ts_recv": float(now), "symbol": symbol,
+            "contract": stream, "price": num(price), "size": float(size),
+            "bid": num(item.get("bidPrice")), "ask": num(item.get("askPrice")),
+            "side": item.get("aggressorSide") or None,
+            "spread": bool(item.get("spreadLeg")),
+            "exch": item.get("exchangeCode") or None,
+            "cond": item.get("exchangeSaleConditions") or None,
+            "ttype": item.get("type") or None,
+            "delta": self._delta.get(stream), "gamma": self._gamma.get(stream),
+            "und": num(QUOTES.price(symbol)),
+            "source": "dxfeed",
+        })
+
+    def drain_raw(self) -> list[dict]:
+        """Récupère et vide le tampon des prints bruts (swap sous verrou)."""
+        with self.lock:
+            out, self._raw = self._raw, []
         return out
 
     SNAPSHOT_PRINTS = 1500      # prints envoyés à un abonné qui se (re)connecte

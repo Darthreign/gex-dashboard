@@ -443,6 +443,25 @@ def flush_tape() -> None:
             log.exception("Échec écriture de l'order flow %s", symbol)
 
 
+def flush_optprints() -> None:
+    """Écrit les prints BRUTS d'options (cf. flowtape._record_raw), rangés par
+    sous-jacent et par heure d'échange en heure de New York. Même logique que
+    les autres flush : le collecteur agrège en mémoire, seul ce job touche le
+    disque (un fichier par heure, réécrit tant que l'heure est en cours)."""
+    rows = flowtape.TAPE.drain_raw()
+    if not rows:
+        return
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for r in rows:
+        et = datetime.fromtimestamp(r["ts"], tz=UTC).astimezone(ET)
+        groups.setdefault((r["symbol"], f"{et:%Y-%m-%d %H}"), []).append(r)
+    for (symbol, hour), lst in groups.items():
+        try:
+            store.append_optprints(symbol, lst, datetime.strptime(hour, "%Y-%m-%d %H"))
+        except Exception:  # noqa: BLE001 — une écriture ratée ne doit rien casser
+            log.exception("Échec écriture des prints bruts %s", symbol)
+
+
 def flush_ticks() -> None:
     """Écrit sur disque le brut tick-par-tick accumulé par la capture continue
     (cf. gex/tickcapture). Même logique que flush_prices/flush_tape : le
@@ -509,6 +528,8 @@ def add_flush_jobs(sched: BackgroundScheduler) -> None:
     # job vide vers le parquet journalier de NQ/ES toutes les 60 s. Session dxLink
     # dédiée, sans jamais toucher le flux spot du dashboard.
     sched.add_job(flush_ticks, "interval", seconds=60, max_instances=1, coalesce=True)
+    # prints bruts d'options : la reconstruction à l'identique du tape
+    sched.add_job(flush_optprints, "interval", seconds=60, max_instances=1, coalesce=True)
 
 
 def discard_bars() -> None:

@@ -254,6 +254,38 @@ def append_tape(symbol: str, rows: list[dict], ts: datetime) -> Path:
     return path
 
 
+def append_optprints(symbol: str, rows: list[dict], ts: datetime) -> Path | None:
+    """Ajoute des prints BRUTS d'options au fichier de leur HEURE (ET) :
+    `optprints/<SYM>/<jour>/<HH>.parquet`.
+
+    Un fichier par heure plutôt qu'un par jour : un jour de SPX pèse ~1M de
+    lignes, le réécrire toutes les 60 s serait lourd, alors qu'une heure (~110k)
+    reste légère. Même mécanique que `append_ticks` (verrou par fichier +
+    écriture atomique). Données courtier : usage personnel, jamais exportées
+    (`source="dxfeed"`), et exclues du dépôt git de data/ (trop volumineuses)."""
+    if not rows:
+        return None
+    path = _ensure(SETTINGS.data_dir / "optprints" / symbol / f"{ts:%Y-%m-%d}"
+                   / f"{ts:%H}.parquet")
+    with _lock_for(path):
+        new = pd.DataFrame(rows)
+        if path.exists():
+            new = pd.concat([pd.read_parquet(path), new], ignore_index=True)
+        _write_atomic(new, path)
+    return path
+
+
+def load_optprints(symbol: str, day: str) -> pd.DataFrame:
+    """Tous les prints bruts d'options d'un sous-jacent pour un jour (ET), triés
+    par heure d'échange (tri STABLE : plusieurs prints partagent la même ms)."""
+    root = SETTINGS.data_dir / "optprints" / symbol / day
+    files = sorted(root.glob("*.parquet")) if root.exists() else []
+    if not files:
+        return pd.DataFrame()
+    df = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
+    return df.sort_values("ts", kind="stable").reset_index(drop=True)
+
+
 def load_tape(symbol: str, day: str) -> pd.DataFrame:
     path = SETTINGS.data_dir / "tape" / symbol / f"{day}.parquet"
     return pd.read_parquet(path) if path.exists() else pd.DataFrame()

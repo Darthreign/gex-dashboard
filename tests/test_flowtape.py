@@ -459,3 +459,24 @@ def test_live_points_un_point_par_print_dans_la_fenetre():
     assert pts[0][1] < 0 and pts[1][1] < 0                # put acheté / call vendu : vend
     assert [p[2] for p in pts] == [2, 3]                  # catégories : puts achetés, calls vendus
     assert len(t.live_points("SPX", window_s=400, now=1300.0)) == 3
+
+
+def test_print_brut_garde_avec_son_contexte_avant_tout_filtre():
+    """Même un combo ou un agresseur inconnu est conservé en brut, avec delta,
+    gamma et cotation du moment : la reconstruction ne doit rien perdre."""
+    t = _hedge_tape()
+    t._gamma[".SPXW260729C7400"] = 0.002
+    t.ingest_print({**_print(".SPXW260729C7400", "BUY", 3), "time": 1_700_000_000_500,
+                    "bidPrice": 9.9, "askPrice": 10.1, "exchangeCode": "C",
+                    "exchangeSaleConditions": "@", "type": "NEW"}, now=1_700_000_001.0)
+    t.ingest_print(_print(".SPXW260729C7400", None, 1), now=1_700_000_002.0)
+    t.ingest_print(_print(".SPXW260729P7400", "SELL", 2, spread=True), now=1_700_000_003.0)
+    rows = t.drain_raw()
+    assert len(rows) == 3 and t.drain_raw() == []
+    a, b, c = rows
+    assert a["ts"] == 1_700_000_000.5 and a["ts_recv"] == 1_700_000_001.0
+    assert a["bid"] == 9.9 and a["ask"] == 10.1 and a["side"] == "BUY"
+    assert a["delta"] == 0.5 and a["gamma"] == 0.002 and a["symbol"] == "SPX"
+    assert a["exch"] == "C" and a["cond"] == "@" and a["ttype"] == "NEW"
+    assert b["side"] is None and c["spread"] is True
+    assert b["ts"] == b["ts_recv"]
