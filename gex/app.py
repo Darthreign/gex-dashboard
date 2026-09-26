@@ -68,7 +68,7 @@ TAB_SELECTED = {"backgroundColor": "#1a1a19", "color": "#ffffff",
                 "border": "1px solid #2c2c2a", "borderTop": "2px solid #3987e5",
                 "padding": "8px 14px", "fontSize": "13px", "fontWeight": "600"}
 HINT_STYLE = {"color": "#898781", "fontSize": "11px", "marginBottom": "8px"}
-TABS = ("main", "scalp", "profile", "greeks2", "heat", "pos", "tape")
+TABS = ("main", "profile", "greeks2", "heat", "pos", "tape")
 
 
 def to_local(ts: pd.Series) -> pd.Series:
@@ -1721,6 +1721,10 @@ def create_app() -> Dash:
                         className="ctl")
 
     app.layout = html.Div([
+        # l'URL choisit la page : « / » = vue complète, « /scalp » = mode scalping
+        # (NQ et ES seulement). Même application, mêmes callbacks : la page ne fait
+        # que masquer / montrer des blocs (cf. classe body.scalp-page dans style.css).
+        dcc.Location(id="url", refresh=False),
         # bandeau + superposition : NQ/ES sans identifiants dxFeed (cf.
         # native_notice_content) — vides par défaut, peuplés par le callback
         # native_notice sur changement de symbole.
@@ -1743,6 +1747,10 @@ def create_app() -> Dash:
                         id="lang", className="seg",
                         options=[{"label": l.upper(), "value": l} for l in LANGS],
                         value="fr", inline=True),
+                    dcc.Link("⚡ Mode scalping", id="scalp-link", href="/scalp",
+                             className="linkbtn scalp-link"),
+                    dcc.Link("← Vue complète", id="full-link", href="/",
+                             className="linkbtn full-link"),
                     # page statique servie depuis assets/ (nouvel onglet)
                     html.A(id="faq-link", className="linkbtn", href="/assets/faq.html",
                            target="_blank", children="FAQ"),
@@ -1991,17 +1999,30 @@ def create_app() -> Dash:
         Output("lang", "value"),
         Input("lang-boot", "data"),
     )
-    # Onglet Scalp : classe sur <body> qui masque le bandeau général (cf. style.css)
+    # Page /scalp : classe sur <body> qui masque le reste du dashboard (cf. style.css)
     app.clientside_callback(
         """
-        function(tab) {
-            document.body.classList.toggle('scalp-mode', tab === 'scalp');
+        function(path) {
+            document.body.classList.toggle('scalp-page', (path || '/').startsWith('/scalp'));
             return window.dash_clientside.no_update;
         }
         """,
-        Output("tab", "className"),
-        Input("tab", "value"),
+        Output("url", "hash"),
+        Input("url", "pathname"),
     )
+
+    @app.callback(
+        Output("symbol", "value", allow_duplicate=True),
+        Input("url", "pathname"),
+        State("symbol", "value"),
+        prevent_initial_call="initial_duplicate",
+    )
+    def scalp_symbol(path, symbol):
+        """Sur /scalp, seuls NQ et ES existent : un autre sous-jacent retombe sur NQ."""
+        if (path or "/").startswith("/scalp") and symbol not in ("NQ", "ES"):
+            return "NQ"
+        raise PreventUpdate
+
     app.clientside_callback(
         "function(l) { window.localStorage.setItem('gex-lang', l); return window.dash_clientside.no_update; }",
         Output("lang-boot", "data"),
@@ -2396,12 +2417,12 @@ def create_app() -> Dash:
          Output("scalp-head", "children"), Output("scalp-ladder", "children"),
          Output("scalp-hedge", "figure"), Output("scalp-prints", "children"),
          Output("scalp-price", "figure")],
-        [Input("tape-tick", "n_intervals"), Input("tab", "value"),
+        [Input("tape-tick", "n_intervals"), Input("url", "pathname"),
          Input("symbol", "value"), Input("lang", "value"),
          Input("scalp-window", "value"), Input("scalp-min", "value")],
     )
-    def refresh_scalp(_, tab, symbol, lang, window, min_size):
-        if tab != "scalp":
+    def refresh_scalp(_, path, symbol, lang, window, min_size):
+        if not (path or "/").startswith("/scalp") or symbol not in ("NQ", "ES"):
             raise PreventUpdate
         hedge = hedge_fig(symbol, lang, int(window if window is not None else -1))
         hedge.update_layout(height=300, uirevision=f"scalp-{symbol}-{window}")

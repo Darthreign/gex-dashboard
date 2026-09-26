@@ -656,10 +656,18 @@ body {
   .sc-prints { max-height: none; }
 }
 
-/* Mode Scalp : le bandeau général (cartes, jauge P/C, régime, niveaux) double ce que la
-   page affiche déjà ; on le masque pour que tout tienne sur un écran. */
-body.scalp-mode #cards, body.scalp-mode #pc-gauge, body.scalp-mode #regime-banner,
-body.scalp-mode .levels-row { display: none; }
+/* Page /scalp : tout ce qui n'est pas le mode scalping est masqué, et seuls NQ et ES restent. */
+#pane-scalp { display: none; }
+body.scalp-page #pane-scalp { display: block; }
+body.scalp-page #pane-main, body.scalp-page #pane-profile, body.scalp-page #pane-greeks2,
+body.scalp-page #pane-heat, body.scalp-page #pane-pos, body.scalp-page #pane-tape { display: none !important; }
+body.scalp-page #cards, body.scalp-page #pc-gauge, body.scalp-page #regime-banner,
+body.scalp-page .levels-row, body.scalp-page .tabbar, body.scalp-page .toolbar,
+body.scalp-page #unit { display: none; }
+body.scalp-page #symbol label:has(input[value="SPX"]), body.scalp-page #symbol label:has(input[value="NDX"]),
+body.scalp-page #symbol label:has(input[value="SPY"]), body.scalp-page #symbol label:has(input[value="QQQ"]) { display: none; }
+body:not(.scalp-page) .full-link, body.scalp-page .scalp-link { display: none; }
+a.scalp-link, a.full-link { text-decoration: none; }
 
 
 /* Bandeau d'amplification : en tête de la page Scalp */
