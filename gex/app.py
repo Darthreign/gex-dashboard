@@ -1019,6 +1019,43 @@ def scalp_head(symbol: str, lang: str, ctx: dict, spot: float) -> html.Div:
 _SC_KIND_COLOR = {"cw": "cw", "ps": "ps", "zg": "zg", "hvl": "hvl", "d1": "d1", "gex": "lvl"}
 
 
+def scalp_inputs(symbol: str, spot: float) -> tuple[float | None, float, float]:
+    """(mouvement sur 5 min en points, flux net M$, flux brut M$) pour le bandeau.
+
+    Le mouvement compare le spot live au dernier cours connu il y a >= 5 min
+    (bougies 1 min du jour, écrites par le process capture). None si le jour n'a
+    pas de bougie assez ancienne (hors séance, flux coupé)."""
+    from .flowtape import TAPE
+    move = None
+    day = datetime.now(ET).strftime("%Y-%m-%d")
+    bars = store.load_prices(symbol, day)
+    if not bars.empty:
+        cible = pd.Timestamp(datetime.now(ET).replace(tzinfo=None)) - pd.Timedelta(seconds=scalp.WINDOW_S)
+        ts = pd.to_datetime(bars["timestamp"])
+        vieux = bars[ts <= cible]
+        recent = pd.Timestamp(datetime.now(ET).replace(tzinfo=None)) - ts.iloc[-1] < pd.Timedelta(minutes=10)
+        if not vieux.empty and recent:
+            move = float(spot) - float(vieux["close"].iloc[-1])
+    pts = TAPE.live_points(symbol, scalp.WINDOW_S)
+    net = sum(p[1] for p in pts) / 1e6
+    gross = sum(abs(p[1]) for p in pts) / 1e6
+    return move, net, gross
+
+
+def scalp_banner(symbol: str, ctx: dict, spot: float) -> html.Div:
+    move, net, gross = scalp_inputs(symbol, spot)
+    zg = ctx.get("zg")
+    neg = bool(ctx.get("gamma")) and "Négatif" in ctx["gamma"]
+    a = scalp.assess(symbol, move, net, gross, neg, (zg - spot) if zg is not None else None)
+    voyants = [html.Span(f"{'●' if on else '○'} {name}", className="sc-light" + (" on" if on else ""))
+               for name, on in a["lights"].items()]
+    return html.Div([
+        html.Div(a["title"], className="sc-banner-title"),
+        html.Div(a["detail"], className="sc-banner-detail"),
+        html.Div(voyants, className="sc-lights"),
+    ], className=f"sc-banner sc-tone-{a['tone']}")
+
+
 def scalp_ladder(symbol: str, ctx: dict, spot: float) -> html.Div:
     rungs = scalp.build_ladder(symbol, spot, ctx["zg"], ctx["hvl"], ctx["keys"], ctx["walls"])
     if not rungs:
@@ -1047,6 +1084,47 @@ def scalp_ladder(symbol: str, ctx: dict, spot: float) -> html.Div:
         rows.append(spot_row)
     return html.Div(rows, className="sc-rows")
 
+
+
+def scalp_price_fig(symbol: str, ctx: dict, spot: float, minutes: int = 180) -> go.Figure:
+    """Sous-jacent en bougies 1 min (les `minutes` dernières) avec les niveaux de
+    l'échelle en lignes horizontales. Première version, à améliorer : lit les
+    bougies écrites par le process capture (retard <= 1 min) et ajoute le spot
+    live comme dernier point. Hors séance, retombe sur le dernier jour disponible."""
+    title = f"{symbol} · bougies 1 min"
+    day = datetime.now(ET).strftime("%Y-%m-%d")
+    bars = store.load_prices(symbol, day)
+    if bars.empty:
+        days = store.price_days(symbol)
+        if days:
+            day = days[-1]
+            bars = store.load_prices(symbol, day)
+            title += f" · dernier jour disponible ({day})"
+            # hors séance : on montre la séance US (jusqu'à la clôture 16h ET), pas la nuit
+            bars = bars[pd.to_datetime(bars["timestamp"]) <= pd.Timestamp(f"{day} 16:00")]
+    if bars.empty:
+        return empty_fig("Pas de bougies disponibles.", title)
+    ts = pd.to_datetime(bars["timestamp"])
+    bars = bars[ts >= ts.iloc[-1] - pd.Timedelta(minutes=minutes)]
+    x = to_local(bars["timestamp"])
+    fig = go.Figure(go.Candlestick(
+        x=x, open=bars["open"], high=bars["high"], low=bars["low"], close=bars["close"],
+        increasing_line_color=C["pos"], decreasing_line_color=C["neg"],
+        increasing_fillcolor=C["pos"], decreasing_fillcolor=C["neg"], name=symbol))
+    lo, hi = float(bars["low"].min()), float(bars["high"].max())
+    pad = max(2 * scalp.near_threshold(symbol) * 4, 0.5 * (hi - lo))
+    for r in scalp.build_ladder(symbol, spot, ctx["zg"], ctx["hvl"], ctx["keys"], ctx["walls"]):
+        if lo - pad <= r.price <= hi + pad:
+            fig.add_hline(y=r.price, line_color=C[_SC_KIND_COLOR[r.kind]], line_width=1,
+                          line_dash="dash" if r.kind in ("zg", "cw", "ps") else "dot",
+                          annotation_text=f"{r.name} {r.price:,.0f}", annotation_position="right",
+                          annotation_font=dict(size=10, color=C[_SC_KIND_COLOR[r.kind]]))
+    lay = base_layout(title, height=360)
+    lay["margin"]["r"] = 96
+    lay["xaxis"]["rangeslider"] = dict(visible=False)
+    lay["yaxis"]["range"] = [lo - pad * 0.4, hi + pad * 0.4]
+    fig.update_layout(**lay)
+    return fig
 
 
 def flow_fig(symbol: str, lang: str, day: str | None = None) -> go.Figure:
@@ -1752,19 +1830,12 @@ def create_app() -> Dash:
 
             html.Div(id="pane-scalp", children=[
                 html.Div([
+                    html.Div(id="scalp-banner", className="sc-bannerbox"),
                     html.Div(id="scalp-head", className="sc-head"),
                     html.Div([html.Div("Niveaux · distance au spot (pts)", className="sc-title"),
                               html.Div(id="scalp-ladder")], className="sc-card sc-ladder"),
-                    html.Div([
-                        html.Div([html.Span("Couverture des dealers", className="sc-title"),
-                                  dcc.RadioItems(id="scalp-window", className="seg", inline=True,
-                                                 value=-1,
-                                                 options=[{"label": "● Live 5 min", "value": -1},
-                                                          {"label": "15 min", "value": 15},
-                                                          {"label": "30 min", "value": 30}])],
-                                 className="sc-cardhead"),
-                        dcc.Graph(config=GRAPH_CONFIG, id="scalp-hedge"),
-                    ], className="sc-card sc-hedge"),
+                    html.Div([dcc.Graph(config=GRAPH_CONFIG, id="scalp-price")],
+                             className="sc-card sc-underlying"),
                     html.Div([
                         html.Div([html.Span("Gros prints", className="sc-title"),
                                   dcc.RadioItems(id="scalp-min", className="seg", inline=True,
@@ -1775,6 +1846,16 @@ def create_app() -> Dash:
                                  className="sc-cardhead"),
                         html.Div(id="scalp-prints"),
                     ], className="sc-card sc-prints"),
+                    html.Div([
+                        html.Div([html.Span("Couverture des dealers", className="sc-title"),
+                                  dcc.RadioItems(id="scalp-window", className="seg", inline=True,
+                                                 value=-1,
+                                                 options=[{"label": "● Live 5 min", "value": -1},
+                                                          {"label": "15 min", "value": 15},
+                                                          {"label": "30 min", "value": 30}])],
+                                 className="sc-cardhead"),
+                        dcc.Graph(config=GRAPH_CONFIG, id="scalp-hedge"),
+                    ], className="sc-card sc-hedge"),
                 ], className="sc-grid"),
             ]),
 
@@ -1978,7 +2059,7 @@ def create_app() -> Dash:
                           {"label": "≥ 100", "value": 100}]
         tape_combos_opts = [{"label": t(lang, "tape_show_combos"), "value": "combos"}]
         return (bucket_opts, majors_opts, t(lang, "flow_day_label"),
-                t(lang, "last_session"), t(lang, "footer"), opts,
+                t(lang, "last_session"), t(lang, "footer_rt" if credentials_present() else "footer"), opts,
                 t(lang, "app_title"),
                 t(lang, "lbl_expiry"), t(lang, "lbl_window"), symbol,
                 t(lang, "gflow_series_label"), gflow_series_opts,
@@ -2311,8 +2392,10 @@ def create_app() -> Dash:
         return hedge_fig(symbol, lang, int(window or 0))    # -1 = live à la seconde
 
     @app.callback(
-        [Output("scalp-head", "children"), Output("scalp-ladder", "children"),
-         Output("scalp-hedge", "figure"), Output("scalp-prints", "children")],
+        [Output("scalp-banner", "children"),
+         Output("scalp-head", "children"), Output("scalp-ladder", "children"),
+         Output("scalp-hedge", "figure"), Output("scalp-prints", "children"),
+         Output("scalp-price", "figure")],
         [Input("tape-tick", "n_intervals"), Input("tab", "value"),
          Input("symbol", "value"), Input("lang", "value"),
          Input("scalp-window", "value"), Input("scalp-min", "value")],
@@ -2327,11 +2410,13 @@ def create_app() -> Dash:
         if ctx is None:
             wait = html.Div(t(lang, "waiting_native" if symbol in ("NQ", "ES")
                               else "waiting_first_pull"), className="hint")
-            return wait, wait, hedge, prints
+            return wait, wait, wait, hedge, prints, empty_fig("En attente des niveaux…", symbol)
         spot = QUOTES.price(symbol) if credentials_present() else None
         spot = float(spot) if spot else float(ctx["snap_spot"])
-        return (scalp_head(symbol, lang, ctx, spot), scalp_ladder(symbol, ctx, spot),
-                hedge, prints)
+        price = scalp_price_fig(symbol, ctx, spot)
+        price.update_layout(uirevision=f"scalp-price-{symbol}")
+        return (scalp_banner(symbol, ctx, spot), scalp_head(symbol, lang, ctx, spot),
+                scalp_ladder(symbol, ctx, spot), hedge, prints, price)
 
     @app.callback(
         Output("tape-table", "children"),

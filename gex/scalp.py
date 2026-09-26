@@ -92,3 +92,69 @@ def extension_pts(spot: float | None, open_: float | None) -> float | None:
     if spot is None or open_ is None:
         return None
     return float(spot) - float(open_)
+
+
+# --- Détection d'amplification (bandeau) ------------------------------------
+# ⚠️ SEUILS PROVISOIRES : posés sans historique de séances réelles avec le tape
+# signé, à recalibrer sur les premières séances. Mesure descriptive, pas un signal.
+WINDOW_S = 300                                   # fenêtre d'analyse : 5 min
+MOVE_MIN_PTS = {"NQ": 25.0, "ES": 6.0, "NDX": 25.0, "SPX": 6.0}
+DEFAULT_MOVE_MIN = 10.0
+GROSS_MIN_MUSD = 100.0       # flux de couverture brut minimum sur la fenêtre (M$)
+RATIO_MIN = 0.35             # part nette du flux (|net| / brut) pour parler de sens unique
+FLIP_NEAR_FACTOR = 3.0       # « fonce vers le Flip » : à moins de 3 x le seuil de contact
+
+
+def move_threshold(symbol: str) -> float:
+    return MOVE_MIN_PTS.get(symbol.upper(), DEFAULT_MOVE_MIN)
+
+
+def assess(symbol: str, move_pts: float | None, net_musd: float, gross_musd: float,
+           gamma_negative: bool, dist_to_flip: float | None) -> dict:
+    """État d'amplification sur la fenêtre de 5 min.
+
+    move_pts   : variation du prix sur la fenêtre (None si données insuffisantes)
+    net_musd   : pression de couverture nette (M$ ; + = les dealers doivent ACHETER)
+    gross_musd : somme des |pressions| (M$), pour juger si le flux est significatif
+    dist_to_flip : niveau du Gamma Flip - spot, en points (None si inconnu)
+
+    États (`state`) : insufficient | calm | amplification | unsupported | brake.
+    `tone` : alert (amplification), ok (favorable au contrarien), neutral."""
+    if move_pts is None:
+        return {"state": "insufficient", "tone": "neutral", "direction": 0,
+                "title": "Données insuffisantes",
+                "detail": "Pas assez de prix récents (hors séance ou flux coupé).",
+                "lights": {}}
+    thr = move_threshold(symbol)
+    direction = 0 if abs(move_pts) < thr else (1 if move_pts > 0 else -1)
+    ratio = abs(net_musd) / gross_musd if gross_musd > 0 else 0.0
+    flow_sig = gross_musd >= GROSS_MIN_MUSD and ratio >= RATIO_MIN
+    flow_dir = (1 if net_musd > 0 else -1) if flow_sig else 0
+    toward_flip = (dist_to_flip is not None and direction != 0
+                   and dist_to_flip * direction > 0
+                   and abs(dist_to_flip) <= FLIP_NEAR_FACTOR * near_threshold(symbol))
+    gamma_light = bool(gamma_negative or toward_flip)
+    lights = {"mouvement": direction != 0,
+              "flux": direction != 0 and flow_dir == direction,
+              "gamma": gamma_light}
+    side = "haussière" if direction > 0 else "baissière"
+    flux_txt = (f"flux net {net_musd:+.0f} M$ ({ratio:.0%} à sens unique)" if gross_musd > 0
+                else "aucun flux de couverture")
+    detail = (f"Mouvement {move_pts:+.0f} pts / 5 min · {flux_txt} · "
+              f"gamma {'négatif' if gamma_negative else 'positif'}"
+              + (" · prix vers le Flip" if toward_flip else ""))
+    if direction == 0:
+        return {"state": "calm", "tone": "neutral", "direction": 0,
+                "title": "Pas de mouvement directionnel", "detail": detail, "lights": lights}
+    if flow_dir == direction:
+        renforce = " — gamma défavorable" if gamma_light else " — malgré un gamma positif"
+        return {"state": "amplification", "tone": "alert", "direction": direction,
+                "title": f"Amplification {side} détectée{renforce}",
+                "detail": detail, "lights": lights}
+    if flow_dir == -direction:
+        return {"state": "brake", "tone": "ok", "direction": direction,
+                "title": f"Couverture à contre-courant : frein sur le mouvement {side}",
+                "detail": detail, "lights": lights}
+    return {"state": "unsupported", "tone": "ok", "direction": direction,
+            "title": f"Mouvement {side} sans soutien des dealers — extension à corriger ?",
+            "detail": detail, "lights": lights}

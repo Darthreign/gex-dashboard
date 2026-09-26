@@ -122,7 +122,7 @@ TR: dict[str, dict[str, str]] = {
         "brand_sub": "SPX · NDX · SPY · QQQ — données CBOE delayed",
         # spot temps réel actif : les CHAÎNES restent délayées, seul le prix
         # courant est en direct — la nuance doit rester lisible
-        "brand_sub_rt": "SPX · NDX · SPY · QQQ — spot temps réel · chaînes CBOE delayed",
+        "brand_sub_rt": "SPX · NDX · SPY · QQQ · NQ · ES — spot et chaînes temps réel (dxFeed)",
         "tt_connect": "Connecter tastytrade",
         "rt_connected": "Spot temps réel actif",
         "rt_degraded": "Flux dégradé — cotations en retard, repli sur le spot CBOE",
@@ -185,6 +185,7 @@ TR: dict[str, dict[str, str]] = {
         "heat_levels_gex_walls": "Murs GEX",
         "last_session": "Dernière séance",
         "footer": "Données CBOE delayed (~15 min) — outil d'analyse, pas d'exécution.",
+        "footer_rt": "Données dxFeed temps réel (compte courtier, usage personnel) — outil d'analyse, pas d'exécution.",
         "hover_strike": "Strike",
         "hover_net": "Net",
         "hover_flow": "Flux",
@@ -315,7 +316,7 @@ TR: dict[str, dict[str, str]] = {
         "unit_index": "Index",
         "unit_futures": "Futures",
         "brand_sub": "SPX · NDX · SPY · QQQ — CBOE delayed data",
-        "brand_sub_rt": "SPX · NDX · SPY · QQQ — real-time spot · CBOE delayed chains",
+        "brand_sub_rt": "SPX · NDX · SPY · QQQ · NQ · ES — real-time spot and chains (dxFeed)",
         "tt_connect": "Connect tastytrade",
         "rt_connected": "Real-time spot active",
         "rt_degraded": "Feed degraded — quotes lagging, falling back to CBOE spot",
@@ -377,6 +378,7 @@ TR: dict[str, dict[str, str]] = {
         "heat_levels_gex_walls": "GEX walls",
         "last_session": "Last session",
         "footer": "CBOE delayed data (~15 min) — analysis tool, not for execution.",
+        "footer_rt": "Real-time dxFeed data (broker account, personal use) — analysis tool, not for execution.",
         "hover_strike": "Strike",
         "hover_net": "Net",
         "hover_flow": "Flow",

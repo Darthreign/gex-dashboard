@@ -617,11 +617,12 @@ body {
 
 
 /* --- Page Scalp : un écran, deux mises en page ---------------------------- */
-.sc-grid { display: grid; gap: 12px; grid-template-columns: minmax(280px, 340px) minmax(0, 1fr) minmax(300px, 420px);
-  grid-template-areas: "head head head" "ladder hedge prints"; align-items: start; }
+.sc-grid { display: grid; gap: 12px; grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
+  grid-template-areas: "banner banner" "head head" "ladder price" "prints hedge"; align-items: start; }
 .sc-head { grid-area: head; }
 .sc-ladder { grid-area: ladder; }
 .sc-hedge { grid-area: hedge; min-width: 0; }
+.sc-underlying { grid-area: price; min-width: 0; }
 .sc-prints { grid-area: prints; min-width: 0; overflow-x: auto; max-height: 560px; overflow-y: auto; }
 .sc-card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
 .sc-title { font-size: 12px; color: var(--muted); letter-spacing: .02em; text-transform: uppercase; }
@@ -650,7 +651,7 @@ body {
 .sc-spot-row .sc-price { color: #111; }
 
 @media (max-width: 900px) {
-  .sc-grid { grid-template-columns: minmax(0, 1fr); grid-template-areas: "head" "ladder" "hedge" "prints"; }
+  .sc-grid { grid-template-columns: minmax(0, 1fr); grid-template-areas: "banner" "head" "ladder" "price" "hedge" "prints"; }
   .sc-spot { font-size: 30px; }
   .sc-prints { max-height: none; }
 }
@@ -659,3 +660,18 @@ body {
    page affiche déjà ; on le masque pour que tout tienne sur un écran. */
 body.scalp-mode #cards, body.scalp-mode #pc-gauge, body.scalp-mode #regime-banner,
 body.scalp-mode .levels-row { display: none; }
+
+
+/* Bandeau d'amplification : en tête de la page Scalp */
+.sc-bannerbox { grid-area: banner; }
+.sc-banner { border: 1px solid var(--line); border-left-width: 6px; border-radius: 10px; padding: 10px 14px; background: var(--surface); }
+.sc-banner-title { font-size: 17px; font-weight: 700; letter-spacing: .01em; }
+.sc-banner-detail { font-size: 12px; color: var(--ink2); margin-top: 3px; font-variant-numeric: tabular-nums; }
+.sc-lights { display: flex; gap: 12px; margin-top: 6px; font-size: 12px; color: var(--muted); }
+.sc-light.on { color: var(--ink); font-weight: 600; }
+.sc-tone-alert { border-color: #e66767; background: rgba(230,103,103,.12); }
+.sc-tone-alert .sc-banner-title { color: #e66767; text-transform: uppercase; }
+.sc-tone-ok { border-color: #199e70; background: rgba(25,158,112,.10); }
+.sc-tone-ok .sc-banner-title { color: #199e70; }
+.sc-tone-neutral { border-color: var(--line); }
+.sc-tone-neutral .sc-banner-title { color: var(--ink2); font-weight: 600; }

@@ -63,3 +63,50 @@ def test_etat_de_seance():
 def test_extension_a_louverture():
     assert scalp.extension_pts(30890.0, 30800.0) == 90.0
     assert scalp.extension_pts(None, 30800.0) is None
+
+
+def _a(move, net, gross, neg=False, flip=None, sym="NQ"):
+    return scalp.assess(sym, move, net, gross, neg, flip)
+
+
+def test_amplification_flux_dans_le_sens_du_mouvement_meme_en_gamma_positif():
+    a = _a(+40.0, +300.0, 400.0)                      # 75 % à sens unique, > 100 M$
+    assert a["state"] == "amplification" and a["tone"] == "alert" and a["direction"] == 1
+    assert "haussière" in a["title"] and "malgré un gamma positif" in a["title"]
+    assert a["lights"] == {"mouvement": True, "flux": True, "gamma": False}
+
+
+def test_amplification_baissiere_en_gamma_negatif():
+    a = _a(-50.0, -250.0, 300.0, neg=True)
+    assert a["state"] == "amplification" and a["direction"] == -1
+    assert "baissière" in a["title"] and "gamma défavorable" in a["title"]
+    assert a["lights"]["gamma"] is True
+
+
+def test_couverture_a_contre_courant_est_un_frein():
+    a = _a(+40.0, -300.0, 400.0)
+    assert a["state"] == "brake" and a["tone"] == "ok"
+
+
+def test_mouvement_sans_soutien_des_dealers():
+    a = _a(+40.0, +10.0, 400.0)                       # flux quasi équilibré
+    assert a["state"] == "unsupported" and a["tone"] == "ok"
+    assert scalp.assess("NQ", 40.0, 50.0, 60.0, False, None)["state"] == "unsupported"  # brut < 100
+
+
+def test_pas_de_mouvement_directionnel_sous_le_seuil():
+    a = _a(+10.0, +300.0, 400.0)
+    assert a["state"] == "calm" and a["direction"] == 0
+    assert scalp.assess("ES", +8.0, +300.0, 400.0, False, None)["state"] == "amplification"
+
+
+def test_donnees_insuffisantes():
+    a = scalp.assess("NQ", None, 0.0, 0.0, False, None)
+    assert a["state"] == "insufficient" and a["tone"] == "neutral"
+
+
+def test_prix_qui_fonce_vers_le_flip_allume_le_voyant_gamma():
+    a = _a(-40.0, -300.0, 400.0, neg=False, flip=-30.0)     # Flip 30 pts SOUS le spot, on baisse
+    assert a["lights"]["gamma"] is True and "prix vers le Flip" in a["detail"]
+    b = _a(+40.0, +300.0, 400.0, neg=False, flip=-30.0)     # on monte, le Flip est derrière
+    assert b["lights"]["gamma"] is False
