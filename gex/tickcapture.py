@@ -17,7 +17,11 @@ choix de la séance est figé d'après le volume de la veille (cf. gex/roll).
 
 Ce qu'on garde : TOUT le brut du print, sans rien jeter — `ts` (epoch s, heure
 d'échange), `price`, `volume`, `bid`, `ask`, `side` (côté agresseur),
-`ts_recv` (heure de réception locale, pour mesurer la latence), `source`.
+`ts_recv` (heure de réception locale, pour mesurer la latence), `source`, et
+depuis le 2026-09-28 les TAILLES affichées au meilleur bid / ask
+(`bid_size`, `ask_size`, plus l'état précédent `prev_*`), tirées de l'événement
+`Quote` : un print plus gros que la taille affichée est un indice de quantité
+cachée (iceberg). Absentes des fichiers antérieurs (NaN).
 Le socle `ts/price/volume/source` est aligné sur le jeu de référence
 `ticks_full` (Databento), donc la capture reste DIRECTEMENT exploitable par le
 backtest ; `bid/ask/side` sont un SURENSEMBLE (colonnes en plus, ignorées par
@@ -85,6 +89,34 @@ class TickCapture:
         self._lock = threading.Lock()
         self._started = False
         self._state = "off"
+        # Dernier état de cotation par contrat (événement Quote) : sert à ajouter
+        # les TAILLES du meilleur bid / ask à chaque transaction (cf. quote/record).
+        self._quotes: dict[str, dict] = {}
+
+    def quote(self, item: dict) -> None:
+        """Retient l'état de la cotation d'un contrat (bid/ask, tailles).
+
+        On garde AUSSI l'état précédent des tailles : une transaction et la mise
+        à jour de cotation qu'elle provoque arrivent dans un ordre non garanti.
+        Si la cotation « après » précède le print, la taille affichée AVANT la
+        transaction est dans `prev_*` ; sinon elle est dans les tailles courantes.
+        C'est cette taille visible qui permet de juger un print trop gros pour ce
+        qui était affiché (indice de quantité cachée, cf. détection d'iceberg)."""
+        sym = item.get("eventSymbol")
+        if not sym:
+            return
+        cur = {"bid": _num(item.get("bidPrice")), "bid_size": _num(item.get("bidSize")),
+               "ask": _num(item.get("askPrice")), "ask_size": _num(item.get("askSize"))}
+        with self._lock:
+            old = self._quotes.get(sym)
+            if old is None:
+                cur.update(prev_bid_size=None, prev_ask_size=None)
+            elif (old["bid"], old["bid_size"], old["ask"], old["ask_size"]) == (
+                    cur["bid"], cur["bid_size"], cur["ask"], cur["ask_size"]):
+                return                                    # doublon : rien ne change
+            else:
+                cur.update(prev_bid_size=old["bid_size"], prev_ask_size=old["ask_size"])
+            self._quotes[sym] = cur
 
     def contract_order(self, symbol: str) -> list[str]:
         """[contrat actif, contrat suivant] pour `symbol`, ordre du courtier."""
@@ -152,6 +184,14 @@ class TickCapture:
             "source": "dxfeed",
         }
         with self._lock:
+            q = self._quotes.get(item.get("eventSymbol")) or {}
+            # tailles affichées au meilleur bid / ask : état courant de la cotation
+            # et état précédent (cf. quote()). None tant qu'aucune cotation n'est
+            # arrivée — jamais 0, qui voudrait dire « rien d'affiché ».
+            row["bid_size"] = q.get("bid_size")
+            row["ask_size"] = q.get("ask_size")
+            row["prev_bid_size"] = q.get("prev_bid_size")
+            row["prev_ask_size"] = q.get("prev_ask_size")
             self._buf.setdefault(symbol, {}).setdefault(contract, []).append(row)
 
     def _build_universe(self, access: str) -> dict[str, tuple[str, str]]:
@@ -242,9 +282,11 @@ class TickCapture:
                                 "acceptDataFormat": "FULL"})
                 elif typ == "FEED_CONFIG" and not subscribed:
                     subscribed = True
+                    # TimeAndSale = chaque transaction ; Quote = tailles du meilleur
+                    # bid/ask, rattachées à chaque transaction (cf. quote/record)
                     await send({"type": "FEED_SUBSCRIPTION", "channel": 1,
-                                "add": [{"type": "TimeAndSale", "symbol": s}
-                                        for s in universe]})
+                                "add": [{"type": t, "symbol": s}
+                                        for s in universe for t in ("TimeAndSale", "Quote")]})
                     self._state = "connected"
                     log.info("Capture tick continue active — %s",
                              ", ".join(f"{lbl}:{code}={s}"
@@ -256,9 +298,13 @@ class TickCapture:
                 elif typ == "FEED_DATA":
                     now = time.time()
                     for item in m.get("data") or []:
-                        if (isinstance(item, dict)
-                                and item.get("eventType") == "TimeAndSale"):
+                        if not isinstance(item, dict):
+                            continue
+                        et = item.get("eventType")
+                        if et == "TimeAndSale":
                             self.record(universe, item, now)
+                        elif et == "Quote":
+                            self.quote(item)
 
                 # Recyclage périodique : reconnexion + univers reconstruit (roll).
                 if time.monotonic() > deadline:

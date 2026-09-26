@@ -35,7 +35,8 @@ def test_record_mapping_et_schema():
     assert len(buf["NQ"]["/NQU6"]) == 1
     row = buf["NQ"]["/NQU6"][0]
     # socle ticks_full + surensemble bid/ask/side : TOUT le brut conservé
-    assert set(row) == {"ts", "price", "volume", "bid", "ask", "side", "ts_recv", "source"}
+    assert set(row) == {"ts", "price", "volume", "bid", "ask", "side", "ts_recv", "source",
+                        "bid_size", "ask_size", "prev_bid_size", "prev_ask_size"}
     assert row["price"] == 100.0 and row["volume"] == 3 and row["source"] == "dxfeed"
     assert isinstance(row["volume"], int)
     assert row["bid"] == 99.75 and row["ask"] == 100.25 and row["side"] == "BUY"
