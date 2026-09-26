@@ -614,3 +614,48 @@ body {
 .tape-mono { font-variant-numeric: tabular-nums; }
 .tape-num { text-align: right; }
 .tape-table tr:hover td { background: var(--surface-2); }
+
+
+/* --- Page Scalp : un écran, deux mises en page ---------------------------- */
+.sc-grid { display: grid; gap: 12px; grid-template-columns: minmax(280px, 340px) minmax(0, 1fr) minmax(300px, 420px);
+  grid-template-areas: "head head head" "ladder hedge prints"; align-items: start; }
+.sc-head { grid-area: head; }
+.sc-ladder { grid-area: ladder; }
+.sc-hedge { grid-area: hedge; min-width: 0; }
+.sc-prints { grid-area: prints; min-width: 0; overflow-x: auto; max-height: 560px; overflow-y: auto; }
+.sc-card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.sc-title { font-size: 12px; color: var(--muted); letter-spacing: .02em; text-transform: uppercase; }
+.sc-cardhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.sc-spotrow { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.sc-spot { font-size: 34px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.sc-sym { color: var(--muted); font-size: 14px; }
+.sc-ext { font-size: 15px; font-variant-numeric: tabular-nums; }
+.sc-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.sc-chip { border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; font-size: 12px; color: var(--ink2); }
+.sc-state-late { border-color: #c98500; color: #c98500; }
+.sc-state-open { border-color: #199e70; color: #199e70; }
+.sc-pos { color: #3987e5; } .sc-neg { color: #e66767; }
+.sc-chip.sc-pos { border-color: #3987e5; } .sc-chip.sc-neg { border-color: #e66767; }
+.sc-rows { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; }
+.sc-row { display: grid; grid-template-columns: 1fr auto 64px; gap: 8px; align-items: center; padding: 5px 8px;
+  border-radius: 6px; font-size: 13px; font-variant-numeric: tabular-nums; border: 1px solid transparent; }
+.sc-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.sc-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.sc-gex { color: var(--muted); font-size: 11px; }
+.sc-price { text-align: right; font-weight: 600; }
+.sc-dist { text-align: right; }
+.sc-next { border-color: var(--line); background: var(--surface-2); }
+.sc-near { border-color: #c98500; background: rgba(201,133,0,.16); }
+.sc-spot-row { background: #ffffff; color: #111; font-weight: 700; }
+.sc-spot-row .sc-price { color: #111; }
+
+@media (max-width: 900px) {
+  .sc-grid { grid-template-columns: minmax(0, 1fr); grid-template-areas: "head" "ladder" "hedge" "prints"; }
+  .sc-spot { font-size: 30px; }
+  .sc-prints { max-height: none; }
+}
+
+/* Mode Scalp : le bandeau général (cartes, jauge P/C, régime, niveaux) double ce que la
+   page affiche déjà ; on le masque pour que tout tienne sur un écran. */
+body.scalp-mode #cards, body.scalp-mode #pc-gauge, body.scalp-mode #regime-banner,
+body.scalp-mode .levels-row { display: none; }

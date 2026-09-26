@@ -133,6 +133,7 @@ TR: dict[str, dict[str, str]] = {
         "tab_profile": "Gamma Profile",
         "tab_greeks2": "Vanna & Charm",
         "tab_pos": "Positionnement",
+        "tab_scalp": "Scalp",
         "tab_tape": "Tape",
         "tape_hint": "Transactions individuelles en direct sur le sous-jacent sélectionné, "
                      "les plus récentes en haut. Bleu = acheteur agresse, rouge = vendeur "
@@ -325,6 +326,7 @@ TR: dict[str, dict[str, str]] = {
         "tab_profile": "Gamma Profile",
         "tab_greeks2": "Vanna & Charm",
         "tab_pos": "Positioning",
+        "tab_scalp": "Scalp",
         "tab_tape": "Tape",
         "tape_hint": "Live individual trades on the selected underlying, newest on top. "
                      "Blue = buyer lifts, red = seller hits (side reported by the source). "

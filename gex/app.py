@@ -19,7 +19,7 @@ from dash import Dash, ctx, dcc, html
 from dash.dependencies import Input, Output, State
 from dash.exceptions import PreventUpdate
 
-from . import digest, metrics, scales, store
+from . import digest, metrics, scales, scalp, store
 from .api import register_api
 from .tt_web import connection_status, register_oauth
 from .config import SETTINGS, UNDERLYINGS, targets
@@ -68,7 +68,7 @@ TAB_SELECTED = {"backgroundColor": "#1a1a19", "color": "#ffffff",
                 "border": "1px solid #2c2c2a", "borderTop": "2px solid #3987e5",
                 "padding": "8px 14px", "fontSize": "13px", "fontWeight": "600"}
 HINT_STYLE = {"color": "#898781", "fontSize": "11px", "marginBottom": "8px"}
-TABS = ("main", "profile", "greeks2", "heat", "pos", "tape")
+TABS = ("main", "scalp", "profile", "greeks2", "heat", "pos", "tape")
 
 
 def to_local(ts: pd.Series) -> pd.Series:
@@ -937,6 +937,118 @@ def hedge_fig(symbol: str, lang: str, window_min: int = 15,
     return fig
 
 
+# --- Page « Scalp » ---------------------------------------------------------
+# Un seul écran pour le scalping contrarien sur rejet : spot et extension, échelle
+# de niveaux avec distances, courbe de couverture live, gros prints. Les niveaux
+# et le régime se recalculent au plus toutes les 10 s (ils bougent avec les pulls,
+# pas avec chaque print) ; le spot, l'échelle et les graphes suivent le rythme du
+# tape (2 s).
+_SCALP_CACHE: dict[str, tuple[float, dict]] = {}
+SCALP_CACHE_S = 10.0
+
+
+def scalp_context(symbol: str) -> dict | None:
+    """Niveaux, régime, VIX et ouverture de séance, mis en cache 10 s."""
+    now = time.time()
+    hit = _SCALP_CACHE.get(symbol)
+    if hit and now - hit[0] < SCALP_CACHE_S:
+        return hit[1]
+    st = chain_state(symbol)
+    with STATE.lock:
+        df, snap, summary = st.enriched, st.snapshot, st.summary
+    if df is None or snap is None:
+        return None
+    ref = ref_spot(symbol, snap.spot)
+    side_spot = snap.spot if market_is_open() else ref
+    res = metrics.compute_levels(df, ref, side_spot, bucket="Tout")
+    levels = res["levels"]
+    walls = []
+    if not levels.empty:
+        labels = wall_labels(levels)
+        walls = [(labels[lv.strike], lv.strike, lv.gex) for lv in levels.itertuples()]
+    hist = store.load_history(symbol)
+    rd = None
+    if summary is not None:
+        rd = digest.symbol_reading(summary.net_gex, summary.net_dex,
+                                   hist["net_gex"] if not hist.empty and "net_gex" in hist else None)
+    day = datetime.now(ET).strftime("%Y-%m-%d")
+    bars = store.load_prices(symbol, day)
+    open_ = None
+    if not bars.empty:
+        rth = bars[pd.to_datetime(bars["timestamp"]) >= pd.Timestamp(f"{day} 09:30")]
+        open_ = float(rth["open"].iloc[0]) if not rth.empty else None
+    ctx = {"snap_spot": snap.spot,
+           "zg": summary.zero_gamma if summary else None,
+           "hvl": metrics.zero_gamma(df, snap.spot, weight_col="volume"),
+           "keys": res["keys"], "walls": walls, "gamma": rd["gamma"] if rd else None,
+           "open": open_, "vix": digest._current_vix()}
+    _SCALP_CACHE[symbol] = (now, ctx)
+    return ctx
+
+
+def _sc_fmt(v: float, dec: int = 0) -> str:
+    return f"{v:+,.{dec}f}".replace("-", "−")
+
+
+def scalp_head(symbol: str, lang: str, ctx: dict, spot: float) -> html.Div:
+    ext = scalp.extension_pts(spot, ctx["open"])
+    code, etat = scalp.session_state(datetime.now(ET))
+    zg = ctx["zg"]
+    chips = [html.Span(etat, className=f"sc-chip sc-state-{code}")]
+    if ctx["gamma"]:
+        neg = "Négatif" in ctx["gamma"]
+        chips.append(html.Span(ctx["gamma"], className="sc-chip " + ("sc-neg" if neg else "sc-pos")))
+    if zg is not None:
+        chips.append(html.Span(f"{_sc_fmt(spot - zg)} pts / Flip {zg:.0f}", className="sc-chip"))
+    vix = ctx["vix"]
+    if vix is not None:
+        g = digest.vix_grade(vix)
+        note = (" · allers-retours favorables" if vix > digest.VIX_SEUIL
+                else " · calme : direction possible" if vix < digest.VIX_BAS else "")
+        chips.append(html.Span(f"VIX {vix:.1f} {g['label']}{note}", className="sc-chip"))
+    ext_txt = (f"{_sc_fmt(ext)} pts depuis l'open" if ext is not None else "")
+    return html.Div([
+        html.Div([html.Span(f"{spot:,.2f}", className="sc-spot"),
+                  html.Span(symbol, className="sc-sym"),
+                  html.Span(ext_txt, className="sc-ext " + (
+                      "sc-pos" if (ext or 0) >= 0 else "sc-neg"))], className="sc-spotrow"),
+        html.Div(chips, className="sc-chips"),
+    ])
+
+
+_SC_KIND_COLOR = {"cw": "cw", "ps": "ps", "zg": "zg", "hvl": "hvl", "d1": "d1", "gex": "lvl"}
+
+
+def scalp_ladder(symbol: str, ctx: dict, spot: float) -> html.Div:
+    rungs = scalp.build_ladder(symbol, spot, ctx["zg"], ctx["hvl"], ctx["keys"], ctx["walls"])
+    if not rungs:
+        return html.Div("Niveaux indisponibles", className="hint")
+    haut, bas = scalp.nearest(rungs)
+    rows, spot_placed = [], False
+    spot_row = html.Div([html.Span("SPOT", className="sc-name"),
+                         html.Span(f"{spot:,.2f}", className="sc-price"),
+                         html.Span("", className="sc-dist")], className="sc-row sc-spot-row")
+    for r in rungs:
+        if not spot_placed and r.price < spot:
+            rows.append(spot_row)
+            spot_placed = True
+        color = C[_SC_KIND_COLOR[r.kind]]
+        cls = "sc-row" + (" sc-near" if r.near else "")
+        if r is haut or r is bas:
+            cls += " sc-next"
+        gex = (f" {r.gex / 1e9:+.1f}".replace("-", "−") + " Bn") if r.gex is not None else ""
+        rows.append(html.Div([
+            html.Span([html.Span("", className="sc-dot", style={"background": color}),
+                       r.name, html.Span(gex, className="sc-gex")], className="sc-name"),
+            html.Span(f"{r.price:,.0f}", className="sc-price"),
+            html.Span(_sc_fmt(r.dist), className="sc-dist " + ("sc-pos" if r.dist >= 0 else "sc-neg")),
+        ], className=cls))
+    if not spot_placed:
+        rows.append(spot_row)
+    return html.Div(rows, className="sc-rows")
+
+
+
 def flow_fig(symbol: str, lang: str, day: str | None = None) -> go.Figure:
     day = day or datetime.now(ET).strftime("%Y-%m-%d")
     flows, src = flow_source(symbol, day, ("net_delta",))
@@ -1638,6 +1750,34 @@ def create_app() -> Dash:
                 ], className="row"),
             ]),
 
+            html.Div(id="pane-scalp", children=[
+                html.Div([
+                    html.Div(id="scalp-head", className="sc-head"),
+                    html.Div([html.Div("Niveaux · distance au spot (pts)", className="sc-title"),
+                              html.Div(id="scalp-ladder")], className="sc-card sc-ladder"),
+                    html.Div([
+                        html.Div([html.Span("Couverture des dealers", className="sc-title"),
+                                  dcc.RadioItems(id="scalp-window", className="seg", inline=True,
+                                                 value=-1,
+                                                 options=[{"label": "● Live 5 min", "value": -1},
+                                                          {"label": "15 min", "value": 15},
+                                                          {"label": "30 min", "value": 30}])],
+                                 className="sc-cardhead"),
+                        dcc.Graph(config=GRAPH_CONFIG, id="scalp-hedge"),
+                    ], className="sc-card sc-hedge"),
+                    html.Div([
+                        html.Div([html.Span("Gros prints", className="sc-title"),
+                                  dcc.RadioItems(id="scalp-min", className="seg", inline=True,
+                                                 value=5,
+                                                 options=[{"label": "Tout", "value": 0},
+                                                          {"label": "≥ 5", "value": 5},
+                                                          {"label": "≥ 20", "value": 20}])],
+                                 className="sc-cardhead"),
+                        html.Div(id="scalp-prints"),
+                    ], className="sc-card sc-prints"),
+                ], className="sc-grid"),
+            ]),
+
             html.Div(id="pane-profile", children=[
                 html.Div(id="profile-hint", className="hint"),
                 dcc.Graph(config=GRAPH_CONFIG, id="profile", style={"marginBottom": "12px"}),
@@ -1769,6 +1909,17 @@ def create_app() -> Dash:
         """,
         Output("lang", "value"),
         Input("lang-boot", "data"),
+    )
+    # Onglet Scalp : classe sur <body> qui masque le bandeau général (cf. style.css)
+    app.clientside_callback(
+        """
+        function(tab) {
+            document.body.classList.toggle('scalp-mode', tab === 'scalp');
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("tab", "className"),
+        Input("tab", "value"),
     )
     app.clientside_callback(
         "function(l) { window.localStorage.setItem('gex-lang', l); return window.dash_clientside.no_update; }",
@@ -2158,6 +2309,29 @@ def create_app() -> Dash:
         if tab != "tape":
             raise PreventUpdate
         return hedge_fig(symbol, lang, int(window or 0))    # -1 = live à la seconde
+
+    @app.callback(
+        [Output("scalp-head", "children"), Output("scalp-ladder", "children"),
+         Output("scalp-hedge", "figure"), Output("scalp-prints", "children")],
+        [Input("tape-tick", "n_intervals"), Input("tab", "value"),
+         Input("symbol", "value"), Input("lang", "value"),
+         Input("scalp-window", "value"), Input("scalp-min", "value")],
+    )
+    def refresh_scalp(_, tab, symbol, lang, window, min_size):
+        if tab != "scalp":
+            raise PreventUpdate
+        hedge = hedge_fig(symbol, lang, int(window if window is not None else -1))
+        hedge.update_layout(height=300, uirevision=f"scalp-{symbol}-{window}")
+        prints = tape_table(symbol, lang, min_size=float(min_size or 0), include_combos=False)
+        ctx = scalp_context(symbol)
+        if ctx is None:
+            wait = html.Div(t(lang, "waiting_native" if symbol in ("NQ", "ES")
+                              else "waiting_first_pull"), className="hint")
+            return wait, wait, hedge, prints
+        spot = QUOTES.price(symbol) if credentials_present() else None
+        spot = float(spot) if spot else float(ctx["snap_spot"])
+        return (scalp_head(symbol, lang, ctx, spot), scalp_ladder(symbol, ctx, spot),
+                hedge, prints)
 
     @app.callback(
         Output("tape-table", "children"),
