@@ -1019,8 +1019,7 @@ def scalp_absorb_badge(symbol: str, absorb: dict | None) -> html.Span:
                            "— candidat, pas confirmé (top-of-book seulement)")
 
 
-def scalp_head(symbol: str, lang: str, ctx: dict, spot: float,
-               absorb: dict | None = None) -> html.Div:
+def scalp_head(symbol: str, lang: str, ctx: dict, spot: float) -> html.Div:
     ext = scalp.extension_pts(spot, ctx["open"])
     code, etat = scalp.session_state(datetime.now(ET))
     zg = ctx["zg"]
@@ -1043,7 +1042,6 @@ def scalp_head(symbol: str, lang: str, ctx: dict, spot: float,
                   html.Span(ext_txt, className="sc-ext " + (
                       "sc-pos" if (ext or 0) >= 0 else "sc-neg"))], className="sc-spotrow"),
         html.Div(chips, className="sc-chips"),
-        scalp_absorb_badge(symbol, absorb),
     ])
 
 
@@ -1073,7 +1071,7 @@ def scalp_inputs(symbol: str, spot: float) -> tuple[float | None, float, float]:
     return move, net, gross
 
 
-def scalp_banner(symbol: str, ctx: dict, spot: float) -> html.Div:
+def scalp_banner(symbol: str, ctx: dict, spot: float, absorb: dict | None = None) -> html.Div:
     move, net, gross = scalp_inputs(symbol, spot)
     zg = ctx.get("zg")
     neg = bool(ctx.get("gamma")) and "Négatif" in ctx["gamma"]
@@ -1081,9 +1079,14 @@ def scalp_banner(symbol: str, ctx: dict, spot: float) -> html.Div:
     voyants = [html.Span(f"{'●' if on else '○'} {name}", className="sc-light" + (" on" if on else ""))
                for name, on in a["lights"].items()]
     return html.Div([
-        html.Div(a["title"], className="sc-banner-title"),
-        html.Div(a["detail"], className="sc-banner-detail"),
-        html.Div(voyants, className="sc-lights"),
+        html.Div([
+            html.Div(a["title"], className="sc-banner-title"),
+            html.Div(a["detail"], className="sc-banner-detail"),
+            html.Div(voyants, className="sc-lights"),
+        ], className="sc-banner-main"),
+        # à droite du bandeau (passe en dessous si la place manque) : la place
+        # vide de la bannière était l'endroit naturel plutôt qu'un bloc de plus
+        html.Div(scalp_absorb_badge(symbol, absorb), className="sc-banner-side"),
     ], className=f"sc-banner sc-tone-{a['tone']}")
 
 
@@ -2517,7 +2520,7 @@ def create_app() -> Dash:
         price = scalp_price_fig(symbol, ctx, spot)
         price.update_layout(uirevision=f"scalp-price-{symbol}")
         absorb = scalp_absorption(symbol)
-        return (scalp_banner(symbol, ctx, spot), scalp_head(symbol, lang, ctx, spot, absorb),
+        return (scalp_banner(symbol, ctx, spot, absorb), scalp_head(symbol, lang, ctx, spot),
                 scalp_ladder(symbol, ctx, spot), hedge, prints, price)
 
     @app.callback(

@@ -672,7 +672,14 @@ a.scalp-link, a.full-link { text-decoration: none; }
 
 /* Bandeau d'amplification : en tête de la page Scalp */
 .sc-bannerbox { grid-area: banner; }
-.sc-banner { border: 1px solid var(--line); border-left-width: 6px; border-radius: 10px; padding: 10px 14px; background: var(--surface); }
+.sc-banner {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  border: 1px solid var(--line); border-left-width: 6px; border-radius: 10px;
+  padding: 10px 14px; background: var(--surface);
+}
+.sc-banner-main { flex: 1 1 260px; min-width: 0; }
+.sc-banner-side { flex: 0 0 auto; display: flex; align-items: center; }
+.sc-banner-side .sc-absorb-active { margin-top: 0; }   /* alignée au bandeau, pas empilée dessous */
 .sc-banner-title { font-size: 17px; font-weight: 700; letter-spacing: .01em; }
 .sc-banner-detail { font-size: 12px; color: var(--ink2); margin-top: 3px; font-variant-numeric: tabular-nums; }
 .sc-lights { display: flex; gap: 12px; margin-top: 6px; font-size: 12px; color: var(--muted); }
