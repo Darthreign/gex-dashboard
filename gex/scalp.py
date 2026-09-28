@@ -152,7 +152,8 @@ def assess(symbol: str, move_pts: float | None, net_musd: float, gross_musd: flo
     lights = {"mouvement": direction != 0,
               "flux": direction != 0 and flow_dir == direction,
               "gamma": gamma_light}
-    side = "haussière" if direction > 0 else "baissière"
+    side = "haussière" if direction > 0 else "baissière"     # accorde avec « amplification »
+    side_m = "haussier" if direction > 0 else "baissier"     # accorde avec « mouvement »
     flux_txt = (f"flux net {net_musd:+.0f} M$ ({ratio:.0%} à sens unique)" if gross_musd > 0
                 else "aucun flux de couverture")
     detail = (f"Mouvement {move_pts:+.0f} pts / 5 min · {flux_txt} · "
@@ -168,8 +169,8 @@ def assess(symbol: str, move_pts: float | None, net_musd: float, gross_musd: flo
                 "detail": detail, "lights": lights}
     if flow_dir == -direction:
         return {"state": "brake", "tone": "ok", "direction": direction,
-                "title": f"Couverture à contre-courant : frein sur le mouvement {side}",
+                "title": f"Couverture à contre-courant : frein sur le mouvement {side_m}",
                 "detail": detail, "lights": lights}
     return {"state": "unsupported", "tone": "ok", "direction": direction,
-            "title": f"Mouvement {side} sans soutien des dealers — extension à corriger ?",
+            "title": f"Mouvement {side_m} sans soutien des dealers — extension à corriger ?",
             "detail": detail, "lights": lights}

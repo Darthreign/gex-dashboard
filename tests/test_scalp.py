@@ -86,11 +86,14 @@ def test_amplification_baissiere_en_gamma_negatif():
 def test_couverture_a_contre_courant_est_un_frein():
     a = _a(+40.0, -300.0, 400.0)
     assert a["state"] == "brake" and a["tone"] == "ok"
+    assert "mouvement haussier" in a["title"]
 
 
 def test_mouvement_sans_soutien_des_dealers():
     a = _a(+40.0, +10.0, 400.0)                       # flux quasi équilibré
     assert a["state"] == "unsupported" and a["tone"] == "ok"
+    assert "Mouvement haussier" in a["title"]
+    assert "Mouvement baissier" in _a(-40.0, -10.0, 400.0)["title"]
     assert scalp.assess("NQ", 40.0, 50.0, 60.0, False, None)["state"] == "unsupported"  # brut < 100
 
 
