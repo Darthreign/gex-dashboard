@@ -16,6 +16,21 @@ from datetime import datetime, time
 NEAR_PTS = {"NQ": 15.0, "ES": 4.0, "NDX": 15.0, "SPX": 4.0, "SPY": 0.4, "QQQ": 0.4}
 DEFAULT_NEAR = 10.0
 
+# Pas de cotation (tick) du future — un prix affiché qui n'en est pas multiple
+# est impossible sur le marché (ex. le milieu bid/ask d'une fourchette de 0.25
+# tombe souvent sur un quart de pas). Sert de garde-fou même quand la source
+# est déjà censée être tick-accurate.
+TICK_SIZE = {"NQ": 0.25, "ES": 0.25}
+
+
+def round_to_tick(symbol: str, price: float) -> float:
+    """Arrondit au pas de cotation du symbole ; renvoie `price` telle quelle si
+    le symbole n'a pas de pas connu (options, indices cash…)."""
+    tick = TICK_SIZE.get(symbol.upper())
+    if not tick:
+        return price
+    return round(round(price / tick) * tick, 10)      # round(...,10) : purge le bruit flottant
+
 OPEN_ET = time(9, 30)
 CLOSE_ET = time(16, 0)
 CONTRARIAN_CUT_ET = time(10, 15)      # 16h15 Paris : le contrarien devient risqué

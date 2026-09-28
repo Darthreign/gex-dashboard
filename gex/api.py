@@ -399,6 +399,23 @@ def register_api(app) -> None:
             out["change_pct"] = round((float(spot) - open_) / open_ * 100, 3) if open_ else None
         return jsonify(out)
 
+    @server.route("/api/v1/<symbol>/last")
+    def _last_trade(symbol):
+        """Dernier prix RÉELLEMENT échangé, arrondi au pas de cotation — rien
+        d'autre. Pour la page /scalp : le navigateur l'interroge lui-même
+        toutes les 400 ms et écrit le nombre directement dans la page, SANS
+        passer par un cycle Dash (reçoit -> reconstruit tout le bloc -> renvoie)
+        qui ferait clignoter le reste de l'écran. D'où une route minimale,
+        distincte de `/spot` (qui renvoie un milieu bid/ask lissé, plus lent à
+        calculer et pas tick-accurate — cf. gex/rtquote.py Tick.price)."""
+        from . import scalp
+        from .rtquote import QUOTES, credentials_present
+        symbol = symbol.upper()
+        px = QUOTES.last(symbol) if credentials_present() else None
+        if px is None:
+            return jsonify({"error": "indisponible"}), 404
+        return jsonify({"symbol": symbol, "price": scalp.round_to_tick(symbol, float(px))})
+
     @server.route("/api/v1/digest")
     def _digest():
         """Verdict d'état du gamma prêt à diffuser (cf. gex/digest.py).

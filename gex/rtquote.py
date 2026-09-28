@@ -309,6 +309,16 @@ class RealtimeQuotes:
             t = self.ticks.get(key)
             return t.price if t else None
 
+    def last(self, key: str) -> float | None:
+        """Dernier prix RÉELLEMENT échangé (événement Trade), sans le lissage
+        milieu-de-fourchette de `price()`. Sur un future, `price()` peut tomber
+        entre deux pas de cotation (30533.625 sur un pas de 0.25) — inexploitable
+        pour un affichage de scalping, où seul un prix qui a vraiment eu lieu a
+        un sens. None si aucun Trade n'est encore arrivé pour cette clé."""
+        with self.lock:
+            t = self.ticks.get(key)
+            return t.last if t else None
+
     def status(self, market_open: bool = True) -> tuple[str, str]:
         """(état, détail) — état ∈ off | connected | degraded | disconnected.
 

@@ -110,3 +110,10 @@ def test_prix_qui_fonce_vers_le_flip_allume_le_voyant_gamma():
     assert a["lights"]["gamma"] is True and "prix vers le Flip" in a["detail"]
     b = _a(+40.0, +300.0, 400.0, neg=False, flip=-30.0)     # on monte, le Flip est derrière
     assert b["lights"]["gamma"] is False
+
+
+def test_round_to_tick_nq_es():
+    assert scalp.round_to_tick("NQ", 30533.625) == 30533.5   # au plus proche pas de 0.25
+    assert scalp.round_to_tick("NQ", 30533.13) == 30533.25
+    assert scalp.round_to_tick("ES", 5000.37) == 5000.25
+    assert scalp.round_to_tick("SPX", 5000.37) == 5000.37    # pas de pas connu : inchangé

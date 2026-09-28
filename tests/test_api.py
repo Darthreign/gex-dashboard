@@ -229,3 +229,20 @@ def test_cors_ouvert_car_le_garde_fou_est_le_scope_reseau():
     _seed("TST5")
     r = _client().get("/api/v1/symbols")
     assert r.headers.get("Access-Control-Allow-Origin") == "*"
+
+
+def test_last_trade_arrondit_au_pas_et_ignore_le_milieu_bid_ask(monkeypatch):
+    """`/api/v1/<symbol>/last` : le dernier prix RÉELLEMENT échangé, tick-accurate
+    — jamais le milieu bid/ask de `/spot`, qui peut tomber hors du pas de cotation."""
+    from gex import rtquote
+    monkeypatch.setattr(rtquote, "credentials_present", lambda: True)
+    monkeypatch.setattr(rtquote.QUOTES, "last", lambda k: 30533.75 if k == "NQ" else None)
+    r = _client().get("/api/v1/NQ/last")
+    assert r.status_code == 200 and r.get_json() == {"symbol": "NQ", "price": 30533.75}
+
+
+def test_last_trade_404_si_indisponible(monkeypatch):
+    from gex import rtquote
+    monkeypatch.setattr(rtquote, "credentials_present", lambda: True)
+    monkeypatch.setattr(rtquote.QUOTES, "last", lambda k: None)
+    assert _client().get("/api/v1/NQ/last").status_code == 404

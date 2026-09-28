@@ -1008,7 +1008,7 @@ def scalp_head(symbol: str, lang: str, ctx: dict, spot: float) -> html.Div:
         chips.append(html.Span(f"VIX {vix:.1f} {g['label']}{note}", className="sc-chip"))
     ext_txt = (f"{_sc_fmt(ext)} pts depuis l'open" if ext is not None else "")
     return html.Div([
-        html.Div([html.Span(f"{spot:,.2f}", className="sc-spot"),
+        html.Div([html.Span(f"{spot:,.2f}", id="sc-live-price", className="sc-spot"),
                   html.Span(symbol, className="sc-sym"),
                   html.Span(ext_txt, className="sc-ext " + (
                       "sc-pos" if (ext or 0) >= 0 else "sc-neg"))], className="sc-spotrow"),
@@ -1713,6 +1713,10 @@ def create_app() -> Dash:
     # Dash les sert dans tous les cas sous /assets.
     app = Dash(__name__, title="GEX Dashboard",
                assets_folder=str(Path(__file__).resolve().parent / "assets"))
+    # Le ticker de prix (cf. plus bas) cible "sc-live-price", qui n'existe que
+    # dans le sous-arbre RENVOYÉ par refresh_scalp — absent de app.layout au
+    # démarrage. Sans ceci, Dash refuse l'enregistrement du callback.
+    app.config.suppress_callback_exceptions = True
     enabled = targets()
 
     def ctl(label_id, control):
@@ -1932,6 +1936,13 @@ def create_app() -> Dash:
             dcc.Interval(id="tick", interval=SETTINGS.flow_interval_s * 1000),
             # le Tape doit défiler vivant, pas au rythme des pulls (60 s)
             dcc.Interval(id="tape-tick", interval=2000),
+            # Ticker de prix /scalp : PAS un cycle Python (reçoit -> reconstruit ->
+            # renvoie tout le bloc, qui fait clignoter bandeau/échelle/surlignages à
+            # chaque tour). Ce timer ne pilote qu'un fetch JS direct qui écrit UN
+            # SEUL nombre dans la page (cf. clientside_callback plus bas) : reçu,
+            # affiché, rien d'autre ne bouge. Le reste de la page (bandeau, échelle,
+            # courbe, prints) reste sur tape-tick (2 s), inchangé.
+            dcc.Interval(id="price-tick", interval=400),
             # le voyant du flux a son propre rythme : une déconnexion doit se
             # voir tout de suite, pas au prochain pull (60 s)
             dcc.Interval(id="rt-tick", interval=5000),
@@ -2028,6 +2039,38 @@ def create_app() -> Dash:
         Output("lang-boot", "data"),
         Input("lang", "value"),
         prevent_initial_call=True,
+    )
+
+    # Ticker de prix /scalp : reçoit, affiche, RIEN D'AUTRE ne se met à jour.
+    # Un fetch direct sur la route la plus nue possible (/api/v1/<SYM>/last,
+    # juste le dernier prix échangé), et le texte est écrit dans la page sans
+    # passer par un cycle Dash (pas de reconstruction du bloc, donc pas de
+    # clignotement). N'agit que sur /scalp, et seulement pour NQ/ES.
+    app.clientside_callback(
+        """
+        async function(_, symbol, path) {
+            if (!(path || '/').startsWith('/scalp') || !['NQ', 'ES'].includes(symbol)) {
+                return window.dash_clientside.no_update;
+            }
+            try {
+                const r = await fetch(`/api/v1/${symbol}/last`);
+                if (!r.ok) return window.dash_clientside.no_update;
+                const d = await r.json();
+                if (typeof d.price !== 'number') return window.dash_clientside.no_update;
+                // même format que le rendu Python (f"{spot:,.2f}") : virgule des
+                // milliers, point décimal — sinon le format alterne visuellement
+                // entre les deux cycles (JS vs Python), un clignotement de plus.
+                return d.price.toLocaleString('en-US',
+                    {minimumFractionDigits: 2, maximumFractionDigits: 2});
+            } catch (e) {
+                return window.dash_clientside.no_update;
+            }
+        }
+        """,
+        Output("sc-live-price", "children"),
+        Input("price-tick", "n_intervals"),
+        Input("symbol", "value"),
+        Input("url", "pathname"),
     )
 
     @app.callback(
@@ -2432,8 +2475,11 @@ def create_app() -> Dash:
             wait = html.Div(t(lang, "waiting_native" if symbol in ("NQ", "ES")
                               else "waiting_first_pull"), className="hint")
             return wait, wait, wait, hedge, prints, empty_fig("En attente des niveaux…", symbol)
-        spot = QUOTES.price(symbol) if credentials_present() else None
-        spot = float(spot) if spot else float(ctx["snap_spot"])
+        # dernier prix RÉELLEMENT échangé (jamais le milieu bid/ask, qui peut
+        # tomber entre deux pas de cotation — cf. gex/rtquote.py Tick.price)
+        raw = QUOTES.last(symbol) if credentials_present() else None
+        raw = float(raw) if raw else float(ctx["snap_spot"])
+        spot = scalp.round_to_tick(symbol, raw)
         price = scalp_price_fig(symbol, ctx, spot)
         price.update_layout(uirevision=f"scalp-price-{symbol}")
         return (scalp_banner(symbol, ctx, spot), scalp_head(symbol, lang, ctx, spot),
