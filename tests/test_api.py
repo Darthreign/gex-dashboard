@@ -231,18 +231,73 @@ def test_cors_ouvert_car_le_garde_fou_est_le_scope_reseau():
     assert r.headers.get("Access-Control-Allow-Origin") == "*"
 
 
-def test_last_trade_arrondit_au_pas_et_ignore_le_milieu_bid_ask(monkeypatch):
-    """`/api/v1/<symbol>/last` : le dernier prix RÉELLEMENT échangé, tick-accurate
-    — jamais le milieu bid/ask de `/spot`, qui peut tomber hors du pas de cotation."""
-    from gex import rtquote
+def test_last_trade_autonome_repli_sur_quotes_si_ticks_muet(monkeypatch):
+    """Mode autonome (pas de capture séparée) : tickcapture.CAPTURE n'a encore
+    rien vu -> repli sur le flux Quote (rtquote.QUOTES.last), arrondi au pas."""
+    from gex import capturebus, rtquote
+    from gex.tickcapture import CAPTURE
+    monkeypatch.setattr(capturebus, "remote_url", lambda: None)
+    monkeypatch.setattr(CAPTURE, "last_price", lambda s: None)
     monkeypatch.setattr(rtquote, "credentials_present", lambda: True)
     monkeypatch.setattr(rtquote.QUOTES, "last", lambda k: 30533.75 if k == "NQ" else None)
     r = _client().get("/api/v1/NQ/last")
     assert r.status_code == 200 and r.get_json() == {"symbol": "NQ", "price": 30533.75}
 
 
+def test_last_trade_autonome_priorite_au_tick_accurate(monkeypatch):
+    """Quand tickcapture.CAPTURE a une valeur, elle passe AVANT le flux Quote
+    (conflaté, moins précis) — jamais l'inverse."""
+    from gex import capturebus, rtquote
+    from gex.tickcapture import CAPTURE
+    monkeypatch.setattr(capturebus, "remote_url", lambda: None)
+    monkeypatch.setattr(CAPTURE, "last_price", lambda s: 30500.25 if s == "NQ" else None)
+    monkeypatch.setattr(rtquote, "credentials_present", lambda: True)
+    monkeypatch.setattr(rtquote.QUOTES, "last", lambda k: 99999.0)   # ne doit jamais être lu
+    r = _client().get("/api/v1/NQ/last")
+    assert r.get_json()["price"] == 30500.25
+
+
+def test_last_trade_separe_lit_le_miroir_remote_tape(monkeypatch):
+    """Mode séparé (GEX_CAPTURE_URL défini) : la valeur vient du RemoteTape
+    (flowtape.TAPE, remplacé au démarrage du dashboard — cf. gex/run.py)."""
+    from gex import capturebus, flowtape
+
+    class _FauxRemote:
+        def last_price(self, s):
+            return 30777.5 if s == "NQ" else None
+
+    monkeypatch.setattr(capturebus, "remote_url", lambda: "ws://127.0.0.1:8765")
+    monkeypatch.setattr(flowtape, "TAPE", _FauxRemote())
+    r = _client().get("/api/v1/NQ/last")
+    assert r.get_json()["price"] == 30777.5
+
+
 def test_last_trade_404_si_indisponible(monkeypatch):
-    from gex import rtquote
+    from gex import capturebus, rtquote
+    from gex.tickcapture import CAPTURE
+    monkeypatch.setattr(capturebus, "remote_url", lambda: None)
+    monkeypatch.setattr(CAPTURE, "last_price", lambda s: None)
     monkeypatch.setattr(rtquote, "credentials_present", lambda: True)
     monkeypatch.setattr(rtquote.QUOTES, "last", lambda k: None)
     assert _client().get("/api/v1/NQ/last").status_code == 404
+
+
+def test_stream_route_refuse_les_symboles_hors_nq_es():
+    assert _client().get("/api/v1/SPX/stream").status_code == 404
+
+
+def test_stream_route_emet_un_evenement_sse_par_changement(monkeypatch):
+    """Le flux SSE n'émet qu'au changement de prix, jamais à un rythme fixe :
+    trois valeurs successives dont un doublon -> deux événements seulement."""
+    from gex import api, capturebus
+    monkeypatch.setattr(capturebus, "remote_url", lambda: None)
+    valeurs = iter([30500.0, 30500.0, 30500.25])
+    monkeypatch.setattr(api, "_futures_last_price", lambda s: next(valeurs, 30500.25))
+    monkeypatch.setattr(api.time, "sleep", lambda s: None)   # la boucle ne doit pas dormir en test
+
+    resp = _client().get("/api/v1/NQ/stream")
+    assert resp.mimetype == "text/event-stream"
+    gen = resp.response
+    first = next(gen)
+    second = next(gen)
+    assert first == b"data: 30500.0\n\n" and second == b"data: 30500.25\n\n"

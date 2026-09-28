@@ -17,6 +17,7 @@ respecter : ce serveur ne doit pas être exposé au-delà de la machine locale
 """
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from datetime import time as dt_time
 
@@ -26,6 +27,31 @@ from flask import Flask, jsonify, request
 from . import metrics
 from .metrics import ET, EXPIRY_BUCKETS
 from .scheduler import STATE
+
+
+def _futures_last_price(symbol: str) -> float | None:
+    """Dernier prix RÉELLEMENT échangé pour NQ/ES, tick-accurate.
+
+    Mode séparé (GEX_CAPTURE_URL défini) : `flowtape.TAPE` a été remplacé par un
+    `RemoteTape` au démarrage du dashboard (cf. gex/run.py) — c'est lui qui reçoit
+    le prix relayé depuis `tickcapture.TickCapture` du process capture. Mode
+    autonome : `tickcapture.CAPTURE` tourne dans CE process, on le lit directement.
+    Repli sur le flux Quote conflaté (`rtquote.QUOTES.last`) si rien n'est encore
+    arrivé par cette voie (ex. juste après un démarrage) ou pour un symbole hors
+    NQ/ES qu'un appelant interrogerait quand même."""
+    from . import flowtape
+    from .capturebus import remote_url
+    from .rtquote import QUOTES, credentials_present
+
+    px = None
+    if remote_url():
+        px = flowtape.TAPE.last_price(symbol)
+    else:
+        from .tickcapture import CAPTURE
+        px = CAPTURE.last_price(symbol)
+    if px is None and credentials_present():
+        px = QUOTES.last(symbol)
+    return px
 
 
 def _summary_dict(symbol: str, s) -> dict:
@@ -402,19 +428,51 @@ def register_api(app) -> None:
     @server.route("/api/v1/<symbol>/last")
     def _last_trade(symbol):
         """Dernier prix RÉELLEMENT échangé, arrondi au pas de cotation — rien
-        d'autre. Pour la page /scalp : le navigateur l'interroge lui-même
-        toutes les 400 ms et écrit le nombre directement dans la page, SANS
-        passer par un cycle Dash (reçoit -> reconstruit tout le bloc -> renvoie)
-        qui ferait clignoter le reste de l'écran. D'où une route minimale,
-        distincte de `/spot` (qui renvoie un milieu bid/ask lissé, plus lent à
-        calculer et pas tick-accurate — cf. gex/rtquote.py Tick.price)."""
+        d'autre. Distincte de `/spot` (qui renvoie un milieu bid/ask lissé, pas
+        tick-accurate — cf. gex/rtquote.py Tick.price). Gardée pour un client
+        qui préfère interroger plutôt que s'abonner ; la page /scalp utilise
+        désormais `/stream` (SSE, poussé) ci-dessous."""
         from . import scalp
-        from .rtquote import QUOTES, credentials_present
         symbol = symbol.upper()
-        px = QUOTES.last(symbol) if credentials_present() else None
+        px = _futures_last_price(symbol)
         if px is None:
             return jsonify({"error": "indisponible"}), 404
         return jsonify({"symbol": symbol, "price": scalp.round_to_tick(symbol, float(px))})
+
+    @server.route("/api/v1/<symbol>/stream")
+    def _last_trade_stream(symbol):
+        """Flux SSE (Server-Sent Events) du dernier prix RÉELLEMENT échangé :
+        le navigateur ouvre CETTE connexion une fois (EventSource JS), et reçoit
+        une ligne à chaque fois que le prix change — sans jamais la réinterroger.
+        Poussé jusqu'ici depuis `tickcapture.TickCapture` (tick-accurate, pas le
+        flux Quote conflaté) via la liaison capturebus déjà en place (cf.
+        gex/capture.py, gex/capturebus.py). Limité à NQ/ES : c'est le seul
+        périmètre où `_futures_last_price` a un sens (options/indices n'ont pas
+        cette source tick-par-tick)."""
+        from flask import Response
+
+        from . import scalp
+        symbol = symbol.upper()
+        if symbol not in ("NQ", "ES"):
+            return jsonify({"error": "symbole non couvert (NQ/ES seulement)"}), 404
+
+        def gen():
+            last_sent = None
+            # ~10 vérifications/s : la boucle est en mémoire (aucun réseau), le
+            # coût est négligeable ; on n'ÉMET vers le navigateur que sur
+            # changement, jamais à un rythme fixe (c'est ça, le "poussé").
+            while True:
+                px = _futures_last_price(symbol)
+                if px is not None:
+                    rounded = scalp.round_to_tick(symbol, float(px))
+                    if rounded != last_sent:
+                        last_sent = rounded
+                        yield f"data: {rounded}\n\n"
+                time.sleep(0.1)
+
+        return Response(gen(), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache",
+                                 "X-Accel-Buffering": "no"})
 
     @server.route("/api/v1/digest")
     def _digest():

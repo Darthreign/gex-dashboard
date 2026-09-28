@@ -84,3 +84,13 @@ def test_ecriture_sur_fichier_existant_sans_les_nouvelles_colonnes(tmp_path, mon
     df = pd.read_parquet(tmp_path / "ticks" / "NQ" / "2026-09-28.parquet")
     assert len(df) == 2 and pd.isna(df["bid_size"].iloc[0]) and df["bid_size"].iloc[1] == 5.0
     assert df["volume"].dtype.kind == "i"                         # le schéma de base reste entier
+
+
+def test_last_price_mis_a_jour_a_chaque_print():
+    cap = TickCapture()
+    assert cap.last_price("NQ") is None
+    cap.record(UNIV, _sale(price=30910.0), 1.0)
+    assert cap.last_price("NQ") == 30910.0
+    cap.record(UNIV, _sale(price=30910.25), 2.0)
+    assert cap.last_price("NQ") == 30910.25
+    assert cap.last_price("ES") is None                    # jamais vu -> None, pas 0

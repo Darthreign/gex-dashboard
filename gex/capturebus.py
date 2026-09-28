@@ -50,12 +50,20 @@ def remote_url() -> str | None:
 # Côté capture : serveur
 # ---------------------------------------------------------------------------
 
-async def _handler(ws, tape: FlowTape) -> None:
+async def _handler(ws, tape: FlowTape, ticks=None) -> None:
     marks = None                                   # None => instantané au 1er envoi
     while True:
         payload, marks = tape.export_delta(marks)
         payload["type"] = "delta"
         payload["sent"] = time.time()
+        if ticks is not None:
+            # Dernier prix RÉELLEMENT échangé (TickCapture, tick-accurate — pas le
+            # flux Quote conflaté de rtquote.QUOTES), piggybacké sur ce même envoi
+            # périodique plutôt qu'un canal séparé. Omis si aucun prix encore connu.
+            prices = {s: p for s in ("NQ", "ES")
+                     if (p := ticks.last_price(s)) is not None}
+            if prices:
+                payload["ticks"] = prices
         await ws.send(json.dumps(payload))
         await asyncio.sleep(PUSH_INTERVAL_S)
 
@@ -71,13 +79,13 @@ def bind_hosts() -> list[str]:
     return hosts or [DEFAULT_HOST]
 
 
-async def _serve(tape: FlowTape, host, port: int) -> None:
+async def _serve(tape: FlowTape, host, port: int, ticks=None) -> None:
     import websockets
     from contextlib import AsyncExitStack
 
     async def handler(ws):
         try:
-            await _handler(ws, tape)
+            await _handler(ws, tape, ticks)
         except websockets.ConnectionClosed:
             pass
 
@@ -102,15 +110,17 @@ async def _serve(tape: FlowTape, host, port: int) -> None:
         await asyncio.Future()                     # tourne indéfiniment
 
 
-def serve(tape: FlowTape, host=DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
+def serve(tape: FlowTape, host=DEFAULT_HOST, port: int = DEFAULT_PORT, ticks=None) -> None:
     """Bloque : sert `tape` aux abonnés. À lancer dans le process capture.
-    `host` : une adresse, ou une liste (chacune indisponible est ignorée)."""
-    asyncio.run(_serve(tape, host, port))
+    `host` : une adresse, ou une liste (chacune indisponible est ignorée).
+    `ticks` : un `tickcapture.TickCapture`, pour piggybacker le dernier prix
+    échangé NQ/ES sur ce même envoi (cf. `_handler`) ; omis si None."""
+    asyncio.run(_serve(tape, host, port, ticks))
 
 
 def serve_in_thread(tape: FlowTape, host=DEFAULT_HOST,
-                    port: int = DEFAULT_PORT) -> threading.Thread:
-    th = threading.Thread(target=serve, args=(tape, host, port),
+                    port: int = DEFAULT_PORT, ticks=None) -> threading.Thread:
+    th = threading.Thread(target=serve, args=(tape, host, port, ticks),
                           name="capturebus", daemon=True)
     th.start()
     return th
@@ -133,6 +143,7 @@ class RemoteTape:
         self._prints: dict[str, deque] = {}
         self._pts: dict[str, deque] = {}
         self._rows: dict[str, list[dict]] = {}
+        self._last_price: dict[str, float] = {}
         self._status: tuple[str, int] = ("connecting", 0)
         self._last_msg = 0.0
         self._started = False
@@ -191,6 +202,9 @@ class RemoteTape:
             st = msg.get("status")
             if st:
                 self._status = (st[0], int(st[1]))
+            for s, px in (msg.get("ticks") or {}).items():
+                if isinstance(px, (int, float)):
+                    self._last_price[s] = float(px)
             self._last_msg = time.time() if now is None else now
 
     # -- lecture (même interface que FlowTape) ----------------------------
@@ -227,3 +241,10 @@ class RemoteTape:
         now = time.time() if now is None else now
         with self.lock:
             return [p for p in self._pts.get(symbol, ()) if p[0] >= now - window_s]
+
+    def last_price(self, symbol: str) -> float | None:
+        """Dernier prix RÉELLEMENT échangé pour `symbol` ("NQ"/"ES"), relayé
+        depuis `tickcapture.TickCapture` du process capture. None tant qu'aucun
+        n'est encore arrivé."""
+        with self.lock:
+            return self._last_price.get(symbol)

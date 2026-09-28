@@ -64,7 +64,9 @@ def main(host=None, port: int = DEFAULT_PORT) -> None:
     attendre_spot()         # le tape, lui, a besoin du premier prix pour son univers
     TAPE.start()
     threading.current_thread().name = "capture-main"
-    serve(TAPE, host or bind_hosts(), port)  # bloque : c'est ce qui garde le process en vie
+    # bloque : c'est ce qui garde le process en vie. `ticks=CAPTURE` fait relayer
+    # le dernier prix réellement échangé NQ/ES au dashboard (cf. capturebus).
+    serve(TAPE, host or bind_hosts(), port, ticks=CAPTURE)
 
 
 if __name__ == "__main__":

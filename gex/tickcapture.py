@@ -92,6 +92,16 @@ class TickCapture:
         # Dernier état de cotation par contrat (événement Quote) : sert à ajouter
         # les TAILLES du meilleur bid / ask à chaque transaction (cf. quote/record).
         self._quotes: dict[str, dict] = {}
+        # Dernier prix RÉELLEMENT échangé par sous-jacent (NQ/ES), à jour à chaque
+        # print — c'est la seule source tick-accurate (TimeAndSale sans agrégation,
+        # contrairement à rtquote.QUOTES qui est CONFLATÉ côté dxFeed). Exposé au
+        # dashboard via capturebus pour le ticker de prix de la page /scalp.
+        self._last: dict[str, float] = {}
+
+    def last_price(self, symbol: str) -> float | None:
+        """Dernier prix échangé pour `symbol` ("NQ" ou "ES"), ou None."""
+        with self._lock:
+            return self._last.get(symbol)
 
     def quote(self, item: dict) -> None:
         """Retient l'état de la cotation d'un contrat (bid/ask, tailles).
@@ -193,6 +203,7 @@ class TickCapture:
             row["prev_bid_size"] = q.get("prev_bid_size")
             row["prev_ask_size"] = q.get("prev_ask_size")
             self._buf.setdefault(symbol, {}).setdefault(contract, []).append(row)
+            self._last[symbol] = float(price)
 
     def _build_universe(self, access: str) -> dict[str, tuple[str, str]]:
         """streamer -> (libellé NQ/ES, code contrat), pour le contrat ACTIF ET

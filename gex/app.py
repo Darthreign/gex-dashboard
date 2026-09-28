@@ -1936,13 +1936,11 @@ def create_app() -> Dash:
             dcc.Interval(id="tick", interval=SETTINGS.flow_interval_s * 1000),
             # le Tape doit défiler vivant, pas au rythme des pulls (60 s)
             dcc.Interval(id="tape-tick", interval=2000),
-            # Ticker de prix /scalp : PAS un cycle Python (reçoit -> reconstruit ->
-            # renvoie tout le bloc, qui fait clignoter bandeau/échelle/surlignages à
-            # chaque tour). Ce timer ne pilote qu'un fetch JS direct qui écrit UN
-            # SEUL nombre dans la page (cf. clientside_callback plus bas) : reçu,
-            # affiché, rien d'autre ne bouge. Le reste de la page (bandeau, échelle,
-            # courbe, prints) reste sur tape-tick (2 s), inchangé.
-            dcc.Interval(id="price-tick", interval=400),
+            # Ticker de prix /scalp : vrai flux poussé (EventSource, cf.
+            # clientside_callback plus bas), aucun sondage — donc pas de dcc.Interval
+            # ici. Cible inerte requise par Dash pour un callback JS sans Output
+            # visible : jamais affichée, jamais lue.
+            html.Div(id="scalp-stream-sink", style={"display": "none"}),
             # le voyant du flux a son propre rythme : une déconnexion doit se
             # voir tout de suite, pas au prochain pull (60 s)
             dcc.Interval(id="rt-tick", interval=5000),
@@ -2041,34 +2039,39 @@ def create_app() -> Dash:
         prevent_initial_call=True,
     )
 
-    # Ticker de prix /scalp : reçoit, affiche, RIEN D'AUTRE ne se met à jour.
-    # Un fetch direct sur la route la plus nue possible (/api/v1/<SYM>/last,
-    # juste le dernier prix échangé), et le texte est écrit dans la page sans
-    # passer par un cycle Dash (pas de reconstruction du bloc, donc pas de
-    # clignotement). N'agit que sur /scalp, et seulement pour NQ/ES.
+    # Ticker de prix /scalp : REÇOIT, AFFICHE, rien d'autre ne se met à jour, et
+    # rien n'interroge personne — EventSource (Server-Sent Events) ouvre une
+    # connexion UNE FOIS, le serveur écrit dessus dès qu'un nouveau prix arrive
+    # (cf. gex/api.py `_last_trade_stream`, alimenté depuis TickCapture via
+    # capturebus). Pas de dcc.Interval, pas de fetch répété : un vrai flux
+    # poussé jusqu'au navigateur, tick-accurate. N'ouvre une connexion que sur
+    # /scalp, et seulement pour NQ/ES ; ferme proprement l'ancienne avant d'en
+    # ouvrir une nouvelle pour ne jamais en accumuler (changement de symbole,
+    # de page, ou rechargement du bloc Python qui réinitialise le span).
     app.clientside_callback(
         """
-        async function(_, symbol, path) {
+        function(symbol, path) {
+            if (window._scStream) { window._scStream.close(); window._scStream = null; }
             if (!(path || '/').startsWith('/scalp') || !['NQ', 'ES'].includes(symbol)) {
                 return window.dash_clientside.no_update;
             }
-            try {
-                const r = await fetch(`/api/v1/${symbol}/last`);
-                if (!r.ok) return window.dash_clientside.no_update;
-                const d = await r.json();
-                if (typeof d.price !== 'number') return window.dash_clientside.no_update;
+            const es = new EventSource(`/api/v1/${symbol}/stream`);
+            es.onmessage = function(ev) {
+                const el = document.getElementById('sc-live-price');
+                if (!el) return;
+                const px = parseFloat(ev.data);
+                if (isNaN(px)) return;
                 // même format que le rendu Python (f"{spot:,.2f}") : virgule des
                 // milliers, point décimal — sinon le format alterne visuellement
-                // entre les deux cycles (JS vs Python), un clignotement de plus.
-                return d.price.toLocaleString('en-US',
+                // entre les deux sources (JS vs Python), un clignotement de plus.
+                el.textContent = px.toLocaleString('en-US',
                     {minimumFractionDigits: 2, maximumFractionDigits: 2});
-            } catch (e) {
-                return window.dash_clientside.no_update;
-            }
+            };
+            window._scStream = es;
+            return window.dash_clientside.no_update;
         }
         """,
-        Output("sc-live-price", "children"),
-        Input("price-tick", "n_intervals"),
+        Output("scalp-stream-sink", "className"),
         Input("symbol", "value"),
         Input("url", "pathname"),
     )

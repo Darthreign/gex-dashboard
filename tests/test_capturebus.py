@@ -182,3 +182,45 @@ def test_bind_hosts_par_defaut_et_liste(monkeypatch):
     assert capturebus.bind_hosts() == ["127.0.0.1"]
     monkeypatch.setattr(capturebus, "_env", lambda n: "127.0.0.1, 100.109.109.123")
     assert capturebus.bind_hosts() == ["127.0.0.1", "100.109.109.123"]
+
+
+def test_export_delta_ajoute_le_dernier_prix_quand_ticks_fourni():
+    """`_handler` piggybacke le dernier prix NQ/ES sur l'envoi périodique du tape,
+    sans toucher au format existant (prints/pts/rows/status inchangés)."""
+    from gex.tickcapture import TickCapture
+
+    t = _tape()
+    tc = TickCapture()
+    tc._last["NQ"] = 30910.25
+    # même logique que _handler, sans faire tourner un vrai serveur/réseau
+    payload, _ = t.export_delta(None)
+    prices = {s: p for s in ("NQ", "ES") if (p := tc.last_price(s)) is not None}
+    if prices:
+        payload["ticks"] = prices
+    assert payload["ticks"] == {"NQ": 30910.25}
+    assert "prints" in payload and "pts" in payload            # format existant intact
+
+
+def test_remote_tape_apply_relaie_last_price():
+    r = RemoteTape("ws://x")
+    assert r.last_price("NQ") is None
+    r.apply({"snapshot": True, "ticks": {"NQ": 30910.25, "ES": None}})
+    assert r.last_price("NQ") == 30910.25
+    assert r.last_price("ES") is None                          # valeur non numérique ignorée
+    r.apply({"snapshot": False, "ticks": {"NQ": 30912.0}})
+    assert r.last_price("NQ") == 30912.0                        # mis à jour par le delta suivant
+
+
+def test_liaison_reelle_relaie_le_dernier_prix():
+    """Bout en bout, port local réel : ticks=... sur serve_in_thread arrive
+    jusqu'à RemoteTape.last_price côté miroir."""
+    from gex.tickcapture import TickCapture
+
+    t = _tape()
+    tc = TickCapture()
+    tc._last["NQ"] = 30777.5
+    port = _free_port()
+    capturebus.serve_in_thread(t, "127.0.0.1", port, ticks=tc)
+    r = RemoteTape(f"ws://127.0.0.1:{port}")
+    r.start()
+    assert _attendre(lambda: r.last_price("NQ") == 30777.5), "prix non relayé"
