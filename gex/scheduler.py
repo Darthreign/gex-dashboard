@@ -539,6 +539,38 @@ def discard_bars() -> None:
     QUOTES.drain_bars()
 
 
+def resolve_scalp_signals(now: datetime | None = None) -> None:
+    """Tranche les signaux du bandeau /scalp assez vieux (cf. scalp.OUTCOME_DELAY_MIN) :
+    compare le prix actuel au prix de déclenchement, classe (continued/reversed/
+    flat, cf. scalp.classify_outcome). Étanche : une erreur ne doit rien casser
+    d'autre — c'est de la calibration, pas une donnée de marché."""
+    try:
+        import sys
+        from pathlib import Path
+
+        from . import scalp
+        from .api import _futures_last_price
+
+        root = Path(__file__).resolve().parent.parent
+        sys.path.insert(0, str(root / "discord_bot"))
+        import journal
+
+        conn = journal.connect(SETTINGS.data_dir / "journal" / "journal.sqlite")
+        now = now or datetime.now(ET).astimezone()
+        cutoff = (now - timedelta(minutes=scalp.OUTCOME_DELAY_MIN)).isoformat()
+        for row in journal.unresolved_scalp_signals(conn, older_than_ts=cutoff):
+            px = _futures_last_price(row["symbol"])
+            if px is None:
+                continue
+            move = float(px) - row["spot"]
+            journal.resolve_scalp_signal(
+                conn, signal_id=row["id"], resolved_ts=now.isoformat(),
+                outcome_move_pts=move,
+                outcome=scalp.classify_outcome(row["symbol"], row["direction"], move))
+    except Exception:  # noqa: BLE001 — calibration, jamais bloquant pour le reste
+        log.exception("Résolution des signaux /scalp échouée")
+
+
 def start_scheduler(embedded_capture: bool = True) -> BackgroundScheduler:
     """`embedded_capture=False` : la capture (ticks, tape, bougies) vit dans un
     autre process, le dashboard n'écrit donc AUCUN de ces flux."""
@@ -583,6 +615,10 @@ def start_scheduler(embedded_capture: bool = True) -> BackgroundScheduler:
     # à 8h15 pour la journée (cf. gex/rates). Le week-end reprend le dernier
     # ouvré, ce qui convient.
     sched.add_job(rates.refresh, "cron", day_of_week="mon-fri", hour=8, minute=15)
+    # Résolution des signaux du bandeau /scalp (cf. gex/scalp.py, gex/app.py) :
+    # calibration a posteriori, pas une donnée de marché — 2 min suffit large.
+    sched.add_job(resolve_scalp_signals, "interval", minutes=2, max_instances=1,
+                  coalesce=True)
     sched.start()
     # Premier chargement du taux au démarrage (dans un thread : ne pas bloquer
     # le lancement sur un appel réseau ; repli sur la constante si indisponible).

@@ -120,3 +120,22 @@ def test_round_to_tick_nq_es():
     assert scalp.round_to_tick("NQ", 30533.13) == 30533.25
     assert scalp.round_to_tick("ES", 5000.37) == 5000.25
     assert scalp.round_to_tick("SPX", 5000.37) == 5000.37    # pas de pas connu : inchangé
+
+
+def test_should_log_signal_transition_seulement():
+    assert scalp.should_log_signal(None, "amplification", 1) is True
+    assert scalp.should_log_signal(("amplification", 1), "amplification", 1) is False
+    assert scalp.should_log_signal(("amplification", 1), "amplification", -1) is True
+    assert scalp.should_log_signal(("amplification", 1), "brake", 1) is True
+
+
+def test_should_log_signal_ignore_les_etats_non_signal():
+    assert scalp.should_log_signal(None, "calm", 0) is False
+    assert scalp.should_log_signal(None, "insufficient", 0) is False
+
+
+def test_classify_outcome():
+    assert scalp.classify_outcome("NQ", 1, 20.0) == "continued"      # >= 12.5 (0.5*25)
+    assert scalp.classify_outcome("NQ", 1, -20.0) == "reversed"
+    assert scalp.classify_outcome("NQ", 1, 5.0) == "flat"
+    assert scalp.classify_outcome("ES", -1, -5.0) == "continued"      # 0.5*6 = 3

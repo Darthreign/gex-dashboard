@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import sys
 import pandas as pd
 import pytest
 
@@ -121,3 +122,39 @@ def test_badge_absorption_cote_achat_donne_resistance():
     a = {"side": "BUY", "price": 30500.0, "ratio": 5.0, "total": 30.0, "n_prints": 3}
     span = app.scalp_absorb_badge("NQ", a)
     assert "résistance" in span.children
+
+
+def test_log_scalp_signal_journalise_une_fois_par_transition(monkeypatch):
+    calls = []
+    app._SCALP_SIGNAL_SEEN.clear()
+    monkeypatch.setattr(app, "_journal", lambda: object())     # connexion factice non-None
+    monkeypatch.setitem(sys.modules, "journal",
+                        type("J", (), {"record_scalp_signal": staticmethod(
+                            lambda *a, **kw: calls.append(kw))})())
+    a = {"state": "amplification", "direction": 1, "tone": "alert", "title": "t"}
+    app.log_scalp_signal("NQ", a, 30500.0, 40.0, 200.0, 250.0)
+    app.log_scalp_signal("NQ", a, 30510.0, 41.0, 210.0, 250.0)  # même état -> pas de doublon
+    a2 = {"state": "brake", "direction": 1, "tone": "ok", "title": "t2"}
+    app.log_scalp_signal("NQ", a2, 30520.0, 10.0, -50.0, 100.0)  # transition -> nouvelle ligne
+    assert len(calls) == 2
+    assert calls[0]["symbol"] == "NQ" and calls[0]["state"] == "amplification"
+    assert calls[1]["state"] == "brake"
+
+
+def test_log_scalp_signal_ignore_les_etats_calmes(monkeypatch):
+    calls = []
+    app._SCALP_SIGNAL_SEEN.clear()
+    monkeypatch.setattr(app, "_journal", lambda: object())
+    monkeypatch.setitem(sys.modules, "journal",
+                        type("J", (), {"record_scalp_signal": staticmethod(
+                            lambda *a, **kw: calls.append(kw))})())
+    app.log_scalp_signal("NQ", {"state": "calm", "direction": 0, "tone": "neutral",
+                                "title": "t"}, 1.0, 0.0, 0.0, 0.0)
+    assert calls == []
+
+
+def test_log_scalp_signal_sans_journal_ne_leve_pas(monkeypatch):
+    app._SCALP_SIGNAL_SEEN.clear()
+    monkeypatch.setattr(app, "_journal", lambda: None)
+    app.log_scalp_signal("NQ", {"state": "amplification", "direction": 1, "tone": "alert",
+                                "title": "t"}, 1.0, 0.0, 0.0, 0.0)   # ne doit pas lever

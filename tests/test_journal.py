@@ -220,3 +220,35 @@ def test_research_log(conn):
     assert row["status"] == "confirmed" and row["note"] == "180 séances"
     assert all(r["status"] == "confirmed"
                for r in journal.list_entries(conn, status="confirmed"))
+
+
+def test_scalp_signal_aller_retour(conn):
+    sid = journal.record_scalp_signal(
+        conn, date="2026-09-29", ts="2026-09-29T16:00:00+02:00", symbol="NQ",
+        state="amplification", tone="alert", direction=1, title="Amplification haussière",
+        spot=30500.0, move_pts=40.0, net_musd=200.0, gross_musd=250.0)
+    row = conn.execute("SELECT * FROM scalp_signals WHERE id=?", (sid,)).fetchone()
+    assert row["symbol"] == "NQ" and row["state"] == "amplification" and row["spot"] == 30500.0
+    assert row["resolved_ts"] is None
+
+
+def test_unresolved_scalp_signals_filtre_sur_lage(conn):
+    journal.record_scalp_signal(conn, date="2026-09-29", ts="2026-09-29T16:00:00+02:00",
+                                symbol="NQ", state="brake", tone="ok", direction=-1,
+                                title="t", spot=1.0)
+    journal.record_scalp_signal(conn, date="2026-09-29", ts="2026-09-29T16:20:00+02:00",
+                                symbol="ES", state="brake", tone="ok", direction=1,
+                                title="t", spot=2.0)
+    dus = journal.unresolved_scalp_signals(conn, older_than_ts="2026-09-29T16:15:00+02:00")
+    assert [r["symbol"] for r in dus] == ["NQ"]                # le second est trop récent
+
+
+def test_resolve_scalp_signal(conn):
+    sid = journal.record_scalp_signal(conn, date="2026-09-29", ts="2026-09-29T16:00:00+02:00",
+                                      symbol="NQ", state="unsupported", tone="ok",
+                                      direction=1, title="t", spot=30500.0)
+    journal.resolve_scalp_signal(conn, signal_id=sid, resolved_ts="2026-09-29T16:20:00+02:00",
+                                 outcome_move_pts=-30.0, outcome="reversed")
+    row = conn.execute("SELECT * FROM scalp_signals WHERE id=?", (sid,)).fetchone()
+    assert row["outcome"] == "reversed" and row["outcome_move_pts"] == -30.0
+    assert journal.unresolved_scalp_signals(conn, older_than_ts="2026-09-29T23:00:00+02:00") == []

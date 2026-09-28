@@ -174,3 +174,31 @@ def assess(symbol: str, move_pts: float | None, net_musd: float, gross_musd: flo
     return {"state": "unsupported", "tone": "ok", "direction": direction,
             "title": f"Mouvement {side_m} sans soutien des dealers — extension à corriger ?",
             "detail": detail, "lights": lights}
+
+
+# --- Journal du bandeau (calibration a posteriori) --------------------------
+# Ce que le bandeau ANNONCE (`assess`) ne dit rien de ce qui s'est réellement
+# passé — le journaliser à chaque déclenchement, puis vérifier après coup si le
+# mouvement s'est confirmé ou retourné, est ce qui permet de calibrer les
+# seuils sur des faits plutôt qu'au jugé (cf. mémoire du projet). Purement
+# descriptif : ce n'est toujours pas un signal de trading.
+SIGNAL_STATES = frozenset({"amplification", "unsupported", "brake"})
+OUTCOME_DELAY_MIN = 15.0        # attendre ça avant de juger un signal résolu
+OUTCOME_MIN_FACTOR = 0.5        # fraction de move_threshold(symbol) pour trancher
+
+
+def should_log_signal(prev: tuple[str, int] | None, state: str, direction: int) -> bool:
+    """True si (state, direction) mérite une NOUVELLE ligne de journal : un
+    état-signal (cf. SIGNAL_STATES) qui diffère du dernier connu — jamais à
+    chaque cycle où rien n'a changé (l'appelant relit `assess` toutes les 2 s)."""
+    return state in SIGNAL_STATES and prev != (state, direction)
+
+
+def classify_outcome(symbol: str, direction: int, move_pts: float) -> str:
+    """« continued » (le signal s'est confirmé), « reversed » (l'inverse),
+    « flat » (rien de net) — seuil = la moitié du seuil de mouvement de
+    l'instrument. Description factuelle, pas une note de performance."""
+    thr = move_threshold(symbol) * OUTCOME_MIN_FACTOR
+    if abs(move_pts) < thr:
+        return "flat"
+    return "continued" if (move_pts > 0) == (direction > 0) else "reversed"

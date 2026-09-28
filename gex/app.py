@@ -946,6 +946,56 @@ def hedge_fig(symbol: str, lang: str, window_min: int = 15,
 _SCALP_CACHE: dict[str, tuple[float, dict]] = {}
 SCALP_CACHE_S = 10.0
 
+# --- Journal du bandeau (cf. gex/scalp.py should_log_signal) -----------------
+# Dernier (state, direction) VU pour chaque symbole, pour ne journaliser qu'une
+# transition (cf. docstring de should_log_signal) — un seul process dashboard,
+# donc un dict de module suffit même avec plusieurs onglets ouverts.
+_SCALP_SIGNAL_SEEN: dict[str, tuple[str, int]] = {}
+_JOURNAL_CONN = None
+
+
+def _journal():
+    """Connexion (partagée, créée au premier besoin) vers le même journal
+    SQLite que le bot Discord (`data/journal/journal.sqlite`, WAL — accès
+    concurrent sûr). None si indisponible (le bandeau continue de fonctionner
+    sans, seul le journal en est privé)."""
+    global _JOURNAL_CONN
+    if _JOURNAL_CONN is not None:
+        return _JOURNAL_CONN
+    try:
+        import sys
+        root = Path(__file__).resolve().parent.parent
+        sys.path.insert(0, str(root / "discord_bot"))
+        import journal
+        _JOURNAL_CONN = journal.connect(SETTINGS.data_dir / "journal" / "journal.sqlite")
+    except Exception:  # noqa: BLE001 — le journal ne doit jamais casser la page
+        log.exception("Journal des signaux /scalp indisponible")
+        _JOURNAL_CONN = False
+    return _JOURNAL_CONN or None
+
+
+def log_scalp_signal(symbol: str, a: dict, spot: float, move: float | None,
+                     net: float, gross: float) -> None:
+    """Journalise une TRANSITION vers un état-signal (cf. scalp.should_log_signal)
+    — jamais à chaque cycle. Étanche : toute erreur reste locale à cette fonction."""
+    prev = _SCALP_SIGNAL_SEEN.get(symbol)
+    state, direction = a["state"], a["direction"]
+    _SCALP_SIGNAL_SEEN[symbol] = (state, direction)
+    if not scalp.should_log_signal(prev, state, direction):
+        return
+    conn = _journal()
+    if conn is None:
+        return
+    try:
+        import journal
+        now = datetime.now(LOCAL_TZ)
+        journal.record_scalp_signal(
+            conn, date=now.date().isoformat(), ts=now.isoformat(), symbol=symbol,
+            state=state, tone=a["tone"], direction=direction, title=a["title"],
+            spot=spot, move_pts=move, net_musd=net, gross_musd=gross)
+    except Exception:  # noqa: BLE001 — ne doit jamais casser le bandeau
+        log.exception("Écriture du signal /scalp échouée (%s, %s)", symbol, state)
+
 
 def scalp_context(symbol: str) -> dict | None:
     """Niveaux, régime, VIX et ouverture de séance, mis en cache 10 s."""
@@ -1076,6 +1126,7 @@ def scalp_banner(symbol: str, ctx: dict, spot: float, absorb: dict | None = None
     zg = ctx.get("zg")
     neg = bool(ctx.get("gamma")) and "Négatif" in ctx["gamma"]
     a = scalp.assess(symbol, move, net, gross, neg, (zg - spot) if zg is not None else None)
+    log_scalp_signal(symbol, a, spot, move, net, gross)
     voyants = [html.Span(f"{'●' if on else '○'} {name}", className="sc-light" + (" on" if on else ""))
                for name, on in a["lights"].items()]
     return html.Div([

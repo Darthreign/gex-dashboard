@@ -97,6 +97,31 @@ CREATE TABLE IF NOT EXISTS daily_metrics (
     PRIMARY KEY (date, symbol, metric_name)
 );
 
+-- Déclenchements du bandeau d'amplification (page /scalp du dashboard) : un
+-- signal-état (amplification/unsupported/brake, cf. gex/scalp.py) qui débute,
+-- horodaté avec le prix du moment. Résolu après coup (resolved_ts NULL tant
+-- que non résolu) : `outcome` dit si le mouvement s'est confirmé ou retourné,
+-- pour calibrer les seuils sur des faits plutôt qu'au jugé. Écrit par le
+-- dashboard (gex/app.py) ET par lui-même relu/résolu (gex/scheduler.py) — WAL
+-- permet cet accès concurrent avec le bot Discord sur le même fichier.
+CREATE TABLE IF NOT EXISTS scalp_signals (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    date        TEXT NOT NULL,          -- 'YYYY-MM-DD' (séance, heure locale)
+    ts          TEXT NOT NULL,          -- ISO 8601 avec tz, déclenchement
+    symbol      TEXT NOT NULL,          -- 'NQ' | 'ES'
+    state       TEXT NOT NULL,          -- amplification | unsupported | brake
+    tone        TEXT NOT NULL,
+    direction   INTEGER NOT NULL,       -- +1 haussier, -1 baissier
+    title       TEXT NOT NULL,
+    spot        REAL NOT NULL,          -- prix au déclenchement
+    move_pts    REAL, net_musd REAL, gross_musd REAL,
+    resolved_ts       TEXT,             -- NULL tant que non résolu
+    outcome_move_pts  REAL,             -- prix(résolution) - spot, signé
+    outcome           TEXT              -- continued | reversed | flat
+);
+CREATE INDEX IF NOT EXISTS idx_scalp_signals_date ON scalp_signals(date);
+CREATE INDEX IF NOT EXISTS idx_scalp_signals_open ON scalp_signals(resolved_ts);
+
 -- Mémoire du labo : hypothèses, observations, conclusions, décisions, bugs…
 -- Dans un an, c'est ce qui dira POURQUOI telle donnée existe et si elle a été
 -- tranchée. `linked_date` = la séance CONCERNÉE (≠ `created`, quand c'est
@@ -418,6 +443,48 @@ def set_entry_status(conn: sqlite3.Connection, entry_id: int, status: str,
     else:
         conn.execute("UPDATE research_log SET status=?, note=? WHERE id=?",
                      (status, note, entry_id))
+    conn.commit()
+
+
+# --------------------------------------------------------------------------
+# Signaux de la page /scalp (bandeau d'amplification)
+# --------------------------------------------------------------------------
+
+def record_scalp_signal(conn: sqlite3.Connection, *, date: str, ts: str, symbol: str,
+                        state: str, tone: str, direction: int, title: str, spot: float,
+                        move_pts: float | None = None, net_musd: float | None = None,
+                        gross_musd: float | None = None) -> int:
+    """Enregistre le DÉBUT d'un signal-état (transition) — jamais un doublon
+    à chaque cycle où l'état n'a pas changé, c'est à l'appelant de le garantir
+    (cf. gex.scalp.should_log_signal). Renvoie l'id, pour la résolution."""
+    cur = conn.execute(
+        """INSERT INTO scalp_signals
+           (date, ts, symbol, state, tone, direction, title, spot,
+            move_pts, net_musd, gross_musd)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        (date, ts, symbol, state, tone, int(direction), title, spot,
+         move_pts, net_musd, gross_musd),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def unresolved_scalp_signals(conn: sqlite3.Connection, *,
+                             older_than_ts: str) -> list[sqlite3.Row]:
+    """Signaux pas encore résolus, déclenchés avant `older_than_ts` (ISO 8601) —
+    assez vieux pour qu'on sache si le mouvement s'est confirmé ou retourné."""
+    return conn.execute(
+        "SELECT * FROM scalp_signals WHERE resolved_ts IS NULL AND ts <= ? "
+        "ORDER BY ts ASC", (older_than_ts,),
+    ).fetchall()
+
+
+def resolve_scalp_signal(conn: sqlite3.Connection, *, signal_id: int, resolved_ts: str,
+                         outcome_move_pts: float, outcome: str) -> None:
+    conn.execute(
+        "UPDATE scalp_signals SET resolved_ts=?, outcome_move_pts=?, outcome=? WHERE id=?",
+        (resolved_ts, outcome_move_pts, outcome, signal_id),
+    )
     conn.commit()
 
 
