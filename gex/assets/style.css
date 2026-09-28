@@ -683,3 +683,26 @@ a.scalp-link, a.full-link { text-decoration: none; }
 .sc-tone-ok .sc-banner-title { color: #199e70; }
 .sc-tone-neutral { border-color: var(--line); }
 .sc-tone-neutral .sc-banner-title { color: var(--ink2); font-weight: 600; }
+
+/* Pastille d'absorption (candidat iceberg, page /scalp) — cachée par défaut,
+   ne clignote QUE quand une salve fraîche est détectée (cf. gex/iceberg.py). */
+.sc-absorb { display: none; }
+.sc-absorb-active {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  background: #2f7bd8;
+  border: 1px solid #5a9ce8;
+  animation: sc-absorb-blink 1.1s ease-in-out infinite;
+}
+@keyframes sc-absorb-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sc-absorb-active { animation: none; }
+}

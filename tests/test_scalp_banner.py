@@ -82,3 +82,42 @@ def test_graphe_sous_jacent_retombe_sur_le_dernier_jour(monkeypatch):
     monkeypatch.setattr(store, "price_days", lambda s: ["2026-09-24", "2026-09-25"])
     fig = app.scalp_price_fig("NQ", {"zg": None, "hvl": None, "keys": {}, "walls": []}, 1.5)
     assert "dernier jour disponible (2026-09-25)" in fig.layout.title.text
+
+
+def test_scalp_absorption_autonome_lit_capture(monkeypatch):
+    from gex import capturebus
+    from gex.tickcapture import CAPTURE
+    monkeypatch.setattr(capturebus, "remote_url", lambda: None)
+    monkeypatch.setattr(CAPTURE, "absorption_now", lambda s: {"side": "SELL", "price": 1.0}
+                        if s == "NQ" else None)
+    assert app.scalp_absorption("NQ") == {"side": "SELL", "price": 1.0}
+
+
+def test_scalp_absorption_separe_lit_le_miroir(monkeypatch):
+    from gex import capturebus, flowtape
+
+    class _Faux:
+        def absorption(self, s):
+            return {"side": "BUY", "price": 2.0} if s == "ES" else None
+
+    monkeypatch.setattr(capturebus, "remote_url", lambda: "ws://x")
+    monkeypatch.setattr(flowtape, "TAPE", _Faux())
+    assert app.scalp_absorption("ES") == {"side": "BUY", "price": 2.0}
+
+
+def test_badge_absorption_absente_masquee_par_defaut():
+    span = app.scalp_absorb_badge("NQ", None)
+    assert span.className == "sc-absorb" and "sc-absorb-active" not in span.className
+
+
+def test_badge_absorption_active_montre_cote_et_prix():
+    a = {"side": "SELL", "price": 30910.25, "ratio": 8.3, "total": 40.0, "n_prints": 4}
+    span = app.scalp_absorb_badge("NQ", a)
+    assert "sc-absorb-active" in span.className
+    assert "support" in span.children and "30,910.25" in span.children and "8x" in span.children
+
+
+def test_badge_absorption_cote_achat_donne_resistance():
+    a = {"side": "BUY", "price": 30500.0, "ratio": 5.0, "total": 30.0, "n_prints": 3}
+    span = app.scalp_absorb_badge("NQ", a)
+    assert "résistance" in span.children

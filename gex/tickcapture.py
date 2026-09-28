@@ -52,6 +52,7 @@ import json
 import logging
 import threading
 import time
+from collections import deque
 
 from .rtquote import (
     BACKOFF_MAX,
@@ -61,6 +62,17 @@ from .rtquote import (
 )
 
 log = logging.getLogger(__name__)
+
+# Fenêtre glissante gardée en mémoire pour la détection d'absorption en direct
+# (cf. absorption_now / gex/iceberg.py) — distincte de `_buf`, qui lui est drainé
+# et vidé toutes les 60 s vers le disque. Recalculer une salve sur 3 min de ticks
+# coûte cher en pur Python (jusqu'à ~10k lignes sur ES) : on ne le refait donc
+# qu'au plus toutes les ABSORPTION_RECOMPUTE_S, et on ne considère « fraîche »
+# (digne d'allumer une pastille) qu'une salve achevée depuis moins de
+# ABSORPTION_FRESH_S.
+ICEBERG_WINDOW_S = 180.0
+ABSORPTION_RECOMPUTE_S = 2.0
+ABSORPTION_FRESH_S = 20.0
 
 # Les deux futures suivis : le libellé sert de dossier de stockage
 # (data/ticks/NQ) et de code produit pour résoudre les contrats (cf. gex/roll).
@@ -97,11 +109,51 @@ class TickCapture:
         # contrairement à rtquote.QUOTES qui est CONFLATÉ côté dxFeed). Exposé au
         # dashboard via capturebus pour le ticker de prix de la page /scalp.
         self._last: dict[str, float] = {}
+        # Fenêtre glissante par sous-jacent (ICEBERG_WINDOW_S), pour la détection
+        # d'absorption en direct — mêmes colonnes que les lignes écrites sur
+        # disque (cf. record), directement consommables par gex.iceberg.
+        self._recent: dict[str, deque] = {}
+        self._absorb_cache: dict[str, tuple[float, dict | None]] = {}
 
     def last_price(self, symbol: str) -> float | None:
         """Dernier prix échangé pour `symbol` ("NQ" ou "ES"), ou None."""
         with self._lock:
             return self._last.get(symbol)
+
+    def recent_rows(self, symbol: str) -> list[dict]:
+        """Copie des lignes des `ICEBERG_WINDOW_S` dernières secondes pour
+        `symbol` — public : c'est le point testable de la détection d'absorption
+        en direct, sans dépendre du minuteur de cache."""
+        with self._lock:
+            return list(self._recent.get(symbol, ()))
+
+    def absorption_now(self, symbol: str, now: float | None = None) -> dict | None:
+        """Salve d'absorption la plus marquée, ACHEVÉE depuis moins de
+        `ABSORPTION_FRESH_S` — ou None. Résultat mis en cache `ABSORPTION_RECOMPUTE_S`
+        (recalculer gex.iceberg sur la fenêtre à chaque appel serait trop coûteux,
+        cette méthode étant lue à chaque envoi capturebus, ~4x/s)."""
+        now = time.time() if now is None else now
+        with self._lock:
+            cached = self._absorb_cache.get(symbol)
+        if cached and now - cached[0] < ABSORPTION_RECOMPUTE_S:
+            return cached[1]
+        rows = self.recent_rows(symbol)
+        result = None
+        if rows:
+            import pandas as pd
+
+            from . import iceberg as ib
+            sw = ib.build_sweeps(pd.DataFrame(rows))
+            flags = ib.flag_absorption(sw, symbol)
+            fraiches = [f for f in flags if now - f.end_ts <= ABSORPTION_FRESH_S]
+            if fraiches:
+                f = max(fraiches, key=lambda s: s.ratio or 0.0)
+                result = {"side": f.side, "price": f.price,
+                         "ratio": round(f.ratio, 1) if f.ratio else None,
+                         "total": f.total_size, "n_prints": f.n_prints, "ts": f.end_ts}
+        with self._lock:
+            self._absorb_cache[symbol] = (now, result)
+        return result
 
     def quote(self, item: dict) -> None:
         """Retient l'état de la cotation d'un contrat (bid/ask, tailles).
@@ -204,6 +256,13 @@ class TickCapture:
             row["prev_ask_size"] = q.get("prev_ask_size")
             self._buf.setdefault(symbol, {}).setdefault(contract, []).append(row)
             self._last[symbol] = float(price)
+            # fenêtre glissante pour la détection d'absorption en direct (indépendante
+            # du contrat : le dominant peut changer au roll, la fenêtre reste continue)
+            recent = self._recent.setdefault(symbol, deque())
+            recent.append(row)
+            cutoff = row["ts"] - ICEBERG_WINDOW_S
+            while recent and recent[0]["ts"] < cutoff:
+                recent.popleft()
 
     def _build_universe(self, access: str) -> dict[str, tuple[str, str]]:
         """streamer -> (libellé NQ/ES, code contrat), pour le contrat ACTIF ET

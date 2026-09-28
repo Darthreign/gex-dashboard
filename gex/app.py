@@ -990,7 +990,37 @@ def _sc_fmt(v: float, dec: int = 0) -> str:
     return f"{v:+,.{dec}f}".replace("-", "−")
 
 
-def scalp_head(symbol: str, lang: str, ctx: dict, spot: float) -> html.Div:
+def scalp_absorption(symbol: str) -> dict | None:
+    """Salve d'absorption fraîche pour `symbol` ("NQ"/"ES"), ou None — même
+    logique double-mode que `_futures_last_price` (gex/api.py) : mode séparé, lit
+    le miroir RemoteTape (déjà relayé depuis TickCapture, cf. capturebus) ; mode
+    autonome, lit TickCapture directement dans ce process."""
+    from . import flowtape
+    from .capturebus import remote_url
+    if remote_url():
+        return flowtape.TAPE.absorption(symbol)
+    from .tickcapture import CAPTURE
+    return CAPTURE.absorption_now(symbol)
+
+
+def scalp_absorb_badge(symbol: str, absorb: dict | None) -> html.Span:
+    """Pastille d'absorption (candidat iceberg) : clignote quand une salve
+    fraîche a été détectée (cf. gex/iceberg.py). Reste dans le DOM même sans
+    salve active, cachée par CSS — la classe seule pilote le clignotement, pas
+    un remontage de l'élément à chaque cycle."""
+    if absorb is None:
+        return html.Span(id="sc-absorb", className="sc-absorb")
+    cote = "support" if absorb["side"] == "SELL" else "résistance"
+    ratio = absorb.get("ratio")
+    txt = (f"🧊 Absorption {symbol} — {cote} {absorb['price']:,.2f} "
+          f"({ratio:.0f}x{'' if ratio and ratio < 100 else '+'})")
+    return html.Span(txt, id="sc-absorb", className="sc-absorb sc-absorb-active",
+                     title=f"{absorb['n_prints']} prints, {absorb['total']:.0f} contrats "
+                           "— candidat, pas confirmé (top-of-book seulement)")
+
+
+def scalp_head(symbol: str, lang: str, ctx: dict, spot: float,
+               absorb: dict | None = None) -> html.Div:
     ext = scalp.extension_pts(spot, ctx["open"])
     code, etat = scalp.session_state(datetime.now(ET))
     zg = ctx["zg"]
@@ -1013,6 +1043,7 @@ def scalp_head(symbol: str, lang: str, ctx: dict, spot: float) -> html.Div:
                   html.Span(ext_txt, className="sc-ext " + (
                       "sc-pos" if (ext or 0) >= 0 else "sc-neg"))], className="sc-spotrow"),
         html.Div(chips, className="sc-chips"),
+        scalp_absorb_badge(symbol, absorb),
     ])
 
 
@@ -1711,7 +1742,7 @@ def chart_png(symbol: str, name: str, lang: str = "fr", bucket: str = "Tout",
 def create_app() -> Dash:
     # assets/ vit dans le package (gex/assets) pour survivre à un pip install ;
     # Dash les sert dans tous les cas sous /assets.
-    app = Dash(__name__, title="GEX Dashboard",
+    app = Dash(__name__, title="GEX Dashboard", update_title=None,
                assets_folder=str(Path(__file__).resolve().parent / "assets"))
     # Le ticker de prix (cf. plus bas) cible "sc-live-price", qui n'existe que
     # dans le sous-arbre RENVOYÉ par refresh_scalp — absent de app.layout au
@@ -2485,7 +2516,8 @@ def create_app() -> Dash:
         spot = scalp.round_to_tick(symbol, raw)
         price = scalp_price_fig(symbol, ctx, spot)
         price.update_layout(uirevision=f"scalp-price-{symbol}")
-        return (scalp_banner(symbol, ctx, spot), scalp_head(symbol, lang, ctx, spot),
+        absorb = scalp_absorption(symbol)
+        return (scalp_banner(symbol, ctx, spot), scalp_head(symbol, lang, ctx, spot, absorb),
                 scalp_ladder(symbol, ctx, spot), hedge, prints, price)
 
     @app.callback(

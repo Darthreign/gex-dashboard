@@ -64,6 +64,11 @@ async def _handler(ws, tape: FlowTape, ticks=None) -> None:
                      if (p := ticks.last_price(s)) is not None}
             if prices:
                 payload["ticks"] = prices
+            # Absorption en direct (cf. gex/iceberg.py) : TOUJOURS incluse, même
+            # vide — c'est ce qui permet au miroir de faire disparaître une
+            # pastille qui n'est plus fraîche (remplacement, pas fusion).
+            payload["absorption"] = {s: a for s in ("NQ", "ES")
+                                     if (a := ticks.absorption_now(s)) is not None}
         await ws.send(json.dumps(payload))
         await asyncio.sleep(PUSH_INTERVAL_S)
 
@@ -144,6 +149,7 @@ class RemoteTape:
         self._pts: dict[str, deque] = {}
         self._rows: dict[str, list[dict]] = {}
         self._last_price: dict[str, float] = {}
+        self._absorption: dict[str, dict] = {}
         self._status: tuple[str, int] = ("connecting", 0)
         self._last_msg = 0.0
         self._started = False
@@ -205,6 +211,10 @@ class RemoteTape:
             for s, px in (msg.get("ticks") or {}).items():
                 if isinstance(px, (int, float)):
                     self._last_price[s] = float(px)
+            if "absorption" in msg:
+                # REMPLACE, ne fusionne pas : une salve qui n'est plus fraîche doit
+                # pouvoir disparaître (cf. capturebus._handler, toujours incluse).
+                self._absorption = msg["absorption"] or {}
             self._last_msg = time.time() if now is None else now
 
     # -- lecture (même interface que FlowTape) ----------------------------
@@ -248,3 +258,9 @@ class RemoteTape:
         n'est encore arrivé."""
         with self.lock:
             return self._last_price.get(symbol)
+
+    def absorption(self, symbol: str) -> dict | None:
+        """Salve d'absorption fraîche relayée depuis `TickCapture.absorption_now`,
+        ou None. Se vide dès que la capture ne la considère plus fraîche."""
+        with self.lock:
+            return self._absorption.get(symbol)

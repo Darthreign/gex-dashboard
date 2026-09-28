@@ -1,6 +1,8 @@
 """Capture des ticks : tailles affichées au meilleur bid / ask attachées à chaque print."""
 from __future__ import annotations
 
+import time
+
 import pandas as pd
 import pytest
 
@@ -94,3 +96,64 @@ def test_last_price_mis_a_jour_a_chaque_print():
     cap.record(UNIV, _sale(price=30910.25), 2.0)
     assert cap.last_price("NQ") == 30910.25
     assert cap.last_price("ES") is None                    # jamais vu -> None, pas 0
+
+
+def _sale_at(price, size, side, prev_size, cur_size, t):
+    """Print agressif avec ses tailles avant/après (via une cotation posée
+    juste avant), pour construire une salve d'absorption reproductible."""
+    return {"eventType": "TimeAndSale", "eventSymbol": SYM, "price": price, "size": size,
+            "aggressorSide": side, "time": int(t * 1000)}
+
+
+def test_recent_rows_bornees_a_la_fenetre_iceberg():
+    from gex.tickcapture import ICEBERG_WINDOW_S
+    cap = TickCapture()
+    cap.record(UNIV, _sale(t=1_700_000_000_000), 1.0)
+    cap.record(UNIV, _sale(t=int((1_700_000_000 + ICEBERG_WINDOW_S + 5) * 1000)),
+              1_700_000_000 + ICEBERG_WINDOW_S + 5)
+    rows = cap.recent_rows("NQ")
+    assert len(rows) == 1                       # le premier print est sorti de la fenêtre
+
+
+def test_absorption_now_detecte_une_salve_fraiche_et_ignore_les_vieilles():
+    cap = TickCapture()
+    cap.quote(_quote(bid=30910.0, bs=5.0))
+    cap.quote(_quote(bid=30910.0, bs=3.0))      # prev=5 (avant), courant=3 (après, >= 50% -> recharge)
+    base = time.time() - 5.0                   # récente
+    for i in range(4):
+        cap.record(UNIV, _sale(price=30910.0, size=10, side="SELL",
+                               t=int((base + i * 0.3) * 1000)), base + i * 0.3)
+    a = cap.absorption_now("NQ", now=time.time())
+    assert a is not None and a["side"] == "SELL" and a["price"] == 30910.0
+    assert a["total"] == 40.0 and a["n_prints"] == 4
+
+
+def test_absorption_now_ignore_une_salve_trop_ancienne():
+    from gex.tickcapture import ABSORPTION_FRESH_S
+    cap = TickCapture()
+    cap.quote(_quote(bid=30910.0, bs=5.0))
+    cap.quote(_quote(bid=30910.0, bs=3.0))
+    vieux = time.time() - ABSORPTION_FRESH_S - 30.0
+    for i in range(4):
+        cap.record(UNIV, _sale(price=30910.0, size=10, side="SELL",
+                               t=int((vieux + i * 0.3) * 1000)), vieux + i * 0.3)
+    assert cap.absorption_now("NQ", now=time.time()) is None
+
+
+def test_absorption_now_rien_sans_ticks():
+    cap = TickCapture()
+    assert cap.absorption_now("NQ") is None
+
+
+def test_absorption_now_met_en_cache_le_resultat():
+    from gex.tickcapture import ABSORPTION_RECOMPUTE_S
+    cap = TickCapture()
+    t0 = time.time()
+    first = cap.absorption_now("NQ", now=t0)
+    with cap._lock:
+        cap._absorb_cache["NQ"] = (t0, {"side": "SELL", "price": 1.0, "ratio": 9.0,
+                                        "total": 9.0, "n_prints": 1, "ts": t0})
+    still_cached = cap.absorption_now("NQ", now=t0 + ABSORPTION_RECOMPUTE_S - 0.1)
+    assert still_cached is not None and still_cached["price"] == 1.0
+    recomputed = cap.absorption_now("NQ", now=t0 + ABSORPTION_RECOMPUTE_S + 0.1)
+    assert recomputed is None                   # pas de ticks réels -> retombe à None

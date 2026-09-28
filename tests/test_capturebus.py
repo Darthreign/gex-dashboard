@@ -224,3 +224,41 @@ def test_liaison_reelle_relaie_le_dernier_prix():
     r = RemoteTape(f"ws://127.0.0.1:{port}")
     r.start()
     assert _attendre(lambda: r.last_price("NQ") == 30777.5), "prix non relayé"
+
+
+def test_export_delta_inclut_toujours_absorption_meme_vide():
+    """`_handler` inclut TOUJOURS la clé "absorption" (même {}) : c'est ce qui
+    permet au miroir de faire disparaître une pastille qui n'est plus fraîche."""
+    from gex.tickcapture import TickCapture
+
+    t = _tape()
+    tc = TickCapture()      # absorption_now("NQ"/"ES") -> None (rien de récent)
+    payload, _ = t.export_delta(None)
+    absorb = {s: a for s in ("NQ", "ES") if (a := tc.absorption_now(s)) is not None}
+    payload["absorption"] = absorb
+    assert payload["absorption"] == {}
+
+
+def test_remote_tape_absorption_remplace_ne_fusionne_pas():
+    r = RemoteTape("ws://x")
+    assert r.absorption("NQ") is None
+    r.apply({"snapshot": True, "absorption": {"NQ": {"side": "SELL", "price": 30910.0,
+                                                      "ratio": 8.0, "total": 40.0,
+                                                      "n_prints": 4, "ts": 1.0}}})
+    assert r.absorption("NQ")["price"] == 30910.0
+    r.apply({"snapshot": False, "absorption": {}})           # la salve n'est plus fraîche
+    assert r.absorption("NQ") is None                        # disparue, pas fusionnée
+
+
+def test_liaison_reelle_relaie_labsorption():
+    from gex.tickcapture import TickCapture
+
+    t = _tape()
+    tc = TickCapture()
+    tc._absorb_cache["NQ"] = (10**12, {"side": "BUY", "price": 30500.0, "ratio": 5.0,
+                                       "total": 50.0, "n_prints": 3, "ts": 10**12})
+    port = _free_port()
+    capturebus.serve_in_thread(t, "127.0.0.1", port, ticks=tc)
+    r = RemoteTape(f"ws://127.0.0.1:{port}")
+    r.start()
+    assert _attendre(lambda: r.absorption("NQ") is not None and r.absorption("NQ")["price"] == 30500.0)
