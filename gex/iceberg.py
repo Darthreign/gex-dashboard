@@ -22,12 +22,20 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-THRESHOLDS_VERSION = "v1-2026-09-28"          # provisoire, à recalibrer sur des séances RTH
+THRESHOLDS_VERSION = "v2-2026-09-29"
+# v1 (posée sur une nuit peu liquide) donnait ~41 salves/h sur NQ et ~137/h sur ES —
+# beaucoup trop pour un « candidat » à regarder, et le déséquilibre venait du volume de
+# ticks bien plus élevé sur ES (2,2x celui de NQ en RTH) plutôt que d'une vraie
+# différence de qualité de signal. v2, calibrée sur la séance RTH du 2026-09-28
+# (458k ticks NQ / 1,0M ticks ES, 15h30-22h Paris) : seuils relevés et MIN_TOTAL
+# distinct par instrument pour ramener les deux à un rythme comparable, ~8-9/h.
+# Contrôlé à la main : les salves retenues ont presque toutes plusieurs prints
+# (rechargement répété), pas un seul gros bloc isolé.
 
 MAX_GAP_S = 2.0            # écart max entre deux prints d'une même salve
-MIN_TOTAL = {"NQ": 20.0, "ES": 20.0}          # volume minimum de la salve pour compter
-DEFAULT_MIN_TOTAL = 20.0
-MIN_RATIO = 3.0             # salve >= 3x la taille affichée avant qu'elle ne commence
+MIN_TOTAL = {"NQ": 40.0, "ES": 100.0}         # volume minimum de la salve pour compter
+DEFAULT_MIN_TOTAL = 40.0
+MIN_RATIO = 4.0             # salve >= 4x la taille affichée avant qu'elle ne commence
 MIN_REFILL_FRACTION = 0.5   # le niveau doit garder au moins 50 % de sa taille d'avant
 
 

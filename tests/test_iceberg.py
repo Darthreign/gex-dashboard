@@ -66,7 +66,7 @@ def test_flag_absorption_filtre_taille_ratio_et_rechargement():
 def test_flag_absorption_rejette_volume_sous_le_seuil():
     df = _df([{"ts": 1.0, "volume": 3, "prev_bid_size": 1.0, "bid_size": 1.0}])
     sw = ib.build_sweeps(df)
-    assert ib.flag_absorption(sw, "NQ") == []                # 3 < MIN_TOTAL(NQ)=20
+    assert ib.flag_absorption(sw, "NQ") == []                # 3 < MIN_TOTAL(NQ)=40
 
 
 def test_flag_absorption_rejette_si_le_niveau_cede():
@@ -77,11 +77,11 @@ def test_flag_absorption_rejette_si_le_niveau_cede():
 
 
 def test_analyze_resume_et_classe_par_ratio():
-    df = _df([{"ts": t, "volume": 10, "prev_bid_size": 5.0, "bid_size": 5.0}
-             for t in (1.0, 1.5, 2.0)])
+    df = _df([{"ts": t, "volume": 15, "prev_bid_size": 5.0, "bid_size": 5.0}
+             for t in (1.0, 1.5, 2.0)])                        # 45 sur 5 affichés
     out = ib.analyze(df, "NQ")
     assert out["n_sweeps"] >= 1 and out["n_flags"] == 1
-    assert out["top"][0]["ratio"] == 6.0
+    assert out["top"][0]["ratio"] == 9.0
 
 
 def test_liquidite_fine_de_nuit_nest_pas_signalee():
@@ -89,3 +89,11 @@ def test_liquidite_fine_de_nuit_nest_pas_signalee():
     df = _df([{"ts": 1.0, "volume": 2, "prev_bid_size": 1.0, "bid_size": 1.0}])
     sw = ib.build_sweeps(df)
     assert ib.flag_absorption(sw, "NQ") == []
+
+
+def test_seuils_v2_distincts_par_instrument():
+    """v2 : ES a un seuil de volume plus haut que NQ (bien plus de ticks en RTH à
+    liquidité comparable) — sans ça, ES noyait le détecteur (~3x plus de salves
+    retenues que NQ à seuil égal, cf. recalibrage du 2026-09-28)."""
+    assert ib.MIN_TOTAL["ES"] > ib.MIN_TOTAL["NQ"]
+    assert ib.THRESHOLDS_VERSION == "v2-2026-09-29"
