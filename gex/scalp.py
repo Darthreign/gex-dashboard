@@ -185,13 +185,27 @@ def assess(symbol: str, move_pts: float | None, net_musd: float, gross_musd: flo
 SIGNAL_STATES = frozenset({"amplification", "unsupported", "brake"})
 OUTCOME_DELAY_MIN = 15.0        # attendre ça avant de juger un signal résolu
 OUTCOME_MIN_FACTOR = 0.5        # fraction de move_threshold(symbol) pour trancher
+SIGNAL_COOLDOWN_S = 120.0       # même alerte qui re-déclenche vite -> pas une nouvelle ligne
 
 
-def should_log_signal(prev: tuple[str, int] | None, state: str, direction: int) -> bool:
-    """True si (state, direction) mérite une NOUVELLE ligne de journal : un
-    état-signal (cf. SIGNAL_STATES) qui diffère du dernier connu — jamais à
-    chaque cycle où rien n'a changé (l'appelant relit `assess` toutes les 2 s)."""
-    return state in SIGNAL_STATES and prev != (state, direction)
+def should_log_signal(prev: tuple[str, int] | None, state: str, direction: int,
+                      last_logged: tuple[str, int, float] | None = None,
+                      now: float = 0.0, cooldown_s: float = SIGNAL_COOLDOWN_S) -> bool:
+    """True si (state, direction) mérite une NOUVELLE ligne de journal.
+
+    Deux gardes : (1) un état-signal (cf. SIGNAL_STATES) qui diffère du dernier
+    CONNU (`prev`) — jamais à chaque cycle où rien n'a changé (l'appelant relit
+    `assess` toutes les 2 s) ; (2) même après un aller-retour par un état calme,
+    la MÊME alerte (même state, même direction) qui reviendrait moins de
+    `cooldown_s` après son dernier enregistrement (`last_logged`) n'en recrée
+    pas une — sans ça, un ratio qui oscille juste autour d'un seuil en pleine
+    liquidité fine spammerait le journal (observé le 2026-09-28 : 3 lignes en
+    70 s pour la même alerte, faute de cette garde)."""
+    if state not in SIGNAL_STATES or prev == (state, direction):
+        return False
+    if last_logged and last_logged[:2] == (state, direction) and now - last_logged[2] < cooldown_s:
+        return False
+    return True
 
 
 def classify_outcome(symbol: str, direction: int, move_pts: float) -> str:

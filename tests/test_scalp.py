@@ -139,3 +139,21 @@ def test_classify_outcome():
     assert scalp.classify_outcome("NQ", 1, -20.0) == "reversed"
     assert scalp.classify_outcome("NQ", 1, 5.0) == "flat"
     assert scalp.classify_outcome("ES", -1, -5.0) == "continued"      # 0.5*6 = 3
+
+
+def test_should_log_signal_cooldown_apres_un_aller_retour():
+    """La même alerte qui revient vite après être passée par un état calme
+    (donc prev différent) ne recrée pas une ligne si le cooldown n'est pas
+    écoulé — c'est le cas observé le 2026-09-28 (flapping)."""
+    last = ("amplification", 1, 1000.0)
+    assert scalp.should_log_signal(("calm", 0), "amplification", 1,
+                                   last_logged=last, now=1010.0) is False   # 10 s après
+    assert scalp.should_log_signal(("calm", 0), "amplification", 1,
+                                   last_logged=last, now=1000.0 + scalp.SIGNAL_COOLDOWN_S + 1,
+                                   ) is True                                # cooldown écoulé
+
+
+def test_should_log_signal_cooldown_nempeche_pas_une_alerte_differente():
+    last = ("amplification", 1, 1000.0)
+    assert scalp.should_log_signal(("calm", 0), "brake", -1,
+                                   last_logged=last, now=1005.0) is True

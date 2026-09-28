@@ -951,6 +951,9 @@ SCALP_CACHE_S = 10.0
 # transition (cf. docstring de should_log_signal) — un seul process dashboard,
 # donc un dict de module suffit même avec plusieurs onglets ouverts.
 _SCALP_SIGNAL_SEEN: dict[str, tuple[str, int]] = {}
+# Dernière alerte réellement ÉCRITE par symbole : (state, direction, epoch) —
+# le garde-fou anti-flapping (cf. scalp.should_log_signal cooldown_s).
+_SCALP_SIGNAL_LAST_LOGGED: dict[str, tuple[str, int, float]] = {}
 _JOURNAL_CONN = None
 
 
@@ -981,7 +984,9 @@ def log_scalp_signal(symbol: str, a: dict, spot: float, move: float | None,
     prev = _SCALP_SIGNAL_SEEN.get(symbol)
     state, direction = a["state"], a["direction"]
     _SCALP_SIGNAL_SEEN[symbol] = (state, direction)
-    if not scalp.should_log_signal(prev, state, direction):
+    now_epoch = time.time()
+    if not scalp.should_log_signal(prev, state, direction,
+                                   _SCALP_SIGNAL_LAST_LOGGED.get(symbol), now_epoch):
         return
     conn = _journal()
     if conn is None:
@@ -993,6 +998,7 @@ def log_scalp_signal(symbol: str, a: dict, spot: float, move: float | None,
             conn, date=now.date().isoformat(), ts=now.isoformat(), symbol=symbol,
             state=state, tone=a["tone"], direction=direction, title=a["title"],
             spot=spot, move_pts=move, net_musd=net, gross_musd=gross)
+        _SCALP_SIGNAL_LAST_LOGGED[symbol] = (state, direction, now_epoch)
     except Exception:  # noqa: BLE001 — ne doit jamais casser le bandeau
         log.exception("Écriture du signal /scalp échouée (%s, %s)", symbol, state)
 

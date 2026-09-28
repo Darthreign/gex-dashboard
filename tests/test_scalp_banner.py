@@ -127,6 +127,7 @@ def test_badge_absorption_cote_achat_donne_resistance():
 def test_log_scalp_signal_journalise_une_fois_par_transition(monkeypatch):
     calls = []
     app._SCALP_SIGNAL_SEEN.clear()
+    app._SCALP_SIGNAL_LAST_LOGGED.clear()
     monkeypatch.setattr(app, "_journal", lambda: object())     # connexion factice non-None
     monkeypatch.setitem(sys.modules, "journal",
                         type("J", (), {"record_scalp_signal": staticmethod(
@@ -144,6 +145,7 @@ def test_log_scalp_signal_journalise_une_fois_par_transition(monkeypatch):
 def test_log_scalp_signal_ignore_les_etats_calmes(monkeypatch):
     calls = []
     app._SCALP_SIGNAL_SEEN.clear()
+    app._SCALP_SIGNAL_LAST_LOGGED.clear()
     monkeypatch.setattr(app, "_journal", lambda: object())
     monkeypatch.setitem(sys.modules, "journal",
                         type("J", (), {"record_scalp_signal": staticmethod(
@@ -155,6 +157,7 @@ def test_log_scalp_signal_ignore_les_etats_calmes(monkeypatch):
 
 def test_log_scalp_signal_sans_journal_ne_leve_pas(monkeypatch):
     app._SCALP_SIGNAL_SEEN.clear()
+    app._SCALP_SIGNAL_LAST_LOGGED.clear()
     monkeypatch.setattr(app, "_journal", lambda: None)
     app.log_scalp_signal("NQ", {"state": "amplification", "direction": 1, "tone": "alert",
                                 "title": "t"}, 1.0, 0.0, 0.0, 0.0)   # ne doit pas lever
