@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from dash import Dash, ctx, dcc, html
+from dash import Dash, ctx, dcc, html, no_update
 from dash.dependencies import Input, Output, State
 from dash.exceptions import PreventUpdate
 
@@ -963,6 +963,11 @@ def hedge_fig(symbol: str, lang: str, window_min: int = 15,
 # tape (2 s).
 _SCALP_CACHE: dict[str, tuple[float, dict]] = {}
 SCALP_CACHE_S = 10.0
+
+# Chantier extendTraces (cf. passation.md) : (symbole, fenêtre) pour lequel la
+# figure Python du graphe de couverture a déjà été renvoyée en mode live — sert
+# à ne la renvoyer qu'une fois par entrée en mode live (cf. refresh_scalp).
+_HEDGE_LIVE_SEEN: dict[str, tuple[str, int] | None] = {}
 
 # --- Journal du bandeau (cf. gex/scalp.py should_log_signal) -----------------
 # Dernier (state, direction) VU pour chaque symbole, pour ne journaliser qu'une
@@ -2105,6 +2110,7 @@ def create_app() -> Dash:
             # ici. Cible inerte requise par Dash pour un callback JS sans Output
             # visible : jamais affichée, jamais lue.
             html.Div(id="scalp-stream-sink", style={"display": "none"}),
+            html.Div(id="scalp-hedge-stream-sink", style={"display": "none"}),
             # le voyant du flux a son propre rythme : une déconnexion doit se
             # voir tout de suite, pas au prochain pull (60 s)
             dcc.Interval(id="rt-tick", interval=5000),
@@ -2238,6 +2244,60 @@ def create_app() -> Dash:
         Output("scalp-stream-sink", "className"),
         Input("symbol", "value"),
         Input("url", "pathname"),
+    )
+
+    # Chantier extendTraces (cf. passation.md) : la courbe de couverture des
+    # dealers en mode LIVE ne doit plus être reconstruite par Python à chaque
+    # cycle de 2 s (ça efface le zoom/pan/légende de l'utilisateur). Python ne
+    # la dessine plus qu'UNE FOIS par (symbole, mode live) — cf. refresh_scalp,
+    # `_HEDGE_LIVE_SEEN`. Ensuite, CE callback ajoute chaque nouveau point avec
+    # `Plotly.extendTraces`, jamais avec une figure complète. Fermé/rouvert au
+    # changement de symbole, de page, ou de fenêtre (sortie du mode live).
+    app.clientside_callback(
+        """
+        function(symbol, path, win) {
+            if (window._scHedgeStream) { window._scHedgeStream.close(); window._scHedgeStream = null; }
+            // DÉSACTIVÉ (cf. passation.md) : la connexion s'ouvrait mais ne
+            // délivrait jamais de données en test réel (25/09, avant l'ouverture
+            // US). `false &&` plutôt que supprimer le code : la logique de
+            // seeding/extendTraces reste prête pour la reprise du chantier.
+            const live = false && win === -1 && (path || '/').startsWith('/scalp')
+                        && ['NQ', 'ES'].includes(symbol);
+            if (!live) return window.dash_clientside.no_update;
+            const es = new EventSource(`/api/v1/${symbol}/hedge_stream`);
+            // Amorcé au 1er point reçu : on lit les dernières valeurs déjà
+            // tracées par Python (son unique rendu pour ce mode live) plutôt
+            // que de redupliquer son calcul de cumul ici.
+            let cum = null;
+            es.onmessage = function(ev) {
+                const gd = document.getElementById('scalp-hedge');
+                if (!gd || !gd.data || gd.data.length < 5) return;
+                if (cum === null) {
+                    cum = [0, 0, 0, 0];
+                    for (let k = 0; k < 4; k++) {
+                        const y = gd.data[k] && gd.data[k].y;
+                        cum[k] = (y && y.length) ? y[y.length - 1] : 0;
+                    }
+                }
+                let d;
+                try { d = JSON.parse(ev.data); } catch (e) { return; }
+                if (typeof d.cat !== 'number' || d.cat < 0 || d.cat > 3) return;
+                cum[d.cat] += d.val / 1e6;
+                const net = cum[0] + cum[1] + cum[2] + cum[3];
+                const x = new Date(d.ts * 1000);
+                Plotly.extendTraces(gd,
+                    {x: [[x], [x], [x], [x], [x]],
+                     y: [[cum[0]], [cum[1]], [cum[2]], [cum[3]], [net]]},
+                    [0, 1, 2, 3, 4], 2000);
+            };
+            window._scHedgeStream = es;
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("scalp-hedge-stream-sink", "className"),
+        Input("symbol", "value"),
+        Input("url", "pathname"),
+        Input("scalp-window", "value"),
     )
 
     @app.callback(
@@ -2634,7 +2694,26 @@ def create_app() -> Dash:
     def refresh_scalp(_, path, symbol, lang, window, min_size):
         if not (path or "/").startswith("/scalp") or symbol not in ("NQ", "ES"):
             raise PreventUpdate
-        hedge = hedge_fig(symbol, lang, int(window if window is not None else -1))
+        w = int(window if window is not None else -1)
+        # Chantier extendTraces (cf. passation.md) : en mode LIVE, la figure
+        # Python n'est renvoyée qu'UNE FOIS par (symbole, fenêtre) — ensuite le
+        # clientside_callback ajoute les nouveaux points lui-même (SSE +
+        # Plotly.extendTraces), sans jamais recréer le graphe. Sans ce garde-fou,
+        # ce cycle de 2 s continuerait de reconstruire toute la figure et
+        # d'effacer le zoom/pan/légende de l'utilisateur — exactement le défaut
+        # signalé. Les autres fenêtres (15/30 min, Σ) restent sur l'ancien
+        # comportement : ce sont des marches par minute, pas un vrai flux à
+        # ajouter point par point.
+        # Chantier extendTraces (cf. passation.md) : DÉSACTIVÉ pour l'instant —
+        # le flux SSE /hedge_stream n'a pas livré une seule donnée en test réel
+        # (readyState resté à CONNECTING malgré du flux d'options réel, cause
+        # non confirmée — suspicion de limite du serveur de dev Werkzeug avec
+        # 2 connexions SSE permanentes par onglet). Revenu au rendu Python
+        # normal (zoom qui se réinitialise, mais des données qui s'affichent
+        # vraiment) plutôt que de laisser un graphe figé sur l'outil de trading
+        # en direct. `scalp.hedge_live_key`/`should_render_hedge` et la route
+        # restent en place, coupés au niveau du clientside_callback ci-dessous.
+        hedge = hedge_fig(symbol, lang, w)
         hedge.update_layout(height=300, uirevision=f"scalp-{symbol}-{window}")
         prints = tape_table(symbol, lang, min_size=float(min_size or 0), include_combos=False)
         ctx = scalp_context(symbol)

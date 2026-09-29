@@ -216,3 +216,23 @@ def classify_outcome(symbol: str, direction: int, move_pts: float) -> str:
     if abs(move_pts) < thr:
         return "flat"
     return "continued" if (move_pts > 0) == (direction > 0) else "reversed"
+
+
+# --- Chantier extendTraces (cf. passation.md) --------------------------------
+# En mode live, le graphe de couverture ne doit plus être reconstruit par
+# Python à chaque cycle (ça efface zoom/pan/légende) — un clientside_callback
+# ajoute ensuite chaque nouveau point lui-même (Plotly.extendTraces).
+
+def hedge_live_key(symbol: str, window_min: int) -> tuple[str, int] | None:
+    """Clé de suivi du mode live pour `symbol`, ou None hors mode live
+    (`window_min >= 0`) — ces fenêtres (15/30 min, Σ) restent reconstruites à
+    chaque cycle comme avant (marches par minute, pas un flux point par point)."""
+    return (symbol, window_min) if window_min < 0 else None
+
+
+def should_render_hedge(prev_key: tuple[str, int] | None,
+                        live_key: tuple[str, int] | None) -> bool:
+    """False seulement si on est déjà en mode live pour EXACTEMENT ce
+    (symbole, fenêtre) et qu'une figure Python a déjà été renvoyée pour cette
+    entrée — sinon (hors live, ou nouvelle entrée en live) True."""
+    return not (live_key is not None and prev_key == live_key)
