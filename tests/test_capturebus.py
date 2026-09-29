@@ -251,14 +251,18 @@ def test_remote_tape_absorption_remplace_ne_fusionne_pas():
 
 
 def test_liaison_reelle_relaie_labsorption():
+    from gex import iceberg as ib
     from gex.tickcapture import TickCapture
 
     t = _tape()
     tc = TickCapture()
-    tc._absorb_cache["NQ"] = (10**12, {"side": "BUY", "price": 30500.0, "ratio": 5.0,
-                                       "total": 50.0, "n_prints": 3, "ts": 10**12})
+    now = time.time()
+    sweep = ib.Sweep(side="BUY", price=30500.0, start_ts=now - 1, end_ts=now,
+                     n_prints=3, total_size=50.0, size_before=10.0, size_after=10.0)
+    tc._absorb_cache["NQ"] = (now, [sweep])                    # ratio = 50/10 = 5.0
     port = _free_port()
     capturebus.serve_in_thread(t, "127.0.0.1", port, ticks=tc)
     r = RemoteTape(f"ws://127.0.0.1:{port}")
     r.start()
     assert _attendre(lambda: r.absorption("NQ") is not None and r.absorption("NQ")["price"] == 30500.0)
+    assert _attendre(lambda: r.absorption_recent("NQ") and r.absorption_recent("NQ")[0]["price"] == 30500.0)

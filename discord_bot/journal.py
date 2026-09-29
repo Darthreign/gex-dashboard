@@ -122,6 +122,25 @@ CREATE TABLE IF NOT EXISTS scalp_signals (
 CREATE INDEX IF NOT EXISTS idx_scalp_signals_date ON scalp_signals(date);
 CREATE INDEX IF NOT EXISTS idx_scalp_signals_open ON scalp_signals(resolved_ts);
 
+-- Niveaux d'absorption (candidats iceberg, cf. gex/iceberg.py + la zone
+-- permanente de /scalp) — mêmes conventions date/ts/symbol/price que
+-- scalp_signals à dessein : ce qu'on veut, c'est pouvoir croiser après coup
+-- « y avait-il une absorption près de ce prix juste avant ce signal ? ».
+-- UNIQUE(symbol, ts) : une salve = une ligne, jamais de doublon même si elle
+-- reste dans la fenêtre glissante (donc relue) plusieurs cycles de suite.
+CREATE TABLE IF NOT EXISTS absorption_events (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    date      TEXT NOT NULL,
+    ts        TEXT NOT NULL,          -- ISO 8601 avec tz, fin de la salve
+    symbol    TEXT NOT NULL,          -- 'NQ' | 'ES'
+    side      TEXT NOT NULL,          -- 'BUY' | 'SELL' (sens agresseur)
+    price     REAL NOT NULL,
+    ratio     REAL, total REAL, n_prints INTEGER,
+    UNIQUE(symbol, ts)
+);
+CREATE INDEX IF NOT EXISTS idx_absorption_date ON absorption_events(date);
+CREATE INDEX IF NOT EXISTS idx_absorption_symbol_price ON absorption_events(symbol, price);
+
 -- Mémoire du labo : hypothèses, observations, conclusions, décisions, bugs…
 -- Dans un an, c'est ce qui dira POURQUOI telle donnée existe et si elle a été
 -- tranchée. `linked_date` = la séance CONCERNÉE (≠ `created`, quand c'est
@@ -484,6 +503,22 @@ def resolve_scalp_signal(conn: sqlite3.Connection, *, signal_id: int, resolved_t
     conn.execute(
         "UPDATE scalp_signals SET resolved_ts=?, outcome_move_pts=?, outcome=? WHERE id=?",
         (resolved_ts, outcome_move_pts, outcome, signal_id),
+    )
+    conn.commit()
+
+
+def record_absorption(conn: sqlite3.Connection, *, date: str, ts: str, symbol: str,
+                      side: str, price: float, ratio: float | None = None,
+                      total: float | None = None, n_prints: int | None = None) -> None:
+    """Journalise une salve d'absorption détectée (cf. gex/iceberg.py). INSERT
+    OR IGNORE : une salve relue plusieurs cycles de suite (fenêtre glissante,
+    cf. TickCapture.absorption_recent) ne crée jamais de doublon (UNIQUE(symbol,
+    ts)) — sert de filet, l'appelant est censé dédoublonner lui-même en amont."""
+    conn.execute(
+        """INSERT OR IGNORE INTO absorption_events
+           (date, ts, symbol, side, price, ratio, total, n_prints)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (date, ts, symbol, side, price, ratio, total, n_prints),
     )
     conn.commit()
 

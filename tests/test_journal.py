@@ -252,3 +252,27 @@ def test_resolve_scalp_signal(conn):
     row = conn.execute("SELECT * FROM scalp_signals WHERE id=?", (sid,)).fetchone()
     assert row["outcome"] == "reversed" and row["outcome_move_pts"] == -30.0
     assert journal.unresolved_scalp_signals(conn, older_than_ts="2026-09-29T23:00:00+02:00") == []
+
+
+def test_record_absorption_aller_retour(conn):
+    journal.record_absorption(conn, date="2026-09-29", ts="2026-09-29T16:00:00+02:00",
+                              symbol="NQ", side="SELL", price=30500.0, ratio=8.0,
+                              total=40.0, n_prints=4)
+    row = conn.execute("SELECT * FROM absorption_events").fetchone()
+    assert row["symbol"] == "NQ" and row["side"] == "SELL" and row["price"] == 30500.0
+    assert row["ratio"] == 8.0 and row["n_prints"] == 4
+
+
+def test_record_absorption_meme_symbole_et_ts_ne_duplique_pas(conn):
+    for _ in range(3):
+        journal.record_absorption(conn, date="2026-09-29", ts="2026-09-29T16:00:00+02:00",
+                                  symbol="NQ", side="SELL", price=30500.0)
+    assert conn.execute("SELECT COUNT(*) FROM absorption_events").fetchone()[0] == 1
+
+
+def test_record_absorption_meme_ts_autre_symbole_nest_pas_un_doublon(conn):
+    journal.record_absorption(conn, date="2026-09-29", ts="2026-09-29T16:00:00+02:00",
+                              symbol="NQ", side="SELL", price=30500.0)
+    journal.record_absorption(conn, date="2026-09-29", ts="2026-09-29T16:00:00+02:00",
+                              symbol="ES", side="BUY", price=7700.0)
+    assert conn.execute("SELECT COUNT(*) FROM absorption_events").fetchone()[0] == 2

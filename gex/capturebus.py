@@ -69,6 +69,10 @@ async def _handler(ws, tape: FlowTape, ticks=None) -> None:
             # pastille qui n'est plus fraîche (remplacement, pas fusion).
             payload["absorption"] = {s: a for s in ("NQ", "ES")
                                      if (a := ticks.absorption_now(s)) is not None}
+            # Les derniers niveaux détectés (affichés en permanence, pas seulement
+            # tant que fraîches) — TOUJOURS incluse aussi, même liste vide.
+            payload["absorption_recent"] = {s: r for s in ("NQ", "ES")
+                                            if (r := ticks.absorption_recent(s))}
         await ws.send(json.dumps(payload))
         await asyncio.sleep(PUSH_INTERVAL_S)
 
@@ -150,6 +154,7 @@ class RemoteTape:
         self._rows: dict[str, list[dict]] = {}
         self._last_price: dict[str, float] = {}
         self._absorption: dict[str, dict] = {}
+        self._absorption_recent: dict[str, list] = {}
         self._status: tuple[str, int] = ("connecting", 0)
         self._last_msg = 0.0
         self._started = False
@@ -215,6 +220,8 @@ class RemoteTape:
                 # REMPLACE, ne fusionne pas : une salve qui n'est plus fraîche doit
                 # pouvoir disparaître (cf. capturebus._handler, toujours incluse).
                 self._absorption = msg["absorption"] or {}
+            if "absorption_recent" in msg:
+                self._absorption_recent = msg["absorption_recent"] or {}
             self._last_msg = time.time() if now is None else now
 
     # -- lecture (même interface que FlowTape) ----------------------------
@@ -264,3 +271,9 @@ class RemoteTape:
         ou None. Se vide dès que la capture ne la considère plus fraîche."""
         with self.lock:
             return self._absorption.get(symbol)
+
+    def absorption_recent(self, symbol: str) -> list[dict]:
+        """Derniers niveaux détectés relayés depuis `TickCapture.absorption_recent`
+        (affichage permanent, pas seulement tant que frais)."""
+        with self.lock:
+            return list(self._absorption_recent.get(symbol, ()))

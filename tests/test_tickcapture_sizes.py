@@ -145,15 +145,46 @@ def test_absorption_now_rien_sans_ticks():
     assert cap.absorption_now("NQ") is None
 
 
-def test_absorption_now_met_en_cache_le_resultat():
+def test_absorption_flags_mises_en_cache_pas_recalculees_a_chaque_appel():
     from gex.tickcapture import ABSORPTION_RECOMPUTE_S
     cap = TickCapture()
+    cap.quote(_quote(bid=30910.0, bs=5.0))
+    cap.quote(_quote(bid=30910.0, bs=3.0))
+    base = time.time() - 5.0
+    for i in range(4):
+        cap.record(UNIV, _sale(price=30910.0, size=10, side="SELL",
+                               t=int((base + i * 0.3) * 1000)), base + i * 0.3)
+    calls = []
+    vraie_recent_rows = cap.recent_rows
+    cap.recent_rows = lambda s: (calls.append(s), vraie_recent_rows(s))[1]
+
     t0 = time.time()
-    first = cap.absorption_now("NQ", now=t0)
-    with cap._lock:
-        cap._absorb_cache["NQ"] = (t0, {"side": "SELL", "price": 1.0, "ratio": 9.0,
-                                        "total": 9.0, "n_prints": 1, "ts": t0})
-    still_cached = cap.absorption_now("NQ", now=t0 + ABSORPTION_RECOMPUTE_S - 0.1)
-    assert still_cached is not None and still_cached["price"] == 1.0
-    recomputed = cap.absorption_now("NQ", now=t0 + ABSORPTION_RECOMPUTE_S + 0.1)
-    assert recomputed is None                   # pas de ticks réels -> retombe à None
+    a1 = cap.absorption_now("NQ", now=t0)
+    a2 = cap.absorption_now("NQ", now=t0 + ABSORPTION_RECOMPUTE_S - 0.1)  # dans la fenêtre de cache
+    assert a1 is not None and a2 is not None and a1 == a2
+    assert len(calls) == 1                       # un seul calcul réel pour les deux appels
+
+    a3 = cap.absorption_now("NQ", now=t0 + ABSORPTION_RECOMPUTE_S + 0.1)  # hors cache
+    assert len(calls) == 2
+
+
+def test_absorption_recent_plus_recente_en_tete_bornee_a_limit():
+    cap = TickCapture()
+    cap.quote(_quote(bid=30910.0, bs=5.0))
+    cap.quote(_quote(bid=30910.0, bs=3.0))
+    now = time.time()
+    # 4 salves, toutes bien à l'intérieur de la fenêtre de 3 min (aucune ne doit
+    # être purgée par le nettoyage progressif de record(), calé sur la DERNIÈRE ts)
+    for prix, age in ((30910.0, 150.0), (30920.0, 100.0), (30930.0, 50.0), (30940.0, 10.0)):
+        base = now - age
+        for j in range(4):
+            cap.record(UNIV, _sale(price=prix, size=10, side="SELL",
+                                   t=int((base + j * 0.3) * 1000)), base + j * 0.3)
+    rec = cap.absorption_recent("NQ", limit=3, now=now)
+    assert len(rec) == 3
+    assert [r["price"] for r in rec] == [30940.0, 30930.0, 30920.0]   # la plus récente d'abord (30910 exclue)
+
+
+def test_absorption_recent_vide_sans_ticks():
+    cap = TickCapture()
+    assert cap.absorption_recent("NQ") == []

@@ -4,6 +4,8 @@ from __future__ import annotations
 from datetime import datetime
 
 import sys
+import time
+
 import pandas as pd
 import pytest
 
@@ -45,6 +47,8 @@ def test_pas_de_mouvement_si_aucune_bougie_recente(monkeypatch, flux):
 
 
 def test_banner_amplification_rendu(monkeypatch, flux):
+    from gex import capturebus
+    monkeypatch.setattr(capturebus, "remote_url", lambda: None)
     monkeypatch.setattr(store, "load_prices", lambda s, d: _bars({8: 30000.0, 1: 30030.0}))
     flux += [(1.0, 300e6, 0), (2.0, 80e6, 1)]
     ctx = {"zg": 29900.0, "gamma": "Gamma Positif"}
@@ -55,6 +59,8 @@ def test_banner_amplification_rendu(monkeypatch, flux):
 
 
 def test_banner_hors_seance_donnees_insuffisantes(monkeypatch, flux):
+    from gex import capturebus
+    monkeypatch.setattr(capturebus, "remote_url", lambda: None)
     monkeypatch.setattr(store, "load_prices", lambda s, d: pd.DataFrame())
     div = app.scalp_banner("NQ", {"zg": None, "gamma": None}, 30040.0)
     assert "Données insuffisantes" in str(div.to_plotly_json())
@@ -106,22 +112,35 @@ def test_scalp_absorption_separe_lit_le_miroir(monkeypatch):
     assert app.scalp_absorption("ES") == {"side": "BUY", "price": 2.0}
 
 
-def test_badge_absorption_absente_masquee_par_defaut():
-    span = app.scalp_absorb_badge("NQ", None)
-    assert span.className == "sc-absorb" and "sc-absorb-active" not in span.className
+def test_scalp_absorption_recent_autonome_lit_capture(monkeypatch):
+    from gex import capturebus
+    from gex.tickcapture import CAPTURE
+    monkeypatch.setattr(capturebus, "remote_url", lambda: None)
+    monkeypatch.setattr(CAPTURE, "absorption_recent", lambda s: [{"price": 1.0}]
+                        if s == "NQ" else [])
+    assert app.scalp_absorption_recent("NQ") == [{"price": 1.0}]
 
 
-def test_badge_absorption_active_montre_cote_et_prix():
-    a = {"side": "SELL", "price": 30910.25, "ratio": 8.3, "total": 40.0, "n_prints": 4}
-    span = app.scalp_absorb_badge("NQ", a)
-    assert "sc-absorb-active" in span.className
-    assert "support" in span.children and "30,910.25" in span.children and "8x" in span.children
+def test_panel_absorption_toujours_visible_meme_vide():
+    """La zone reste dans la page (jamais masquée) même sans détection."""
+    div = app.scalp_absorb_panel("NQ", [], None)
+    assert div.className == "sc-absorb"
+    txt = str(div.to_plotly_json())
+    assert "Aucune absorption détectée" in txt
 
 
-def test_badge_absorption_cote_achat_donne_resistance():
-    a = {"side": "BUY", "price": 30500.0, "ratio": 5.0, "total": 30.0, "n_prints": 3}
-    span = app.scalp_absorb_badge("NQ", a)
-    assert "résistance" in span.children
+def test_panel_absorption_liste_les_derniers_niveaux_le_plus_recent_en_tete():
+    recent = [{"side": "SELL", "price": 30910.25, "ratio": 8.3, "total": 40.0,
+              "n_prints": 4, "ts": time.time()},
+             {"side": "BUY", "price": 30500.0, "ratio": 5.0, "total": 30.0,
+              "n_prints": 3, "ts": time.time() - 60}]
+    div = app.scalp_absorb_panel("NQ", recent, fresh=recent[0])
+    rows = div.children[1:]
+    assert len(rows) == 2
+    assert "sc-absorb-active" in rows[0].className   # la fraîche clignote
+    assert "sc-absorb-active" not in rows[1].className
+    assert "support" in rows[0].children and "30,910.25" in rows[0].children
+    assert "résistance" in rows[1].children
 
 
 def test_log_scalp_signal_journalise_une_fois_par_transition(monkeypatch):
@@ -161,3 +180,44 @@ def test_log_scalp_signal_sans_journal_ne_leve_pas(monkeypatch):
     monkeypatch.setattr(app, "_journal", lambda: None)
     app.log_scalp_signal("NQ", {"state": "amplification", "direction": 1, "tone": "alert",
                                 "title": "t"}, 1.0, 0.0, 0.0, 0.0)   # ne doit pas lever
+
+
+def test_log_absorption_levels_ecrit_les_nouvelles_uniquement(monkeypatch):
+    calls = []
+    app._ABSORB_LOGGED.clear()
+    monkeypatch.setattr(app, "_journal", lambda: object())
+    monkeypatch.setitem(sys.modules, "journal",
+                        type("J", (), {"record_absorption": staticmethod(
+                            lambda *a, **kw: calls.append(kw))})())
+    a1 = {"side": "SELL", "price": 30500.0, "ratio": 8.0, "total": 40.0,
+         "n_prints": 4, "ts": time.time()}
+    a2 = {"side": "BUY", "price": 30600.0, "ratio": 5.0, "total": 30.0,
+         "n_prints": 3, "ts": time.time() - 60}
+    app.log_absorption_levels("NQ", [a1, a2])
+    app.log_absorption_levels("NQ", [a1, a2])              # même fenêtre relue -> rien de plus
+    assert len(calls) == 2
+    assert {c["price"] for c in calls} == {30500.0, 30600.0}
+
+    a3 = {"side": "SELL", "price": 30700.0, "ratio": 9.0, "total": 45.0,
+         "n_prints": 5, "ts": time.time()}
+    app.log_absorption_levels("NQ", [a3, a1, a2])           # une seule vraiment nouvelle
+    assert len(calls) == 3 and calls[-1]["price"] == 30700.0
+
+
+def test_log_absorption_levels_vide_ne_fait_rien(monkeypatch):
+    calls = []
+    app._ABSORB_LOGGED.clear()
+    monkeypatch.setattr(app, "_journal", lambda: object())
+    monkeypatch.setitem(sys.modules, "journal",
+                        type("J", (), {"record_absorption": staticmethod(
+                            lambda *a, **kw: calls.append(kw))})())
+    app.log_absorption_levels("NQ", [])
+    assert calls == []
+
+
+def test_log_absorption_levels_sans_journal_marque_vu_quand_meme(monkeypatch):
+    app._ABSORB_LOGGED.clear()
+    monkeypatch.setattr(app, "_journal", lambda: None)
+    a = {"side": "SELL", "price": 1.0, "ratio": 1.0, "total": 1.0, "n_prints": 1, "ts": 1.0}
+    app.log_absorption_levels("NQ", [a])          # ne doit pas lever
+    assert 1.0 in app._ABSORB_LOGGED["NQ"]

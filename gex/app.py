@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -1003,6 +1004,40 @@ def log_scalp_signal(symbol: str, a: dict, spot: float, move: float | None,
         log.exception("Écriture du signal /scalp échouée (%s, %s)", symbol, state)
 
 
+# Salves d'absorption déjà journalisées par symbole (leur `ts` = fin de salve),
+# pour ne pas réécrire la même ligne à chaque cycle où elle reste dans la
+# fenêtre glissante (cf. scalp_absorption_recent, relue toutes les 2 s).
+_ABSORB_LOGGED: dict[str, deque] = {}
+ABSORB_LOGGED_KEEP = 200
+
+
+def log_absorption_levels(symbol: str, recent: list[dict]) -> None:
+    """Journalise les salves d'absorption NOUVELLES de `recent` (cf.
+    scalp_absorption_recent) — pour les croiser après coup avec les signaux du
+    bandeau (même base, mêmes conventions date/ts/symbol/price)."""
+    if not recent:
+        return
+    seen = _ABSORB_LOGGED.setdefault(symbol, deque(maxlen=ABSORB_LOGGED_KEEP))
+    nouvelles = [a for a in recent if a["ts"] not in seen]
+    if not nouvelles:
+        return
+    conn = _journal()
+    for a in nouvelles:
+        seen.append(a["ts"])                # marqué vu même si l'écriture échoue
+        if conn is None:
+            continue
+        try:
+            import journal
+            ts = datetime.fromtimestamp(a["ts"], tz=LOCAL_TZ)
+            journal.record_absorption(
+                conn, date=ts.date().isoformat(), ts=ts.isoformat(), symbol=symbol,
+                side=a["side"], price=a["price"], ratio=a.get("ratio"),
+                total=a.get("total"), n_prints=a.get("n_prints"))
+        except Exception:  # noqa: BLE001 — ne doit jamais casser le bandeau
+            log.exception("Écriture de l'absorption /scalp échouée (%s, %.2f)",
+                          symbol, a["price"])
+
+
 def scalp_context(symbol: str) -> dict | None:
     """Niveaux, régime, VIX et ouverture de séance, mis en cache 10 s."""
     now = time.time()
@@ -1059,20 +1094,39 @@ def scalp_absorption(symbol: str) -> dict | None:
     return CAPTURE.absorption_now(symbol)
 
 
-def scalp_absorb_badge(symbol: str, absorb: dict | None) -> html.Span:
-    """Pastille d'absorption (candidat iceberg) : clignote quand une salve
-    fraîche a été détectée (cf. gex/iceberg.py). Reste dans le DOM même sans
-    salve active, cachée par CSS — la classe seule pilote le clignotement, pas
-    un remontage de l'élément à chaque cycle."""
-    if absorb is None:
-        return html.Span(id="sc-absorb", className="sc-absorb")
-    cote = "support" if absorb["side"] == "SELL" else "résistance"
-    ratio = absorb.get("ratio")
-    txt = (f"🧊 Absorption {symbol} — {cote} {absorb['price']:,.2f} "
-          f"({ratio:.0f}x{'' if ratio and ratio < 100 else '+'})")
-    return html.Span(txt, id="sc-absorb", className="sc-absorb sc-absorb-active",
-                     title=f"{absorb['n_prints']} prints, {absorb['total']:.0f} contrats "
-                           "— candidat, pas confirmé (top-of-book seulement)")
+def scalp_absorption_recent(symbol: str) -> list[dict]:
+    """Derniers niveaux d'absorption détectés pour `symbol` (jusqu'à 3, le plus
+    récent d'abord) — même logique double-mode que `scalp_absorption`."""
+    from . import flowtape
+    from .capturebus import remote_url
+    if remote_url():
+        return flowtape.TAPE.absorption_recent(symbol)
+    from .tickcapture import CAPTURE
+    return CAPTURE.absorption_recent(symbol)
+
+
+def _absorb_line(symbol: str, a: dict, active: bool) -> html.Div:
+    cote = "support" if a["side"] == "SELL" else "résistance"
+    ratio = a.get("ratio")
+    age = max(0.0, time.time() - a["ts"])
+    age_txt = f"il y a {age:.0f} s" if age < 90 else f"il y a {age / 60:.0f} min"
+    txt = (f"🧊 {cote} {a['price']:,.2f} ({ratio:.0f}x{'' if ratio and ratio < 100 else '+'}) — {age_txt}")
+    return html.Div(txt, className="sc-absorb-row" + (" sc-absorb-active" if active else ""),
+                    title=f"{a['n_prints']} prints, {a['total']:.0f} contrats "
+                          "— candidat, pas confirmé (top-of-book seulement)")
+
+
+def scalp_absorb_panel(symbol: str, recent: list[dict], fresh: dict | None) -> html.Div:
+    """Zone d'absorption AFFICHÉE EN PERMANENCE (jamais masquée) : les derniers
+    niveaux détectés sur la fenêtre glissante (cf. TickCapture.absorption_recent),
+    la plus récente en tête ; elle clignote tant qu'elle est encore fraîche
+    (cf. gex/iceberg.py). Vide -> message neutre, pas une zone qui disparaît."""
+    fresh_ts = fresh["ts"] if fresh else None
+    body = ([_absorb_line(symbol, a, a["ts"] == fresh_ts) for a in recent] if recent
+           else [html.Div("Aucune absorption détectée sur les 3 dernières minutes",
+                          className="sc-absorb-empty")])
+    return html.Div([html.Div("Absorption / iceberg (candidats)", className="sc-absorb-title"),
+                     *body], id="sc-absorb", className="sc-absorb")
 
 
 def scalp_head(symbol: str, lang: str, ctx: dict, spot: float) -> html.Div:
@@ -1133,6 +1187,8 @@ def scalp_banner(symbol: str, ctx: dict, spot: float, absorb: dict | None = None
     neg = bool(ctx.get("gamma")) and "Négatif" in ctx["gamma"]
     a = scalp.assess(symbol, move, net, gross, neg, (zg - spot) if zg is not None else None)
     log_scalp_signal(symbol, a, spot, move, net, gross)
+    recent = scalp_absorption_recent(symbol)
+    log_absorption_levels(symbol, recent)
     voyants = [html.Span(f"{'●' if on else '○'} {name}", className="sc-light" + (" on" if on else ""))
                for name, on in a["lights"].items()]
     return html.Div([
@@ -1143,7 +1199,7 @@ def scalp_banner(symbol: str, ctx: dict, spot: float, absorb: dict | None = None
         ], className="sc-banner-main"),
         # à droite du bandeau (passe en dessous si la place manque) : la place
         # vide de la bannière était l'endroit naturel plutôt qu'un bloc de plus
-        html.Div(scalp_absorb_badge(symbol, absorb), className="sc-banner-side"),
+        html.Div(scalp_absorb_panel(symbol, recent, absorb), className="sc-banner-side"),
     ], className=f"sc-banner sc-tone-{a['tone']}")
 
 
