@@ -181,7 +181,16 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     """Ouvre (et crée au besoin) la base, schéma garanti présent."""
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
+    # check_same_thread=False : cette connexion est mise en cache au niveau
+    # module côté dashboard (gex/app.py::_journal), appelée depuis des
+    # callbacks Dash qui tournent sur des threads différents du pool Flask —
+    # sans ce réglage, toute écriture hors du thread créateur lève
+    # sqlite3.ProgrammingError (constaté le 2026-09-29 : plus aucune écriture
+    # de 14h40 à 23h10 en séance RTH). Les appelants sérialisent leurs
+    # écritures (verrou côté app.py) car une connexion sqlite3 n'est pas sûre
+    # pour un accès concurrent réel, seulement pour un accès depuis des
+    # threads différents en alternance.
+    conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")   # lectures concurrentes sereines
     conn.execute("PRAGMA foreign_keys=ON")

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from collections import deque
 from datetime import datetime
@@ -963,6 +964,7 @@ _SCALP_SIGNAL_SEEN: dict[str, tuple[str, int]] = {}
 # le garde-fou anti-flapping (cf. scalp.should_log_signal cooldown_s).
 _SCALP_SIGNAL_LAST_LOGGED: dict[str, tuple[str, int, float]] = {}
 _JOURNAL_CONN = None
+_JOURNAL_LOCK = threading.Lock()
 
 
 def _journal():
@@ -1002,10 +1004,11 @@ def log_scalp_signal(symbol: str, a: dict, spot: float, move: float | None,
     try:
         import journal
         now = datetime.now(LOCAL_TZ)
-        journal.record_scalp_signal(
-            conn, date=now.date().isoformat(), ts=now.isoformat(), symbol=symbol,
-            state=state, tone=a["tone"], direction=direction, title=a["title"],
-            spot=spot, move_pts=move, net_musd=net, gross_musd=gross)
+        with _JOURNAL_LOCK:
+            journal.record_scalp_signal(
+                conn, date=now.date().isoformat(), ts=now.isoformat(), symbol=symbol,
+                state=state, tone=a["tone"], direction=direction, title=a["title"],
+                spot=spot, move_pts=move, net_musd=net, gross_musd=gross)
         _SCALP_SIGNAL_LAST_LOGGED[symbol] = (state, direction, now_epoch)
     except Exception:  # noqa: BLE001 — ne doit jamais casser le bandeau
         log.exception("Écriture du signal /scalp échouée (%s, %s)", symbol, state)
@@ -1036,10 +1039,11 @@ def log_absorption_levels(symbol: str, recent: list[dict]) -> None:
         try:
             import journal
             ts = datetime.fromtimestamp(a["ts"], tz=LOCAL_TZ)
-            journal.record_absorption(
-                conn, date=ts.date().isoformat(), ts=ts.isoformat(), symbol=symbol,
-                side=a["side"], price=a["price"], ratio=a.get("ratio"),
-                total=a.get("total"), n_prints=a.get("n_prints"))
+            with _JOURNAL_LOCK:
+                journal.record_absorption(
+                    conn, date=ts.date().isoformat(), ts=ts.isoformat(), symbol=symbol,
+                    side=a["side"], price=a["price"], ratio=a.get("ratio"),
+                    total=a.get("total"), n_prints=a.get("n_prints"))
         except Exception:  # noqa: BLE001 — ne doit jamais casser le bandeau
             log.exception("Écriture de l'absorption /scalp échouée (%s, %.2f)",
                           symbol, a["price"])
