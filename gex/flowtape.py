@@ -759,7 +759,13 @@ class FlowTape:
         with self.lock:
             self._by_stream = universe
 
-        async with websockets.connect(url, max_size=2 ** 24, ping_interval=None) as ws:
+        # ping_interval/ping_timeout : cf. le même correctif sur tickcapture.py
+        # (2026-09-29) — sans eux, une coupure réseau sans trame de fermeture
+        # propre laisse le websocket « zombie » indéfiniment, sans jamais
+        # déclencher la boucle de reprise. Corrigé ici par précaution, avant
+        # qu'un incident réel ne le révèle (comme sur tickcapture.py).
+        async with websockets.connect(url, max_size=2 ** 24,
+                                      ping_interval=20, ping_timeout=20) as ws:
             async def send(m):
                 await ws.send(json.dumps(m))
 
