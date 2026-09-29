@@ -927,6 +927,13 @@ def hedge_fig(symbol: str, lang: str, window_min: int = 15,
                                    f"%{{y:+.1f}} $M<extra></extra>"))
     lay = with_legend(base_layout(
         f"{title} — {lab} : {total:+.0f} $M → {verdict}", height=340))
+    # 5 entrées de légende assez longues : sur une largeur étroite (page /scalp),
+    # Plotly les passe sur DEUX lignes plutôt qu'une, et la marge par défaut
+    # (pensée pour une seule ligne) laisse la seconde chevaucher le haut des
+    # courbes. Marge fixe, pas un réglage utilisateur : le graphe est reconstruit
+    # à chaque cycle (2 s), rien de manuel ne survivrait de toute façon.
+    lay["margin"]["t"] += 26
+    lay["legend"]["y"] = 1.22
     lay["yaxis"]["title"] = dict(text=t(lang, "hedge_axis_cum"),
                                  font=dict(color=C["muted"]))
     if xrange:
