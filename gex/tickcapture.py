@@ -340,8 +340,17 @@ class TickCapture:
             self._state = "degraded"
             raise RuntimeError("aucun future à suivre")
 
+        # ping_interval/ping_timeout : SANS eux, une coupure réseau sans trame
+        # de fermeture propre (constatée le 2026-09-29 14h20 — rtquote.QUOTES,
+        # sur une connexion différente avec ping actif, a détecté la coupure et
+        # s'est reconnectée en quelques secondes ; cette connexion-ci, muette
+        # sur ce point, est restée « zombie » 14 minutes sans lever d'exception,
+        # donc sans jamais déclencher la boucle de reprise de _run) : le websocket
+        # ne remarque jamais qu'il ne reçoit plus rien, la boucle de reprise
+        # (cf. _run) n'est donc jamais déclenchée. Mêmes valeurs que les autres
+        # connexions dxLink de ce projet (rtquote, flowtape, capturebus).
         async with websockets.connect(url, max_size=2 ** 24,
-                                      ping_interval=None) as ws:
+                                      ping_interval=20, ping_timeout=20) as ws:
             async def send(m):
                 await ws.send(json.dumps(m))
 
