@@ -928,22 +928,12 @@ def hedge_fig(symbol: str, lang: str, window_min: int = 15,
     lay = with_legend(base_layout(
         f"{title} — {lab} : {total:+.0f} $M → {verdict}", height=340))
     # 5 entrées de légende assez longues : sur une largeur étroite (page /scalp),
-    # Plotly les passe sur DEUX lignes plutôt qu'une. `y` en coordonnées papier
-    # (0-1 sur TOUTE l'image) : au-delà de 1 c'est hors cadre, donc rogné, quel
-    # que soit `margin` — la marge ne fait qu'agrandir la zone RÉSERVÉE dans le
-    # cadre existant, elle n'agrandit pas le cadre. Fixe (pas un réglage
-    # utilisateur) : le graphe est reconstruit à chaque cycle (2 s).
-    lay["margin"]["t"] += 34
-    lay["legend"]["y"] = 1.0
-    lay["legend"]["yanchor"] = "bottom"
-    # Marge verticale de l'axe (pas seulement du cadre) : sans elle, les courbes
-    # touchent le haut/bas de la zone de tracé elle-même — la légende peut être
-    # bien positionnée hors du graphe et sembler quand même "sur" les courbes
-    # si celles-ci collent au bord. ±30 $M de respiration, ou plus si l'écart
-    # réel dépasse (jamais moins que les 30 $M demandés).
-    y_all = np.concatenate(cats + [cum])
-    pad = max(30.0, (y_all.max() - y_all.min()) * 0.08)
-    lay["yaxis"]["range"] = [float(y_all.min()) - pad, float(y_all.max()) + pad]
+    # Plotly les passe sur DEUX lignes plutôt qu'une, et la marge par défaut
+    # (pensée pour une seule ligne) laisse la seconde chevaucher le haut des
+    # courbes. Marge fixe, pas un réglage utilisateur : le graphe est reconstruit
+    # à chaque cycle (2 s), rien de manuel ne survivrait de toute façon.
+    lay["margin"]["t"] += 26
+    lay["legend"]["y"] = 1.22
     lay["yaxis"]["title"] = dict(text=t(lang, "hedge_axis_cum"),
                                  font=dict(color=C["muted"]))
     if xrange:
