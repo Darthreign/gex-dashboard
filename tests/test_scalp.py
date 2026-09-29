@@ -157,22 +157,3 @@ def test_should_log_signal_cooldown_nempeche_pas_une_alerte_differente():
     last = ("amplification", 1, 1000.0)
     assert scalp.should_log_signal(("calm", 0), "brake", -1,
                                    last_logged=last, now=1005.0) is True
-
-
-def test_hedge_live_key():
-    assert scalp.hedge_live_key("NQ", -1) == ("NQ", -1)
-    assert scalp.hedge_live_key("NQ", 15) is None
-    assert scalp.hedge_live_key("NQ", 0) is None
-
-
-def test_should_render_hedge_une_seule_fois_par_entree_en_live():
-    key = scalp.hedge_live_key("NQ", -1)
-    assert scalp.should_render_hedge(None, key) is True        # première fois -> rend
-    assert scalp.should_render_hedge(key, key) is False         # déjà rendu pour cette entrée
-    autre = scalp.hedge_live_key("ES", -1)
-    assert scalp.should_render_hedge(key, autre) is True        # changement de symbole -> rend
-
-
-def test_should_render_hedge_toujours_hors_live():
-    assert scalp.should_render_hedge(("NQ", -1), None) is True   # sortie du live -> rend
-    assert scalp.should_render_hedge(None, None) is True         # jamais en live -> rend à chaque fois

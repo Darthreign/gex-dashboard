@@ -3,7 +3,6 @@ pas le réseau — utilise le client de test Flask directement, sans lancer de
 vrai serveur.
 """
 from __future__ import annotations
-import json
 
 from datetime import datetime
 
@@ -302,39 +301,3 @@ def test_stream_route_emet_un_evenement_sse_par_changement(monkeypatch):
     first = next(gen)
     second = next(gen)
     assert first == b"data: 30500.0\n\n" and second == b"data: 30500.25\n\n"
-
-
-def test_hedge_stream_refuse_les_symboles_hors_nq_es():
-    assert _client().get("/api/v1/SPX/hedge_stream").status_code == 404
-
-
-def test_hedge_stream_emet_seulement_les_points_nouveaux_et_jamais_deux_fois(monkeypatch):
-    """Chantier extendTraces (cf. passation.md) : le flux ne rejoue jamais un
-    point déjà émis, et ignore tout ce qui précède l'ouverture de la connexion."""
-    from gex import api, flowtape
-
-    monkeypatch.setattr(api.time, "time", lambda: 1000.0)
-    monkeypatch.setattr(api.time, "sleep", lambda s: None)
-    appels = iter([
-        [(999.0, 5.0, 0)],                                    # antérieur à l'ouverture -> rien
-        [(999.0, 5.0, 0), (1001.0, 10.0, 1)],                 # un nouveau point
-        [(999.0, 5.0, 0), (1001.0, 10.0, 1)],                 # rejoué -> rien de plus
-        [(999.0, 5.0, 0), (1001.0, 10.0, 1), (1002.0, -3.0, 2)],
-    ])
-
-    class FauxTape:
-        def live_points(self, symbol, window):
-            return next(appels, appels_last)
-
-    appels_last = [(999.0, 5.0, 0), (1001.0, 10.0, 1), (1002.0, -3.0, 2)]
-    monkeypatch.setattr(flowtape, "TAPE", FauxTape())
-
-    resp = _client().get("/api/v1/NQ/hedge_stream")
-    assert resp.mimetype == "text/event-stream"
-    gen = resp.response
-    ouverture = next(gen)                             # commentaire SSE immédiat (cf. gen())
-    assert ouverture.startswith(b":")
-    first = json.loads(next(gen)[6:])
-    second = json.loads(next(gen)[6:])
-    assert first == {"ts": 1001.0, "val": 10.0, "cat": 1}
-    assert second == {"ts": 1002.0, "val": -3.0, "cat": 2}

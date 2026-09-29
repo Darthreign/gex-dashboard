@@ -17,7 +17,6 @@ respecter : ce serveur ne doit pas être exposé au-delà de la machine locale
 """
 from __future__ import annotations
 
-import json
 import time
 from datetime import datetime
 from datetime import time as dt_time
@@ -469,49 +468,6 @@ def register_api(app) -> None:
                     if rounded != last_sent:
                         last_sent = rounded
                         yield f"data: {rounded}\n\n"
-                time.sleep(0.1)
-
-        return Response(gen(), mimetype="text/event-stream",
-                        headers={"Cache-Control": "no-cache",
-                                 "X-Accel-Buffering": "no"})
-
-    @server.route("/api/v1/<symbol>/hedge_stream")
-    def _hedge_stream(symbol):
-        """Flux SSE des NOUVEAUX points de pression de couverture (cf.
-        gex/flowtape.py `live_points`) — chantier extendTraces (cf.
-        passation.md) : le navigateur ajoute chaque point reçu à la courbe déjà
-        tracée (`Plotly.extendTraces`), il ne redemande jamais toute la figure.
-        Un point par ligne, jamais rejoué deux fois (`last_ts` borne bas
-        strict). Limité à NQ/ES, seul périmètre couvert par le tape signé."""
-        from flask import Response
-
-        from . import flowtape
-        symbol = symbol.upper()
-        if symbol not in ("NQ", "ES"):
-            return jsonify({"error": "symbole non couvert (NQ/ES seulement)"}), 404
-
-        def gen():
-            # Commentaire SSE immédiat (une ligne qui commence par « : », que le
-            # navigateur ignore comme donnée) : sans lui, tant qu'aucun point
-            # n'arrive (flux d'options calme, hors séance…), rien n'est envoyé
-            # et EventSource reste bloqué en readyState CONNECTING — pas OPEN —
-            # potentiellement pendant plusieurs minutes. Sert aussi de heartbeat
-            # périodique (garde la connexion active pour le proxy/le navigateur).
-            yield ": ouverture\n\n"
-            last_ts = time.time()          # ne rejoue rien d'antérieur à l'ouverture
-            last_ping = time.time()
-            while True:
-                # flowtape.TAPE lu à l'appel : RemoteTape ou FlowTape locale
-                # (déjà la bonne, cf. run.py) — même interface `live_points`.
-                pts = flowtape.TAPE.live_points(symbol, 300)
-                nouveaux = [p for p in pts if p[0] > last_ts]
-                for p in sorted(nouveaux, key=lambda p: p[0]):
-                    last_ts = p[0]
-                    yield f"data: {json.dumps({'ts': p[0], 'val': p[1], 'cat': p[2]})}\n\n"
-                now = time.time()
-                if now - last_ping >= 15.0:
-                    yield ": ping\n\n"
-                    last_ping = now
                 time.sleep(0.1)
 
         return Response(gen(), mimetype="text/event-stream",
