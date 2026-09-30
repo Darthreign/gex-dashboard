@@ -264,6 +264,51 @@ def zero_gamma(df: pd.DataFrame, spot: float, weight_col: str = "open_interest")
     return float(x0 - y0 * (x1 - x0) / (y1 - y0))
 
 
+def vanna_profile(df: pd.DataFrame, spot: float, weight_col: str = "open_interest",
+                  range_pct: float | None = None, steps: int | None = None
+                  ) -> tuple[np.ndarray, np.ndarray] | None:
+    """Même principe que `gamma_profile`, pour la vanna : profil de VEX net
+    recalculé sur une grille de spots hypothétiques, IV et maturités figées.
+
+    Sert à chercher où l'exposition vanna nette change de signe (cf.
+    `zero_vanna`) — un niveau DIFFÉRENT du Gamma Flip (`zero_gamma`), constaté
+    le 2026-09-30 : un « VFlip » partagé par un tiers (~30 817 sur NQ) ne
+    correspondait à aucun de nos deux zero_gamma (NDX transposé ni natif NQ),
+    écart de 500 à 1100 pts — trop grand pour être du bruit. Hypothèse (non
+    confirmée formellement) : ce tiers désignait un flip de VANNA, pas de
+    gamma — deux mécaniques distinctes (sensibilité au spot vs à la vol)."""
+    d = df[(df["iv"] > 1e-4) & (df[weight_col] > 0)]
+    if d.empty:
+        return None
+    rng = SETTINGS.zg_range if range_pct is None else range_pct
+    n = SETTINGS.zg_steps if steps is None else steps
+    grid = np.linspace(spot * (1 - rng), spot * (1 + rng), n)
+    k = d["strike"].to_numpy()[:, None]
+    t = d["t_years"].to_numpy()[:, None]
+    iv = d["iv"].to_numpy()[:, None]
+    oi = d[weight_col].to_numpy()[:, None]
+    sign = np.where((d["type"] == "C").to_numpy()[:, None], 1.0, -1.0)
+    v = greeks.vanna(grid[None, :], k, t, rates.current_rate(), iv)
+    profile = (sign * v * 0.01 * oi * CONTRACT_MULTIPLIER * grid[None, :]).sum(axis=0)
+    return grid, profile
+
+
+def zero_vanna(df: pd.DataFrame, spot: float, weight_col: str = "open_interest") -> float | None:
+    """Niveau de spot où le VEX net (recalculé à ce spot) change de signe —
+    même mécanique que `zero_gamma`, cf. `vanna_profile` pour le pourquoi."""
+    res = vanna_profile(df, spot, weight_col)
+    if res is None:
+        return None
+    grid, profile = res
+    crossings = np.where(np.diff(np.sign(profile)) != 0)[0]
+    if len(crossings) == 0:
+        return None
+    idx = crossings[np.argmin(np.abs(grid[crossings] - spot))]
+    x0, x1 = grid[idx], grid[idx + 1]
+    y0, y1 = profile[idx], profile[idx + 1]
+    return float(x0 - y0 * (x1 - x0) / (y1 - y0))
+
+
 def third_friday(year: int, month: int) -> date:
     """3e vendredi du mois — échéance des futures index CME."""
     first = date(year, month, 1)

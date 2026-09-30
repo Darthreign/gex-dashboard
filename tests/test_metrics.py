@@ -167,6 +167,44 @@ def test_zero_gamma_none_when_all_positive():
     assert metrics.zero_gamma(df, 100.0) is None
 
 
+def test_vanna_profile_crosses_pres_de_latm_forward():
+    """La vanna d'une option seule est positive sous le strike ATM-forward,
+    négative au-dessus (cf. gex/greeks.py::vanna) — un call ATM doit donc
+    produire un croisement proche du spot, contrairement au gamma (toujours
+    positif) qui ne croise jamais pour une config aussi simple."""
+    exp = far_expiry()
+    snap = make_chain(100.0, [
+        {"expiry": exp, "type": "C", "strike": 100.0, "open_interest": 100.0},
+    ])
+    df = metrics.enrich(snap)
+    zv = metrics.zero_vanna(df, 100.0)
+    assert zv is not None
+    assert 95.0 < zv < 105.0
+
+
+def test_zero_vanna_none_sans_donnees_exploitables():
+    exp = far_expiry()
+    snap = make_chain(100.0, [
+        {"expiry": exp, "type": "C", "strike": 100.0, "open_interest": 0.0},
+    ])
+    df = metrics.enrich(snap)
+    assert metrics.zero_vanna(df, 100.0) is None
+
+
+def test_vanna_profile_coherent_avec_zero_vanna():
+    exp = far_expiry()
+    snap = make_chain(100.0, [
+        {"expiry": exp, "type": "C", "strike": 100.0, "open_interest": 100.0},
+    ])
+    df = metrics.enrich(snap)
+    grid, profile = metrics.vanna_profile(df, 100.0)
+    zv = metrics.zero_vanna(df, 100.0)
+    assert len(grid) == len(profile)
+    assert profile[0] * profile[-1] < 0, "le profil doit changer de signe"
+    i = int(np.argmin(np.abs(grid - zv)))
+    assert abs(profile[i]) < abs(profile).max() * 0.05
+
+
 def test_put_call_ratios():
     exp = far_expiry()
     snap = make_chain(100.0, [
