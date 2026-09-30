@@ -67,7 +67,7 @@ def test_banner_hors_seance_donnees_insuffisantes(monkeypatch, flux):
 
 
 def test_graphe_sous_jacent_bougies_et_niveaux_dans_la_plage(monkeypatch):
-    app._LIVE_BAR.clear()
+    app._LIVE_BARS.clear()
     now = pd.Timestamp(datetime.now(ET).replace(tzinfo=None)).floor("min")
     bars = pd.DataFrame([{"timestamp": now - pd.Timedelta(minutes=m), "open": 30000.0 + m,
                           "high": 30005.0 + m, "low": 29995.0 + m, "close": 30001.0 + m}
@@ -77,7 +77,7 @@ def test_graphe_sous_jacent_bougies_et_niveaux_dans_la_plage(monkeypatch):
            "walls": []}
     fig = app.scalp_price_fig("NQ", ctx, 30050.0)
     # 60 bougies achevées + la minute en cours reconstruite en direct (cf.
-    # _live_forming_bar) : sans elle, le graphe ne montrait rien de moins de 1-2 min.
+    # _update_live_bar) : sans elle, le graphe ne montrait rien de moins de 1-2 min.
     assert fig.data[0].type == "candlestick" and len(fig.data[0].x) == 61
     assert fig.data[0].close[-1] == 30050.0
     notes = [a.text for a in fig.layout.annotations]
@@ -85,16 +85,55 @@ def test_graphe_sous_jacent_bougies_et_niveaux_dans_la_plage(monkeypatch):
     assert not any("Put Support" in n for n in notes)          # 10 000 pts hors plage : pas de ligne
 
 
-def test_live_forming_bar_accumule_puis_se_reset_au_changement_de_minute():
-    app._LIVE_BAR.clear()
+def test_graphe_sous_jacent_comble_le_trou_si_le_disque_a_du_retard(monkeypatch):
+    """Bug constaté le 2026-09-30 en direct : le disque n'a pas encore écrit la
+    minute qui vient de se terminer (flush_prices, jusqu'à 30 s de retard) alors
+    que l'horloge a déjà basculé sur la suivante — sans repli, un trou d'une
+    bougie apparaissait entre la dernière du disque et la minute en cours."""
+    app._LIVE_BARS.clear()
+    now = pd.Timestamp(datetime.now(ET).replace(tzinfo=None)).floor("min")
+    # le disque s'arrête 2 minutes avant la minute courante (now-4, now-3, now-2)
+    bars = pd.DataFrame([{"timestamp": now - pd.Timedelta(minutes=m), "open": 30000.0,
+                          "high": 30000.0, "low": 30000.0, "close": 30000.0}
+                         for m in (4, 3, 2)])
+    monkeypatch.setattr(store, "load_prices", lambda s, d: bars)
+    ctx = {"zg": None, "hvl": None, "keys": {}, "walls": []}
+    now_et = datetime.now(ET)
+    # la minute qui vient de se terminer (now - 1 min) a déjà été vue en direct...
+    app._update_live_bar("NQ", 30040.0, now_et - timedelta(minutes=1, seconds=5))
+    # ...puis l'horloge avance d'une minute avant que le disque n'ait rattrapé
+    fig = app.scalp_price_fig("NQ", ctx, 30050.0)
+    xs = list(fig.data[0].x)
+    assert len(xs) == 5, "3 bougies du disque + les 2 manquantes (now-1min, now), pas de trou"
+    # pas de saut de plus d'une minute entre deux points consécutifs
+    diffs = [(pd.Timestamp(xs[i]) - pd.Timestamp(xs[i - 1])) for i in range(1, len(xs))]
+    assert all(d == pd.Timedelta(minutes=1) for d in diffs)
+    assert fig.data[0].close[-1] == 30050.0          # la minute courante reflète le spot passé
+
+
+def test_update_live_bar_accumule_puis_retient_apres_le_changement_de_minute():
+    app._LIVE_BARS.clear()
     m0 = datetime(2026, 9, 30, 15, 32, 10, tzinfo=ET)
-    app._live_forming_bar("NQ", 30000.0, m0)
-    app._live_forming_bar("NQ", 30010.0, m0.replace(second=40))     # même minute : high/close bougent
-    bar = app._live_forming_bar("NQ", 29995.0, m0.replace(second=50))
-    assert bar == {"minute": m0.replace(second=0, microsecond=0, tzinfo=None),
-                   "open": 30000.0, "high": 30010.0, "low": 29995.0, "close": 29995.0}
-    bar2 = app._live_forming_bar("NQ", 30500.0, m0 + timedelta(minutes=1))
-    assert bar2["open"] == bar2["close"] == 30500.0                 # nouvelle minute : reset
+    app._update_live_bar("NQ", 30000.0, m0)
+    app._update_live_bar("NQ", 30010.0, m0.replace(second=40))     # même minute : high/close bougent
+    live = app._update_live_bar("NQ", 29995.0, m0.replace(second=50))
+    minute0 = m0.replace(second=0, microsecond=0, tzinfo=None)
+    assert live[minute0] == {"open": 30000.0, "high": 30010.0, "low": 29995.0, "close": 29995.0}
+    live2 = app._update_live_bar("NQ", 30500.0, m0 + timedelta(minutes=1))
+    minute1 = minute0 + timedelta(minutes=1)
+    # nouvelle minute : nouvelle entrée qui démarre à ce spot, l'ancienne RESTE
+    # (cf. test du trou ci-dessus) — pas remplacée, purgée seulement après
+    # LIVE_BARS_KEEP_MIN minutes
+    assert live2[minute1] == {"open": 30500.0, "high": 30500.0, "low": 30500.0, "close": 30500.0}
+    assert minute0 in live2
+
+
+def test_update_live_bar_purge_les_minutes_trop_vieilles():
+    app._LIVE_BARS.clear()
+    m0 = datetime(2026, 9, 30, 15, 32, 0, tzinfo=ET)
+    app._update_live_bar("NQ", 30000.0, m0)
+    live = app._update_live_bar("NQ", 30500.0, m0 + timedelta(minutes=app.LIVE_BARS_KEEP_MIN + 1))
+    assert m0.replace(tzinfo=None) not in live
 
 
 def test_graphe_sous_jacent_retombe_sur_le_dernier_jour(monkeypatch):

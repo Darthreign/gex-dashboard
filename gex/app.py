@@ -11,7 +11,7 @@ import re
 import threading
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -1256,38 +1256,47 @@ def scalp_ladder(symbol: str, ctx: dict, spot: float) -> html.Div:
 
 
 
-_LIVE_BAR: dict[str, dict] = {}
+_LIVE_BARS: dict[str, dict[datetime, dict]] = {}
+LIVE_BARS_KEEP_MIN = 5     # de quoi couvrir le retard de flush_prices (vidé toutes les 30 s)
 
 
-def _live_forming_bar(symbol: str, spot: float, now_et: datetime) -> dict:
-    """Bougie 1 min EN COURS, reconstruite à partir des échantillons de spot vus
-    par CE process (un par cycle du callback /scalp, toutes les 2 s — cf.
-    dcc.Interval "tape-tick") : pas de vraies données tick ici, le dashboard est
-    séparé de la capture (cf. gex/capturebus.py). Moins précis qu'une bougie
-    construite tick par tick (un pic de quelques secondes entre deux cycles
-    peut être manqué), mais évite l'absence totale de la minute en cours — la
-    seule bougie sur disque est celle d'AVANT, écrite une fois achevée, avec
-    jusqu'à ~90 s de retard supplémentaire (cf. scheduler.flush_prices, vidé
-    toutes les 30 s). Remise à zéro au changement de minute ET."""
+def _update_live_bar(symbol: str, spot: float, now_et: datetime) -> dict[datetime, dict]:
+    """Bougies 1 min reconstruites à partir des échantillons de spot vus par CE
+    process (un par cycle du callback /scalp, toutes les 2 s — cf. dcc.Interval
+    "tape-tick") : pas de vraies données tick ici, le dashboard est séparé de la
+    capture (cf. gex/capturebus.py).
+
+    ⚠️ On garde les quelques DERNIÈRES minutes, pas seulement celle en cours : la
+    minute qui vient de se terminer n'est pas encore forcément sur disque
+    (flush_prices ne vide que toutes les 30 s) alors que la nôtre a déjà basculé
+    sur la suivante — la jeter immédiatement créait un trou d'une bougie entre
+    la dernière écrite et la nouvelle minute en cours (constaté le 2026-09-30).
+    Le disque reste la source de vérité dès qu'il rattrape : cf. scalp_price_fig,
+    qui ne complète que les minutes manquantes après le dernier point du disque."""
     minute = now_et.replace(second=0, microsecond=0, tzinfo=None)
-    cur = _LIVE_BAR.get(symbol)
-    if cur is None or cur["minute"] != minute:
-        cur = {"minute": minute, "open": spot, "high": spot, "low": spot, "close": spot}
+    bars = _LIVE_BARS.setdefault(symbol, {})
+    cur = bars.get(minute)
+    if cur is None:
+        bars[minute] = {"open": spot, "high": spot, "low": spot, "close": spot}
     else:
         cur["high"] = max(cur["high"], spot)
         cur["low"] = min(cur["low"], spot)
         cur["close"] = spot
-    _LIVE_BAR[symbol] = cur
-    return cur
+    cutoff = minute - timedelta(minutes=LIVE_BARS_KEEP_MIN)
+    for m in [m for m in bars if m < cutoff]:
+        del bars[m]
+    return bars
 
 
 def scalp_price_fig(symbol: str, ctx: dict, spot: float, minutes: int = 180) -> go.Figure:
     """Sous-jacent en bougies 1 min (les `minutes` dernières) avec les niveaux de
     l'échelle en lignes horizontales. Lit les bougies ACHEVÉES écrites par le
-    process capture, et y ajoute la minute EN COURS reconstruite en direct (cf.
-    _live_forming_bar) — sans ça, le graphe ne montre jamais rien de moins de
-    1-2 min. Hors séance, retombe sur le dernier jour disponible (sans bougie
-    live, ce jour-là n'est plus "en cours")."""
+    process capture, et complète tout ce qui manque encore après la dernière —
+    la minute en cours, et la précédente si le disque n'a pas encore rattrapé
+    son retard de flush (cf. _update_live_bar) — sans ça, le graphe ne montre
+    jamais rien de moins de 1-2 min, voire un trou d'une bougie au changement
+    de minute. Hors séance, retombe sur le dernier jour disponible (sans
+    bougie live, ce jour-là n'est plus "en cours")."""
     title = f"{symbol} · bougies 1 min"
     today = datetime.now(ET).strftime("%Y-%m-%d")
     day = today
@@ -1305,12 +1314,12 @@ def scalp_price_fig(symbol: str, ctx: dict, spot: float, minutes: int = 180) -> 
     ts = pd.to_datetime(bars["timestamp"])
     bars = bars[ts >= ts.iloc[-1] - pd.Timedelta(minutes=minutes)]
     if day == today:
-        live = _live_forming_bar(symbol, spot, datetime.now(ET))
+        live_bars = _update_live_bar(symbol, spot, datetime.now(ET))
         last_ts = bars["timestamp"].iloc[-1] if not bars.empty else None
-        if last_ts is None or pd.Timestamp(live["minute"]) > last_ts:
-            bars = pd.concat([bars, pd.DataFrame([{
-                "timestamp": live["minute"], "open": live["open"], "high": live["high"],
-                "low": live["low"], "close": live["close"]}])], ignore_index=True)
+        manquantes = sorted(m for m in live_bars if last_ts is None or m > last_ts)
+        if manquantes:
+            bars = pd.concat([bars, pd.DataFrame([
+                {"timestamp": m, **live_bars[m]} for m in manquantes])], ignore_index=True)
     x = to_local(bars["timestamp"])
     fig = go.Figure(go.Candlestick(
         x=x, open=bars["open"], high=bars["high"], low=bars["low"], close=bars["close"],
