@@ -325,7 +325,20 @@ class TickCapture:
             row["ask_size"] = q.get("ask_size")
             row["prev_bid_size"] = q.get("prev_bid_size")
             row["prev_ask_size"] = q.get("prev_ask_size")
+            # TOUJOURS bufferisé, même le contrat SUIVANT : c'est la comparaison
+            # de volume des deux qui décide du dominant (cf. gex/roll), après coup.
             self._buf.setdefault(symbol, {}).setdefault(contract, []).append(row)
+            # ⚠️ Tout ce qui suit (spot affiché, absorption, volume profile,
+            # bougie) est un agrégat PAR SOUS-JACENT, pas par contrat — il ne
+            # doit voir que le contrat ACTIF déclaré par le courtier
+            # (self._order[symbol][0]). Constaté le 2026-09-30 : un print du
+            # contrat SUIVANT (largement moins liquide, prix pas comparable) a
+            # fait bondir le high d'une bougie de ~370 pts en une seule ligne.
+            # Avant la résolution de l'univers (self._order pas encore
+            # renseigné), on n'exclut rien plutôt que de tout perdre.
+            order = self._order.get(symbol)
+            if order and contract != order[0]:
+                return
             self._last[symbol] = float(price)
             # fenêtre glissante pour la détection d'absorption en direct (indépendante
             # du contrat : le dominant peut changer au roll, la fenêtre reste continue)
@@ -344,11 +357,7 @@ class TickCapture:
                 self._vp[symbol] = vp
             ib.update_profile(vp["levels"], row["price"], row["side"],
                               row["volume"], symbol)
-            # bougie 1 min depuis les vraies transactions (cf. PriceBar) —
-            # ⚠️ même limite que `_recent` ci-dessus : mélange contrat actif ET
-            # suivant (le dominant n'est tranché qu'après coup, cf. gex.roll),
-            # sans effet pratique tant que le suivant ne porte presque aucun
-            # volume, donc seulement autour d'un roll trimestriel.
+            # bougie 1 min depuis les vraies transactions (cf. PriceBar)
             minute = int(row["ts"] // 60) * 60
             cur = self._price_bar.get(symbol)
             if cur is None:

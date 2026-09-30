@@ -69,6 +69,35 @@ def test_flush_livre_la_bougie_en_cours():
     assert len(done) == 1 and done[0][1].open == 100.0
 
 
+def test_contrat_suivant_exclu_des_agregats_mais_bufferise():
+    """Constaté le 2026-09-30 : un print du contrat SUIVANT (largement moins
+    liquide, prix pas comparable) a fait bondir le high d'une bougie de ~370
+    pts en une seule ligne — l'agrégat par sous-jacent ne doit voir que le
+    contrat ACTIF déclaré par le courtier. Le tampon brut le garde quand même
+    (nécessaire à la comparaison de volume qui décide du roll, cf. gex.roll)."""
+    cap = TickCapture()
+    univ = {"/NQZ26:XCME": ("NQ", "/NQZ6"), "/NQH27:XCME": ("NQ", "/NQH7")}
+    cap._order["NQ"] = ["/NQZ6", "/NQH7"]          # actif déclaré : /NQZ6
+    cap.record(univ, {**_sale(30800.0, 60_000), "eventSymbol": "/NQZ26:XCME"}, 60.0)
+    # print aberrant du contrat suivant, hors de toute fourchette réelle
+    cap.record(univ, {**_sale(31200.0, 60_500), "eventSymbol": "/NQH27:XCME"}, 60.5)
+    cap.record(univ, {**_sale(30805.0, 61_000), "eventSymbol": "/NQZ26:XCME"}, 61.0)
+    bar = cap._price_bar["NQ"]
+    assert bar.high == 30805.0 and bar.low == 30800.0          # pas 31200
+    assert cap.last_price("NQ") == 30805.0
+    buf = cap.drain()
+    assert buf["NQ"]["/NQH7"][0]["price"] == 31200.0           # bufferisé quand même
+
+
+def test_ordre_pas_encore_connu_naexclut_rien():
+    """Avant la résolution de l'univers (self._order vide), on n'a aucun moyen
+    de savoir lequel est actif — mieux vaut tout garder que tout perdre."""
+    cap = TickCapture()
+    univ = {"/NQZ26:XCME": ("NQ", "/NQZ6")}
+    cap.record(univ, _sale(30800.0, 60_000), 60.0)
+    assert cap._price_bar["NQ"].open == 30800.0
+
+
 def test_deux_symboles_independants():
     cap = TickCapture()
     univ = {"/NQZ26:XCME": ("NQ", "/NQZ6"), "/ESZ26:XCME": ("ES", "/ESZ6")}
