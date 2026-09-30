@@ -404,6 +404,15 @@ def _flush_bars(bars: list, source: str) -> None:
 def flush_prices() -> None:
     """Écrit sur disque les bougies 1 min achevées par le flux temps réel.
 
+    NQ/ES sont EXCLUS de `QUOTES.drain_bars()` : ce flux Quote/Trade est
+    CONFLATÉ côté dxFeed (quelques échantillons/minute), capable de rater la
+    vraie mèche ou la vraie clôture d'une minute — écart de 10 pts constaté le
+    2026-09-30 face au relevé Tradovate réel. `CAPTURE.drain_price_bars()`
+    construit leurs bougies depuis les VRAIES transactions (TimeAndSale, même
+    flux que l'absorption) : c'est désormais la seule source pour ces deux-là.
+    Les autres sous-jacents (SPX, NDX, SMH, NVDA…) n'ont pas de capture
+    tick-à-tick — limite connue, acceptée — et restent sur QUOTES.
+
     Sans identifiants courtier, `QUOTES.drain_bars()` renvoie une liste vide
     (la couche temps réel payante est inerte), mais `PUBLIC_QUOTES` — le
     repli gratuit délayé sur NQ/ES (cf. rtquote.PublicDelayedQuotes) —
@@ -413,13 +422,16 @@ def flush_prices() -> None:
     (un point par pull, ~10 min) même là où un spot délayé existait déjà.
 
     Provenance marquée à l'écriture : "dxfeed" (courtier, licence usage
-    personnel non redistribuable) ou "dxfeed_public" (flux démo public,
-    délayé ~15-20 min) — les deux exclues de l'export par défaut (cf.
-    gex/export.py, qui n'autorise que source == "cboe"), mais distinguées
-    pour ne jamais laisser croire que l'une est l'autre.
+    personnel non redistribuable), "dxfeed_ticks" (idem, tick-accurate) ou
+    "dxfeed_public" (flux démo public, délayé ~15-20 min) — toutes exclues de
+    l'export par défaut (cf. gex/export.py, qui n'autorise que source ==
+    "cboe"), mais distinguées pour ne jamais laisser croire que l'une est
+    l'autre.
     """
-    _flush_bars(QUOTES.drain_bars(), "dxfeed")
+    quotes_bars = [(s, b) for s, b in QUOTES.drain_bars() if s not in ("NQ", "ES")]
+    _flush_bars(quotes_bars, "dxfeed")
     _flush_bars(PUBLIC_QUOTES.drain_bars(), "dxfeed_public")
+    _flush_bars(CAPTURE.drain_price_bars(), "dxfeed_ticks")
 
 
 def flush_tape() -> None:

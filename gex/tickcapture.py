@@ -53,6 +53,7 @@ import logging
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from .metrics import ET
@@ -97,6 +98,25 @@ TRACKED_FUTURES: tuple[str, ...] = ("NQ", "ES")
 UNIVERSE_REFRESH_S = 30 * 60
 
 
+@dataclass
+class PriceBar:
+    """Bougie 1 min construite depuis les VRAIES transactions (TimeAndSale),
+    pas le flux Quote/Trade conflaté de rtquote.Bar — même forme pour rester
+    consommable par scheduler._flush_bars sans changement."""
+    minute: int          # epoch de la minute (secondes, tronquées)
+    open: float
+    high: float
+    low: float
+    close: float
+    ticks: int = 1
+
+    def update(self, px: float) -> None:
+        self.high = max(self.high, px)
+        self.low = min(self.low, px)
+        self.close = px
+        self.ticks += 1
+
+
 class TickCapture:
     """Collecteur continu : une session dxLink dédiée qui bufferise chaque
     `TimeAndSale` de NQ/ES. Démarré une fois au boot ; le scheduler vide le
@@ -132,6 +152,15 @@ class TickCapture:
         # par symbole, remis à zéro au changement de séance. Contrairement à
         # `_recent`, ceci n'oublie jamais rien avant le prochain reset.
         self._vp: dict[str, dict] = {}
+        # Bougies 1 min construites depuis les VRAIES transactions (cf. record,
+        # PriceBar) — remplace, pour NQ/ES, les bougies de rtquote.QUOTES
+        # (Quote/Trade CONFLATÉ côté dxFeed : quelques échantillons/minute,
+        # capable de rater la vraie mèche ou la vraie clôture — constaté le
+        # 2026-09-30, écart de 10 pts sur un plus bas face au flux Tradovate
+        # réel). _price_bar : minute en cours par symbole ; _done_price_bars :
+        # achevées, en attente du prochain drain_price_bars.
+        self._price_bar: dict[str, PriceBar] = {}
+        self._done_price_bars: dict[str, list[PriceBar]] = {}
 
     def last_price(self, symbol: str) -> float | None:
         """Dernier prix échangé pour `symbol` ("NQ" ou "ES"), ou None."""
@@ -315,6 +344,42 @@ class TickCapture:
                 self._vp[symbol] = vp
             ib.update_profile(vp["levels"], row["price"], row["side"],
                               row["volume"], symbol)
+            # bougie 1 min depuis les vraies transactions (cf. PriceBar) —
+            # ⚠️ même limite que `_recent` ci-dessus : mélange contrat actif ET
+            # suivant (le dominant n'est tranché qu'après coup, cf. gex.roll),
+            # sans effet pratique tant que le suivant ne porte presque aucun
+            # volume, donc seulement autour d'un roll trimestriel.
+            minute = int(row["ts"] // 60) * 60
+            cur = self._price_bar.get(symbol)
+            if cur is None:
+                self._price_bar[symbol] = PriceBar(minute, row["price"], row["price"],
+                                                   row["price"], row["price"])
+            elif cur.minute == minute:
+                cur.update(row["price"])
+            else:
+                self._done_price_bars.setdefault(symbol, []).append(cur)
+                self._price_bar[symbol] = PriceBar(minute, row["price"], row["price"],
+                                                   row["price"], row["price"])
+
+    def drain_price_bars(self, flush: bool = False, now: float | None = None
+                         ) -> list[tuple[str, PriceBar]]:
+        """Retire et renvoie les bougies 1 min ACHEVÉES (cf. record, PriceBar).
+
+        Même sémantique que `rtquote.RealtimeQuotes.drain_bars` : une bougie
+        dont la minute est passée est close même si aucun tick n'est arrivé
+        depuis (NQ/ES ne s'arrêtent jamais de coter en séance, mais `flush`
+        sert à l'arrêt propre du process). Public : lu par
+        `scheduler.flush_prices`, testable sans réseau."""
+        current = int((now if now is not None else time.time()) // 60) * 60
+        with self._lock:
+            out: list[tuple[str, PriceBar]] = []
+            for symbol, lst in self._done_price_bars.items():
+                out.extend((symbol, b) for b in lst)
+            self._done_price_bars.clear()
+            for symbol in list(self._price_bar):
+                if flush or self._price_bar[symbol].minute < current:
+                    out.append((symbol, self._price_bar.pop(symbol)))
+        return out
 
     def session_profile(self, symbol: str) -> dict[float, dict]:
         """Copie du volume profile de la séance CME en cours pour `symbol` —
