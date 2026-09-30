@@ -245,6 +245,9 @@ TR: dict[str, dict[str, str]] = {
         "sc_light_flux": "flux",
         "sc_light_gamma": "gamma",
         "sc_waiting_levels": "En attente des niveaux…",
+        "sc_since_open": "{pts} pts depuis l'open",
+        "sc_vix_high_note": " · allers-retours favorables",
+        "sc_vix_low_note": " · calme : direction possible",
     },
     "en": {
         "app_title": "Gamma / Delta Exposure",
@@ -477,6 +480,9 @@ TR: dict[str, dict[str, str]] = {
         "sc_light_flux": "flow",
         "sc_light_gamma": "gamma",
         "sc_waiting_levels": "Waiting for levels…",
+        "sc_since_open": "{pts} pts since the open",
+        "sc_vix_high_note": " · favorable for whipsaws",
+        "sc_vix_low_note": " · calm: directional move possible",
     },
 }
 

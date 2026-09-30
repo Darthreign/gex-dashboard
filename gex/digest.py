@@ -198,6 +198,19 @@ def classify(net_gex: float, net_dex: float, hist=None) -> dict:
 # dire EXACTEMENT la même chose que le digest, dans la langue de l'interface.
 _GAMMA_EN = {"Gamma Positif": "Positive Gamma", "Gamma Négatif": "Negative Gamma",
              "Fort Gamma Négatif": "Strong Negative Gamma"}
+_VIX_GRADE_EN = {"Complaisance": "Complacency", "Calme": "Calm", "Normal-haut": "Normal-high",
+                 "Élevé": "High", "Stress": "Stress", "Panique": "Panic"}
+
+
+def gamma_label(lang: str, gamma: str) -> str:
+    """Traduit un libellé de `classify()["gamma"]` pour l'interface (le bot
+    Discord reste FR, cf. _GAMMA_EN)."""
+    return _GAMMA_EN.get(gamma, gamma) if lang == "en" else gamma
+
+
+def vix_grade_label(lang: str, label: str) -> str:
+    """Traduit un libellé de `vix_grade()["label"]` pour l'interface."""
+    return _VIX_GRADE_EN.get(label, label) if lang == "en" else label
 _DELTA_EN = {"Delta Positif": "Positive Delta", "Delta Négatif": "Negative Delta"}
 # Clés en FR (ce sont les libellés de classify), valeurs en EN.
 _LECTURE_RISQUE_EN = {

@@ -212,6 +212,18 @@ def test_panel_absorption_lang_en():
     assert "resistance" in div_buy.children[1].children and "résistance" not in div_buy.children[1].children
 
 
+def test_scalp_head_lang_en():
+    """Bug trouvé le 2026-10-01 : gamma/VIX restaient en français en EN,
+    _GAMMA_EN existait mais n'était jamais appelé depuis scalp_head."""
+    ctx = {"open": 30700.0, "zg": 30655.0, "gamma": "Gamma Positif", "vix": 16.3}
+    div = app.scalp_head("NQ", "en", ctx, 30745.0)
+    txt = str(div.to_plotly_json())
+    assert "Positive Gamma" in txt and "Gamma Positif" not in txt
+    assert "Normal-high" in txt and "Normal-haut" not in txt
+    assert "favorable for whipsaws" in txt and "allers-retours" not in txt
+    assert "pts since the open" in txt and "depuis l'open" not in txt
+
+
 def test_banner_voyants_lang_en(monkeypatch, flux):
     from gex import capturebus
     monkeypatch.setattr(capturebus, "remote_url", lambda: None)

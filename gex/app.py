@@ -1161,16 +1161,18 @@ def scalp_head(symbol: str, lang: str, ctx: dict, spot: float) -> html.Div:
     chips = [html.Span(etat, className=f"sc-chip sc-state-{code}")]
     if ctx["gamma"]:
         neg = "Négatif" in ctx["gamma"]
-        chips.append(html.Span(ctx["gamma"], className="sc-chip " + ("sc-neg" if neg else "sc-pos")))
+        chips.append(html.Span(digest.gamma_label(lang, ctx["gamma"]),
+                               className="sc-chip " + ("sc-neg" if neg else "sc-pos")))
     if zg is not None:
         chips.append(html.Span(f"{_sc_fmt(spot - zg)} pts / Flip {zg:.0f}", className="sc-chip"))
     vix = ctx["vix"]
     if vix is not None:
         g = digest.vix_grade(vix)
-        note = (" · allers-retours favorables" if vix > digest.VIX_SEUIL
-                else " · calme : direction possible" if vix < digest.VIX_BAS else "")
-        chips.append(html.Span(f"VIX {vix:.1f} {g['label']}{note}", className="sc-chip"))
-    ext_txt = (f"{_sc_fmt(ext)} pts depuis l'open" if ext is not None else "")
+        note = (t(lang, "sc_vix_high_note") if vix > digest.VIX_SEUIL
+                else t(lang, "sc_vix_low_note") if vix < digest.VIX_BAS else "")
+        chips.append(html.Span(f"VIX {vix:.1f} {digest.vix_grade_label(lang, g['label'])}{note}",
+                               className="sc-chip"))
+    ext_txt = (t(lang, "sc_since_open", pts=_sc_fmt(ext)) if ext is not None else "")
     return html.Div([
         html.Div([html.Span(f"{spot:,.2f}", id="sc-live-price", className="sc-spot"),
                   html.Span(symbol, className="sc-sym"),

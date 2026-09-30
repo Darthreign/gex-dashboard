@@ -326,3 +326,17 @@ def test_lecture_risque_traduite_en_anglais():
     """Le bandeau EN doit dire la meme chose que le bot FR."""
     en = digest.symbol_reading(-1, -1, lang="en")["text"]
     assert "Moves amplified both ways" in en and "No cushion" in en
+
+
+def test_gamma_label_traduit_en_anglais():
+    """Bug trouve le 2026-10-01 : la puce gamma de /scalp restait en francais
+    en EN, _GAMMA_EN existait mais n'etait jamais appele."""
+    assert digest.gamma_label("en", "Gamma Positif") == "Positive Gamma"
+    assert digest.gamma_label("en", "Fort Gamma Négatif") == "Strong Negative Gamma"
+    assert digest.gamma_label("fr", "Gamma Positif") == "Gamma Positif"
+
+
+def test_vix_grade_label_traduit_en_anglais():
+    assert digest.vix_grade_label("en", "Normal-haut") == "Normal-high"
+    assert digest.vix_grade_label("en", "Calme") == "Calm"
+    assert digest.vix_grade_label("fr", "Normal-haut") == "Normal-haut"
