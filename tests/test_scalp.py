@@ -108,6 +108,37 @@ def test_donnees_insuffisantes():
     assert a["state"] == "insufficient" and a["tone"] == "neutral"
 
 
+def test_session_state_lang_en():
+    """Bug trouvé le 2026-09-30 : le bouton EN ne traduisait rien du bandeau —
+    session_state/assess étaient câblés en français sans paramètre de langue."""
+    et = lambda h, m, d=25: datetime(2026, 9, d, h, m)
+    code, txt = scalp.session_state(et(9, 45), lang="en")
+    assert code == "open" and "15 min" in txt and "fenêtre contrarienne" not in txt
+    assert scalp.session_state(et(11, 0, d=26), lang="en")[1] == "Weekend"
+    assert scalp.session_state(et(9, 0), lang="en")[1] == "Before US open"
+
+
+def test_assess_lang_en_traduit_titre_et_detail():
+    a = scalp.assess("NQ", +40.0, +300.0, 400.0, False, None, lang="en")
+    assert a["state"] == "amplification"
+    assert "bullish" in a["title"] and "despite positive gamma" in a["title"]
+    assert "positive gamma" in a["detail"] and "net flow" in a["detail"]
+    assert "haussière" not in a["title"] and "malgré" not in a["title"]
+
+
+def test_assess_lang_en_insuffisant_et_calme():
+    assert scalp.assess("NQ", None, 0.0, 0.0, False, None, lang="en")["title"] == "Insufficient data"
+    calm = scalp.assess("NQ", +10.0, +300.0, 400.0, False, None, lang="en")
+    assert calm["title"] == "No directional move"
+
+
+def test_assess_lang_en_frein_et_sans_soutien():
+    brake = scalp.assess("NQ", +40.0, -300.0, 400.0, False, None, lang="en")
+    assert "bearish" not in brake["title"] and "bullish" in brake["title"]
+    unsupported = scalp.assess("NQ", -40.0, -10.0, 400.0, False, None, lang="en")
+    assert "bearish move without dealer support" in unsupported["title"]
+
+
 def test_prix_qui_fonce_vers_le_flip_allume_le_voyant_gamma():
     a = _a(-40.0, -300.0, 400.0, neg=False, flip=-30.0)     # Flip 30 pts SOUS le spot, on baisse
     assert a["lights"]["gamma"] is True and "prix vers le Flip" in a["detail"]

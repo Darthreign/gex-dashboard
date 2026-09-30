@@ -1119,42 +1119,44 @@ def scalp_absorption_recent(symbol: str) -> list[dict]:
     return CAPTURE.absorption_recent(symbol)
 
 
-def _absorb_line(symbol: str, a: dict, active: bool) -> html.Div:
-    cote = "support" if a["side"] == "SELL" else "résistance"
+def _absorb_line(symbol: str, a: dict, active: bool, lang: str) -> html.Div:
+    cote = t(lang, "sc_absorb_support" if a["side"] == "SELL" else "sc_absorb_resistance")
     ratio = a.get("ratio")
     age = max(0.0, time.time() - a["ts"])
-    age_txt = f"il y a {age:.0f} s" if age < 90 else f"il y a {age / 60:.0f} min"
+    age_txt = (t(lang, "sc_absorb_age_s", n=age) if age < 90
+              else t(lang, "sc_absorb_age_min", n=age / 60))
     hvl = a.get("hvl")
     # Confirmation par le volume profile de séance (cf. gex/iceberg.py::hvl_near) :
     # ce niveau concentre aussi beaucoup de volume ET un delta marqué depuis
     # l'ouverture — un HVL avec delta fort réagit souvent (tape reading).
-    hvl_txt = " · HVL" + (" confirmé" if hvl and hvl["side"] == a["side"] else "") if hvl else ""
+    hvl_txt = (t(lang, "sc_absorb_hvl_confirmed" if hvl and hvl["side"] == a["side"]
+                else "sc_absorb_hvl") if hvl else "")
     txt = (f"🧊 {cote} {a['price']:,.2f} ({ratio:.0f}x{'' if ratio and ratio < 100 else '+'})"
           f"{hvl_txt} — {age_txt}")
-    title = f"{a['n_prints']} prints, {a['total']:.0f} contrats — candidat, pas confirmé (top-of-book seulement)"
+    title = t(lang, "sc_absorb_tooltip", n=a["n_prints"], total=a["total"])
     if hvl:
-        title += (f". Volume profile de séance : palier {hvl['price']:,.0f} concentre "
-                 f"{hvl['vol']:.0f} contrats, delta {hvl['delta']:+.0f}.")
+        title += t(lang, "sc_absorb_tooltip_hvl", price=hvl["price"], vol=hvl["vol"],
+                  delta=hvl["delta"])
     return html.Div(txt, className="sc-absorb-row" + (" sc-absorb-active" if active else "")
                     + (" sc-absorb-hvl" if hvl else ""), title=title)
 
 
-def scalp_absorb_panel(symbol: str, recent: list[dict], fresh: dict | None) -> html.Div:
+def scalp_absorb_panel(symbol: str, recent: list[dict], fresh: dict | None,
+                       lang: str) -> html.Div:
     """Zone d'absorption AFFICHÉE EN PERMANENCE (jamais masquée) : les derniers
     niveaux détectés sur la fenêtre glissante (cf. TickCapture.absorption_recent),
     la plus récente en tête ; elle clignote tant qu'elle est encore fraîche
     (cf. gex/iceberg.py). Vide -> message neutre, pas une zone qui disparaît."""
     fresh_ts = fresh["ts"] if fresh else None
-    body = ([_absorb_line(symbol, a, a["ts"] == fresh_ts) for a in recent] if recent
-           else [html.Div("Aucune absorption détectée sur les 3 dernières minutes",
-                          className="sc-absorb-empty")])
-    return html.Div([html.Div("Absorption / iceberg (candidats)", className="sc-absorb-title"),
+    body = ([_absorb_line(symbol, a, a["ts"] == fresh_ts, lang) for a in recent] if recent
+           else [html.Div(t(lang, "sc_absorb_empty"), className="sc-absorb-empty")])
+    return html.Div([html.Div(t(lang, "sc_absorb_title"), className="sc-absorb-title"),
                      *body], id="sc-absorb", className="sc-absorb")
 
 
 def scalp_head(symbol: str, lang: str, ctx: dict, spot: float) -> html.Div:
     ext = scalp.extension_pts(spot, ctx["open"])
-    code, etat = scalp.session_state(datetime.now(ET))
+    code, etat = scalp.session_state(datetime.now(ET), lang)
     zg = ctx["zg"]
     chips = [html.Span(etat, className=f"sc-chip sc-state-{code}")]
     if ctx["gamma"]:
@@ -1204,15 +1206,17 @@ def scalp_inputs(symbol: str, spot: float) -> tuple[float | None, float, float]:
     return move, net, gross
 
 
-def scalp_banner(symbol: str, ctx: dict, spot: float, absorb: dict | None = None) -> html.Div:
+def scalp_banner(symbol: str, ctx: dict, spot: float, lang: str,
+                 absorb: dict | None = None) -> html.Div:
     move, net, gross = scalp_inputs(symbol, spot)
     zg = ctx.get("zg")
     neg = bool(ctx.get("gamma")) and "Négatif" in ctx["gamma"]
-    a = scalp.assess(symbol, move, net, gross, neg, (zg - spot) if zg is not None else None)
+    a = scalp.assess(symbol, move, net, gross, neg, (zg - spot) if zg is not None else None, lang)
     log_scalp_signal(symbol, a, spot, move, net, gross)
     recent = scalp_absorption_recent(symbol)
     log_absorption_levels(symbol, recent)
-    voyants = [html.Span(f"{'●' if on else '○'} {name}", className="sc-light" + (" on" if on else ""))
+    voyants = [html.Span(f"{'●' if on else '○'} {t(lang, f'sc_light_{name}')}",
+                         className="sc-light" + (" on" if on else ""))
                for name, on in a["lights"].items()]
     return html.Div([
         html.Div([
@@ -1222,7 +1226,7 @@ def scalp_banner(symbol: str, ctx: dict, spot: float, absorb: dict | None = None
         ], className="sc-banner-main"),
         # à droite du bandeau (passe en dessous si la place manque) : la place
         # vide de la bannière était l'endroit naturel plutôt qu'un bloc de plus
-        html.Div(scalp_absorb_panel(symbol, recent, absorb), className="sc-banner-side"),
+        html.Div(scalp_absorb_panel(symbol, recent, absorb, lang), className="sc-banner-side"),
     ], className=f"sc-banner sc-tone-{a['tone']}")
 
 
@@ -2694,7 +2698,7 @@ def create_app() -> Dash:
         if ctx is None:
             wait = html.Div(t(lang, "waiting_native" if symbol in ("NQ", "ES")
                               else "waiting_first_pull"), className="hint")
-            return wait, wait, wait, hedge, prints, empty_fig("En attente des niveaux…", symbol)
+            return wait, wait, wait, hedge, prints, empty_fig(t(lang, "sc_waiting_levels"), symbol)
         # dernier prix RÉELLEMENT échangé (jamais le milieu bid/ask, qui peut
         # tomber entre deux pas de cotation — cf. gex/rtquote.py Tick.price)
         raw = QUOTES.last(symbol) if credentials_present() else None
@@ -2703,7 +2707,7 @@ def create_app() -> Dash:
         price = scalp_price_fig(symbol, ctx, spot)
         price.update_layout(uirevision=f"scalp-price-{symbol}")
         absorb = scalp_absorption(symbol)
-        return (scalp_banner(symbol, ctx, spot, absorb), scalp_head(symbol, lang, ctx, spot),
+        return (scalp_banner(symbol, ctx, spot, lang, absorb), scalp_head(symbol, lang, ctx, spot),
                 scalp_ladder(symbol, ctx, spot), hedge, prints, price)
 
     @app.callback(

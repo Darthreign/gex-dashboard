@@ -52,7 +52,7 @@ def test_banner_amplification_rendu(monkeypatch, flux):
     monkeypatch.setattr(store, "load_prices", lambda s, d: _bars({8: 30000.0, 1: 30030.0}))
     flux += [(1.0, 300e6, 0), (2.0, 80e6, 1)]
     ctx = {"zg": 29900.0, "gamma": "Gamma Positif"}
-    div = app.scalp_banner("NQ", ctx, 30040.0)
+    div = app.scalp_banner("NQ", ctx, 30040.0, "fr")
     txt = str(div.to_plotly_json())
     assert "sc-tone-alert" in txt and "Amplification haussière" in txt
     assert "malgré un gamma positif" in txt
@@ -62,7 +62,7 @@ def test_banner_hors_seance_donnees_insuffisantes(monkeypatch, flux):
     from gex import capturebus
     monkeypatch.setattr(capturebus, "remote_url", lambda: None)
     monkeypatch.setattr(store, "load_prices", lambda s, d: pd.DataFrame())
-    div = app.scalp_banner("NQ", {"zg": None, "gamma": None}, 30040.0)
+    div = app.scalp_banner("NQ", {"zg": None, "gamma": None}, 30040.0, "fr")
     assert "Données insuffisantes" in str(div.to_plotly_json())
 
 
@@ -178,7 +178,7 @@ def test_scalp_absorption_recent_autonome_lit_capture(monkeypatch):
 
 def test_panel_absorption_toujours_visible_meme_vide():
     """La zone reste dans la page (jamais masquée) même sans détection."""
-    div = app.scalp_absorb_panel("NQ", [], None)
+    div = app.scalp_absorb_panel("NQ", [], None, "fr")
     assert div.className == "sc-absorb"
     txt = str(div.to_plotly_json())
     assert "Aucune absorption détectée" in txt
@@ -189,13 +189,39 @@ def test_panel_absorption_liste_les_derniers_niveaux_le_plus_recent_en_tete():
               "n_prints": 4, "ts": time.time()},
              {"side": "BUY", "price": 30500.0, "ratio": 5.0, "total": 30.0,
               "n_prints": 3, "ts": time.time() - 60}]
-    div = app.scalp_absorb_panel("NQ", recent, fresh=recent[0])
+    div = app.scalp_absorb_panel("NQ", recent, fresh=recent[0], lang="fr")
     rows = div.children[1:]
     assert len(rows) == 2
     assert "sc-absorb-active" in rows[0].className   # la fraîche clignote
     assert "sc-absorb-active" not in rows[1].className
     assert "support" in rows[0].children and "30,910.25" in rows[0].children
     assert "résistance" in rows[1].children
+
+
+def test_panel_absorption_lang_en():
+    """Bug trouvé le 2026-09-30 : le panneau d'absorption était câblé en
+    français en dur, sans passer par le système de traduction."""
+    div = app.scalp_absorb_panel("NQ", [], None, "en")
+    assert "No absorption detected" in str(div.to_plotly_json())
+    recent = [{"side": "SELL", "price": 30910.25, "ratio": 8.3, "total": 40.0,
+              "n_prints": 4, "ts": time.time()}]
+    div = app.scalp_absorb_panel("NQ", recent, fresh=recent[0], lang="en")
+    assert "support" in div.children[1].children      # SELL -> support (identique en/fr)
+    div_buy = app.scalp_absorb_panel("NQ", [{**recent[0], "side": "BUY"}],
+                                     fresh=recent[0], lang="en")
+    assert "resistance" in div_buy.children[1].children and "résistance" not in div_buy.children[1].children
+
+
+def test_banner_voyants_lang_en(monkeypatch, flux):
+    from gex import capturebus
+    monkeypatch.setattr(capturebus, "remote_url", lambda: None)
+    monkeypatch.setattr(store, "load_prices", lambda s, d: _bars({8: 30000.0, 1: 30030.0}))
+    flux += [(1.0, 300e6, 0), (2.0, 80e6, 1)]
+    ctx = {"zg": 29900.0, "gamma": "Gamma Positif"}
+    div = app.scalp_banner("NQ", ctx, 30040.0, "en")
+    txt = str(div.to_plotly_json())
+    assert "movement" in txt and "flow" in txt
+    assert "bullish" in txt and "haussière" not in txt
 
 
 def test_log_scalp_signal_journalise_une_fois_par_transition(monkeypatch):

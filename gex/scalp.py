@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, time
 
+from . import i18n
+
 # Distance (en points du sous-jacent) sous laquelle un niveau est « au contact ».
 NEAR_PTS = {"NQ": 15.0, "ES": 4.0, "NDX": 15.0, "SPX": 4.0, "SPY": 0.4, "QQQ": 0.4}
 DEFAULT_NEAR = 10.0
@@ -86,20 +88,20 @@ def nearest(rungs: list[Rung]) -> tuple[Rung | None, Rung | None]:
             max(below, key=lambda r: r.dist) if below else None)
 
 
-def session_state(now_et: datetime) -> tuple[str, str]:
+def session_state(now_et: datetime, lang: str = "fr") -> tuple[str, str]:
     """(code, libellé court) de l'état de séance US en heure de New York :
     `closed`, `pre`, `open`, `late` (après la coupure contrarienne de 16h15 Paris)."""
     if now_et.weekday() >= 5:
-        return "closed", "Week-end"
+        return "closed", i18n.t(lang, "sc_weekend")
     t = now_et.time()
     if t < OPEN_ET:
-        return "pre", "Avant l'open US"
+        return "pre", i18n.t(lang, "sc_pre_open")
     if t >= CLOSE_ET:
-        return "closed", "Séance US terminée"
+        return "closed", i18n.t(lang, "sc_closed")
     minutes = (now_et.hour * 60 + now_et.minute) - (OPEN_ET.hour * 60 + OPEN_ET.minute)
     if t < CONTRARIAN_CUT_ET:
-        return "open", f"Séance US · {minutes} min · fenêtre contrarienne"
-    return "late", f"Séance US · {minutes} min · après 16h15 (contrarien plus risqué)"
+        return "open", i18n.t(lang, "sc_session_open", minutes=minutes)
+    return "late", i18n.t(lang, "sc_session_late", minutes=minutes)
 
 
 def extension_pts(spot: float | None, open_: float | None) -> float | None:
@@ -125,7 +127,7 @@ def move_threshold(symbol: str) -> float:
 
 
 def assess(symbol: str, move_pts: float | None, net_musd: float, gross_musd: float,
-           gamma_negative: bool, dist_to_flip: float | None) -> dict:
+           gamma_negative: bool, dist_to_flip: float | None, lang: str = "fr") -> dict:
     """État d'amplification sur la fenêtre de 5 min.
 
     move_pts   : variation du prix sur la fenêtre (None si données insuffisantes)
@@ -137,8 +139,8 @@ def assess(symbol: str, move_pts: float | None, net_musd: float, gross_musd: flo
     `tone` : alert (amplification), ok (favorable au contrarien), neutral."""
     if move_pts is None:
         return {"state": "insufficient", "tone": "neutral", "direction": 0,
-                "title": "Données insuffisantes",
-                "detail": "Pas assez de prix récents (hors séance ou flux coupé).",
+                "title": i18n.t(lang, "sc_insufficient_title"),
+                "detail": i18n.t(lang, "sc_insufficient_detail"),
                 "lights": {}}
     thr = move_threshold(symbol)
     direction = 0 if abs(move_pts) < thr else (1 if move_pts > 0 else -1)
@@ -152,27 +154,29 @@ def assess(symbol: str, move_pts: float | None, net_musd: float, gross_musd: flo
     lights = {"mouvement": direction != 0,
               "flux": direction != 0 and flow_dir == direction,
               "gamma": gamma_light}
-    side = "haussière" if direction > 0 else "baissière"     # accorde avec « amplification »
-    side_m = "haussier" if direction > 0 else "baissier"     # accorde avec « mouvement »
-    flux_txt = (f"flux net {net_musd:+.0f} M$ ({ratio:.0%} à sens unique)" if gross_musd > 0
-                else "aucun flux de couverture")
-    detail = (f"Mouvement {move_pts:+.0f} pts / 5 min · {flux_txt} · "
-              f"gamma {'négatif' if gamma_negative else 'positif'}"
-              + (" · prix vers le Flip" if toward_flip else ""))
+    side = i18n._SIDE_WORD[lang][direction] if direction else ""     # accorde avec « amplification »
+    side_m = i18n._SIDE_WORD_M[lang][direction] if direction else "" # accorde avec « mouvement »
+    flux_txt = (i18n.t(lang, "sc_flux_net", net=net_musd, ratio=ratio) if gross_musd > 0
+                else i18n.t(lang, "sc_flux_none"))
+    gamma_txt = i18n.t(lang, "sc_gamma_negatif" if gamma_negative else "sc_gamma_positif")
+    toward_flip_txt = i18n.t(lang, "sc_toward_flip") if toward_flip else ""
+    detail = i18n.t(lang, "sc_detail", move_pts=move_pts, flux_txt=flux_txt,
+                    gamma_txt=gamma_txt, toward_flip_txt=toward_flip_txt)
     if direction == 0:
         return {"state": "calm", "tone": "neutral", "direction": 0,
-                "title": "Pas de mouvement directionnel", "detail": detail, "lights": lights}
+                "title": i18n.t(lang, "sc_calm_title"), "detail": detail, "lights": lights}
     if flow_dir == direction:
-        renforce = " — gamma défavorable" if gamma_light else " — malgré un gamma positif"
+        renforce = i18n.t(lang, "sc_renforce_defavorable" if gamma_light
+                          else "sc_renforce_favorable")
         return {"state": "amplification", "tone": "alert", "direction": direction,
-                "title": f"Amplification {side} détectée{renforce}",
+                "title": i18n.t(lang, "sc_amplification_title", side=side, renforce=renforce),
                 "detail": detail, "lights": lights}
     if flow_dir == -direction:
         return {"state": "brake", "tone": "ok", "direction": direction,
-                "title": f"Couverture à contre-courant : frein sur le mouvement {side_m}",
+                "title": i18n.t(lang, "sc_brake_title", side_m=side_m),
                 "detail": detail, "lights": lights}
     return {"state": "unsupported", "tone": "ok", "direction": direction,
-            "title": f"Mouvement {side_m} sans soutien des dealers — extension à corriger ?",
+            "title": i18n.t(lang, "sc_unsupported_title", side_m=side_m),
             "detail": detail, "lights": lights}
 
 

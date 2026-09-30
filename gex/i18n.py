@@ -205,6 +205,46 @@ TR: dict[str, dict[str, str]] = {
                         "auto-entretenu — le trading contrarien y est particulièrement risqué.",
         "regime_disclaimer": "Lecture mécanique de la couverture dealers, pas un signal "
                         "d'entrée ni une direction garantie.",
+
+        # --- Bandeau /scalp (gex/scalp.py::session_state, assess) ------------
+        "sc_weekend": "Week-end",
+        "sc_pre_open": "Avant l'open US",
+        "sc_closed": "Séance US terminée",
+        "sc_session_open": "Séance US · {minutes} min · fenêtre contrarienne",
+        "sc_session_late": "Séance US · {minutes} min · après 16h15 (contrarien plus risqué)",
+        "sc_insufficient_title": "Données insuffisantes",
+        "sc_insufficient_detail": "Pas assez de prix récents (hors séance ou flux coupé).",
+        "sc_calm_title": "Pas de mouvement directionnel",
+        "sc_amplification_title": "Amplification {side} détectée{renforce}",
+        "sc_brake_title": "Couverture à contre-courant : frein sur le mouvement {side_m}",
+        "sc_unsupported_title": "Mouvement {side_m} sans soutien des dealers — extension à corriger ?",
+        "sc_renforce_defavorable": " — gamma défavorable",
+        "sc_renforce_favorable": " — malgré un gamma positif",
+        "sc_detail": "Mouvement {move_pts:+.0f} pts / 5 min · {flux_txt}"
+                    "{gamma_txt}{toward_flip_txt}",
+        "sc_flux_net": "flux net {net:+.0f} M$ ({ratio:.0%} à sens unique)",
+        "sc_flux_none": "aucun flux de couverture",
+        "sc_gamma_negatif": " · gamma négatif",
+        "sc_gamma_positif": " · gamma positif",
+        "sc_toward_flip": " · prix vers le Flip",
+
+        # --- Panneau absorption /scalp (gex/app.py::scalp_absorb_panel) -------
+        "sc_absorb_title": "Absorption / iceberg (candidats)",
+        "sc_absorb_empty": "Aucune absorption détectée sur les 3 dernières minutes",
+        "sc_absorb_support": "support",
+        "sc_absorb_resistance": "résistance",
+        "sc_absorb_age_s": "il y a {n:.0f} s",
+        "sc_absorb_age_min": "il y a {n:.0f} min",
+        "sc_absorb_hvl": " · HVL",
+        "sc_absorb_hvl_confirmed": " · HVL confirmé",
+        "sc_absorb_tooltip": "{n} prints, {total:.0f} contrats — candidat, pas confirmé "
+                        "(top-of-book seulement)",
+        "sc_absorb_tooltip_hvl": ". Volume profile de séance : palier {price:,.0f} concentre "
+                        "{vol:.0f} contrats, delta {delta:+.0f}.",
+        "sc_light_mouvement": "mouvement",
+        "sc_light_flux": "flux",
+        "sc_light_gamma": "gamma",
+        "sc_waiting_levels": "En attente des niveaux…",
     },
     "en": {
         "app_title": "Gamma / Delta Exposure",
@@ -397,8 +437,53 @@ TR: dict[str, dict[str, str]] = {
                         "particularly risky here.",
         "regime_disclaimer": "A mechanical read of dealer hedging, not an entry signal or a "
                         "guaranteed direction.",
+
+        # --- /scalp banner (gex/scalp.py::session_state, assess) -------------
+        "sc_weekend": "Weekend",
+        "sc_pre_open": "Before US open",
+        "sc_closed": "US session over",
+        "sc_session_open": "US session · {minutes} min · contrarian window",
+        "sc_session_late": "US session · {minutes} min · after 4:15pm (contrarian riskier)",
+        "sc_insufficient_title": "Insufficient data",
+        "sc_insufficient_detail": "Not enough recent prices (off-hours or feed cut).",
+        "sc_calm_title": "No directional move",
+        "sc_amplification_title": "{side} amplification detected{renforce}",
+        "sc_brake_title": "Counter-trend hedging: brake on the {side_m} move",
+        "sc_unsupported_title": "{side_m} move without dealer support — extension to correct?",
+        "sc_renforce_defavorable": " — unfavorable gamma",
+        "sc_renforce_favorable": " — despite positive gamma",
+        "sc_detail": "Move {move_pts:+.0f} pts / 5 min · {flux_txt}"
+                    "{gamma_txt}{toward_flip_txt}",
+        "sc_flux_net": "net flow {net:+.0f} M$ ({ratio:.0%} one-sided)",
+        "sc_flux_none": "no hedging flow",
+        "sc_gamma_negatif": " · negative gamma",
+        "sc_gamma_positif": " · positive gamma",
+        "sc_toward_flip": " · price toward the Flip",
+
+        # --- /scalp absorption panel (gex/app.py::scalp_absorb_panel) --------
+        "sc_absorb_title": "Absorption / iceberg (candidates)",
+        "sc_absorb_empty": "No absorption detected in the last 3 minutes",
+        "sc_absorb_support": "support",
+        "sc_absorb_resistance": "resistance",
+        "sc_absorb_age_s": "{n:.0f}s ago",
+        "sc_absorb_age_min": "{n:.0f}min ago",
+        "sc_absorb_hvl": " · HVL",
+        "sc_absorb_hvl_confirmed": " · HVL confirmed",
+        "sc_absorb_tooltip": "{n} prints, {total:.0f} contracts — candidate, not confirmed "
+                        "(top-of-book only)",
+        "sc_absorb_tooltip_hvl": ". Session volume profile: level {price:,.0f} has "
+                        "{vol:.0f} contracts, delta {delta:+.0f}.",
+        "sc_light_mouvement": "movement",
+        "sc_light_flux": "flow",
+        "sc_light_gamma": "gamma",
+        "sc_waiting_levels": "Waiting for levels…",
     },
 }
+
+# haussière/haussier (accord grammatical FR) — pas de distinction en anglais,
+# cf. _PRESSURE_WORD/_BIAS_WORD ci-dessus pour le même principe.
+_SIDE_WORD = {"fr": {1: "haussière", -1: "baissière"}, "en": {1: "bullish", -1: "bearish"}}
+_SIDE_WORD_M = {"fr": {1: "haussier", -1: "baissier"}, "en": {1: "bullish", -1: "bearish"}}
 
 # Mots dérivés des codes neutres renvoyés par metrics.regime_read (pas de mot
 # figé dans une langue à la source, cf. commentaire dans regime_read).
