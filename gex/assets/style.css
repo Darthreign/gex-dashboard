@@ -706,6 +706,9 @@ a.scalp-link, a.full-link { text-decoration: none; }
   color: #fff; font-weight: 600;
   animation: sc-absorb-blink 1.1s ease-in-out infinite;
 }
+/* Confirmé par le volume profile de séance (cf. gex/iceberg.py::hvl_near) :
+   liseré doré discret, ne remplace pas le clignotement de fraîcheur. */
+.sc-absorb-hvl { border-left: 2px solid #ffaa00; padding-left: 6px; }
 @keyframes sc-absorb-blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.45; }

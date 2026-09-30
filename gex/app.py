@@ -1039,11 +1039,14 @@ def log_absorption_levels(symbol: str, recent: list[dict]) -> None:
         try:
             import journal
             ts = datetime.fromtimestamp(a["ts"], tz=LOCAL_TZ)
+            hvl = a.get("hvl") or {}
             with _JOURNAL_LOCK:
                 journal.record_absorption(
                     conn, date=ts.date().isoformat(), ts=ts.isoformat(), symbol=symbol,
                     side=a["side"], price=a["price"], ratio=a.get("ratio"),
-                    total=a.get("total"), n_prints=a.get("n_prints"))
+                    total=a.get("total"), n_prints=a.get("n_prints"),
+                    hvl_price=hvl.get("price"), hvl_delta=hvl.get("delta"),
+                    hvl_side=hvl.get("side"))
         except Exception:  # noqa: BLE001 — ne doit jamais casser le bandeau
             log.exception("Écriture de l'absorption /scalp échouée (%s, %.2f)",
                           symbol, a["price"])
@@ -1121,10 +1124,19 @@ def _absorb_line(symbol: str, a: dict, active: bool) -> html.Div:
     ratio = a.get("ratio")
     age = max(0.0, time.time() - a["ts"])
     age_txt = f"il y a {age:.0f} s" if age < 90 else f"il y a {age / 60:.0f} min"
-    txt = (f"🧊 {cote} {a['price']:,.2f} ({ratio:.0f}x{'' if ratio and ratio < 100 else '+'}) — {age_txt}")
-    return html.Div(txt, className="sc-absorb-row" + (" sc-absorb-active" if active else ""),
-                    title=f"{a['n_prints']} prints, {a['total']:.0f} contrats "
-                          "— candidat, pas confirmé (top-of-book seulement)")
+    hvl = a.get("hvl")
+    # Confirmation par le volume profile de séance (cf. gex/iceberg.py::hvl_near) :
+    # ce niveau concentre aussi beaucoup de volume ET un delta marqué depuis
+    # l'ouverture — un HVL avec delta fort réagit souvent (tape reading).
+    hvl_txt = " · HVL" + (" confirmé" if hvl and hvl["side"] == a["side"] else "") if hvl else ""
+    txt = (f"🧊 {cote} {a['price']:,.2f} ({ratio:.0f}x{'' if ratio and ratio < 100 else '+'})"
+          f"{hvl_txt} — {age_txt}")
+    title = f"{a['n_prints']} prints, {a['total']:.0f} contrats — candidat, pas confirmé (top-of-book seulement)"
+    if hvl:
+        title += (f". Volume profile de séance : palier {hvl['price']:,.0f} concentre "
+                 f"{hvl['vol']:.0f} contrats, delta {hvl['delta']:+.0f}.")
+    return html.Div(txt, className="sc-absorb-row" + (" sc-absorb-active" if active else "")
+                    + (" sc-absorb-hvl" if hvl else ""), title=title)
 
 
 def scalp_absorb_panel(symbol: str, recent: list[dict], fresh: dict | None) -> html.Div:
@@ -1244,13 +1256,41 @@ def scalp_ladder(symbol: str, ctx: dict, spot: float) -> html.Div:
 
 
 
+_LIVE_BAR: dict[str, dict] = {}
+
+
+def _live_forming_bar(symbol: str, spot: float, now_et: datetime) -> dict:
+    """Bougie 1 min EN COURS, reconstruite à partir des échantillons de spot vus
+    par CE process (un par cycle du callback /scalp, toutes les 2 s — cf.
+    dcc.Interval "tape-tick") : pas de vraies données tick ici, le dashboard est
+    séparé de la capture (cf. gex/capturebus.py). Moins précis qu'une bougie
+    construite tick par tick (un pic de quelques secondes entre deux cycles
+    peut être manqué), mais évite l'absence totale de la minute en cours — la
+    seule bougie sur disque est celle d'AVANT, écrite une fois achevée, avec
+    jusqu'à ~90 s de retard supplémentaire (cf. scheduler.flush_prices, vidé
+    toutes les 30 s). Remise à zéro au changement de minute ET."""
+    minute = now_et.replace(second=0, microsecond=0, tzinfo=None)
+    cur = _LIVE_BAR.get(symbol)
+    if cur is None or cur["minute"] != minute:
+        cur = {"minute": minute, "open": spot, "high": spot, "low": spot, "close": spot}
+    else:
+        cur["high"] = max(cur["high"], spot)
+        cur["low"] = min(cur["low"], spot)
+        cur["close"] = spot
+    _LIVE_BAR[symbol] = cur
+    return cur
+
+
 def scalp_price_fig(symbol: str, ctx: dict, spot: float, minutes: int = 180) -> go.Figure:
     """Sous-jacent en bougies 1 min (les `minutes` dernières) avec les niveaux de
-    l'échelle en lignes horizontales. Première version, à améliorer : lit les
-    bougies écrites par le process capture (retard <= 1 min) et ajoute le spot
-    live comme dernier point. Hors séance, retombe sur le dernier jour disponible."""
+    l'échelle en lignes horizontales. Lit les bougies ACHEVÉES écrites par le
+    process capture, et y ajoute la minute EN COURS reconstruite en direct (cf.
+    _live_forming_bar) — sans ça, le graphe ne montre jamais rien de moins de
+    1-2 min. Hors séance, retombe sur le dernier jour disponible (sans bougie
+    live, ce jour-là n'est plus "en cours")."""
     title = f"{symbol} · bougies 1 min"
-    day = datetime.now(ET).strftime("%Y-%m-%d")
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    day = today
     bars = store.load_prices(symbol, day)
     if bars.empty:
         days = store.price_days(symbol)
@@ -1264,6 +1304,13 @@ def scalp_price_fig(symbol: str, ctx: dict, spot: float, minutes: int = 180) -> 
         return empty_fig("Pas de bougies disponibles.", title)
     ts = pd.to_datetime(bars["timestamp"])
     bars = bars[ts >= ts.iloc[-1] - pd.Timedelta(minutes=minutes)]
+    if day == today:
+        live = _live_forming_bar(symbol, spot, datetime.now(ET))
+        last_ts = bars["timestamp"].iloc[-1] if not bars.empty else None
+        if last_ts is None or pd.Timestamp(live["minute"]) > last_ts:
+            bars = pd.concat([bars, pd.DataFrame([{
+                "timestamp": live["minute"], "open": live["open"], "high": live["high"],
+                "low": live["low"], "close": live["close"]}])], ignore_index=True)
     x = to_local(bars["timestamp"])
     fig = go.Figure(go.Candlestick(
         x=x, open=bars["open"], high=bars["high"], low=bars["low"], close=bars["close"],

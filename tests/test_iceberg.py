@@ -97,3 +97,52 @@ def test_seuils_v2_distincts_par_instrument():
     retenues que NQ à seuil égal, cf. recalibrage du 2026-09-28)."""
     assert ib.MIN_TOTAL["ES"] > ib.MIN_TOTAL["NQ"]
     assert ib.THRESHOLDS_VERSION == "v2-2026-09-29"
+
+
+# --- Volume profile de séance (HVL) -----------------------------------------
+
+def test_bucket_price_regroupe_par_palier():
+    assert ib.bucket_price(30002.0, "NQ") == 30000.0    # palier NQ = 5 pts
+    assert ib.bucket_price(30003.0, "NQ") == 30005.0    # arrondi au plus proche
+
+
+def test_update_profile_accumule_vol_et_delta():
+    levels: dict = {}
+    ib.update_profile(levels, 30001.0, "BUY", 10.0, "NQ")
+    ib.update_profile(levels, 30002.0, "SELL", 4.0, "NQ")
+    lvl = levels[30000.0]
+    assert lvl["vol"] == 14.0 and lvl["ask_vol"] == 10.0 and lvl["bid_vol"] == 4.0
+
+
+def test_update_profile_ignore_cote_indetermine():
+    levels: dict = {}
+    ib.update_profile(levels, 30000.0, "?", 10.0, "NQ")
+    assert levels == {}
+
+
+def test_hvl_levels_retient_le_palier_hors_norme():
+    # bruit de fond ~10 sur plusieurs paliers, un palier concentre 10x plus,
+    # tout du même côté (delta = 100% du volume)
+    levels = {p: {"vol": 10.0, "bid_vol": 5.0, "ask_vol": 5.0} for p in range(0, 5)}
+    levels[999] = {"vol": 100.0, "bid_vol": 0.0, "ask_vol": 100.0}
+    out = ib.hvl_levels(levels)
+    assert len(out) == 1 and out[0]["price"] == 999 and out[0]["side"] == "BUY"
+
+
+def test_hvl_levels_rejette_gros_volume_sans_delta():
+    """Beaucoup de volume mais équilibré (achat = vente) : pas un HVL directionnel."""
+    levels = {p: {"vol": 10.0, "bid_vol": 5.0, "ask_vol": 5.0} for p in range(0, 5)}
+    levels[999] = {"vol": 100.0, "bid_vol": 50.0, "ask_vol": 50.0}
+    assert ib.hvl_levels(levels) == []
+
+
+def test_hvl_levels_vide_si_trop_peu_de_paliers_actifs():
+    assert ib.hvl_levels({0: {"vol": 100.0, "bid_vol": 0.0, "ask_vol": 100.0}}) == []
+
+
+def test_hvl_near_trouve_le_palier_proche():
+    levels = {p: {"vol": 10.0, "bid_vol": 5.0, "ask_vol": 5.0} for p in range(0, 5)}
+    levels[30000.0] = {"vol": 100.0, "bid_vol": 100.0, "ask_vol": 0.0}
+    hv = ib.hvl_near(levels, 30002.0, "NQ")            # même palier (arrondi à 30000)
+    assert hv is not None and hv["side"] == "SELL"
+    assert ib.hvl_near(levels, 30500.0, "NQ") is None  # trop loin

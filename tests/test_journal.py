@@ -276,3 +276,40 @@ def test_record_absorption_meme_ts_autre_symbole_nest_pas_un_doublon(conn):
     journal.record_absorption(conn, date="2026-09-29", ts="2026-09-29T16:00:00+02:00",
                               symbol="ES", side="BUY", price=7700.0)
     assert conn.execute("SELECT COUNT(*) FROM absorption_events").fetchone()[0] == 2
+
+
+def test_record_absorption_confirmation_hvl(conn):
+    """hvl_* : confirmation par le volume profile de séance (cf. gex/iceberg.py
+    hvl_near), NULL si aucun HVL n'était à proximité — les deux cas doivent
+    survivre à l'aller-retour."""
+    journal.record_absorption(conn, date="2026-09-29", ts="2026-09-29T16:00:00+02:00",
+                              symbol="NQ", side="BUY", price=30500.0,
+                              hvl_price=30500.0, hvl_delta=420.0, hvl_side="BUY")
+    row = conn.execute("SELECT * FROM absorption_events").fetchone()
+    assert row["hvl_price"] == 30500.0 and row["hvl_delta"] == 420.0 and row["hvl_side"] == "BUY"
+
+
+def test_record_absorption_sans_hvl_reste_null(conn):
+    journal.record_absorption(conn, date="2026-09-29", ts="2026-09-29T16:00:00+02:00",
+                              symbol="NQ", side="BUY", price=30500.0)
+    row = conn.execute("SELECT * FROM absorption_events").fetchone()
+    assert row["hvl_price"] is None and row["hvl_delta"] is None and row["hvl_side"] is None
+
+
+def test_migration_ajoute_colonnes_hvl_manquantes(tmp_path):
+    """Une base créée avant l'ajout des colonnes HVL (2026-09-30) les reçoit à
+    l'ouverture, sans rien perdre — même logique que pour `polls`."""
+    import sqlite3
+    p = tmp_path / "old.sqlite"
+    old = sqlite3.connect(str(p))
+    old.execute("CREATE TABLE absorption_events (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "date TEXT, ts TEXT, symbol TEXT, side TEXT, price REAL, ratio REAL, "
+                "total REAL, n_prints INTEGER, UNIQUE(symbol, ts))")   # schéma d'avant le HVL
+    old.execute("INSERT INTO absorption_events (date, ts, symbol, side, price) "
+                "VALUES ('2026-09-29','2026-09-29T16:00:00+02:00','NQ','SELL',30500.0)")
+    old.commit(); old.close()
+    conn = journal.connect(p)                 # doit ajouter les colonnes manquantes
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(absorption_events)")}
+    assert {"hvl_price", "hvl_delta", "hvl_side"} <= cols
+    assert conn.execute("SELECT symbol FROM absorption_events").fetchone()["symbol"] == "NQ"
+    conn.close()

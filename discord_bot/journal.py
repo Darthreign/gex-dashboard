@@ -128,6 +128,10 @@ CREATE INDEX IF NOT EXISTS idx_scalp_signals_open ON scalp_signals(resolved_ts);
 -- « y avait-il une absorption près de ce prix juste avant ce signal ? ».
 -- UNIQUE(symbol, ts) : une salve = une ligne, jamais de doublon même si elle
 -- reste dans la fenêtre glissante (donc relue) plusieurs cycles de suite.
+-- hvl_* : confirmation par le volume profile de séance (cf. gex/iceberg.py
+-- hvl_near) — le niveau HVL le plus proche de `price`, s'il y en a un, au
+-- moment où la salve a été détectée. hvl_price NULL = pas de HVL à proximité,
+-- une salve normale n'en a pas forcément.
 CREATE TABLE IF NOT EXISTS absorption_events (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     date      TEXT NOT NULL,
@@ -136,6 +140,7 @@ CREATE TABLE IF NOT EXISTS absorption_events (
     side      TEXT NOT NULL,          -- 'BUY' | 'SELL' (sens agresseur)
     price     REAL NOT NULL,
     ratio     REAL, total REAL, n_prints INTEGER,
+    hvl_price REAL, hvl_delta REAL, hvl_side TEXT,
     UNIQUE(symbol, ts)
 );
 CREATE INDEX IF NOT EXISTS idx_absorption_date ON absorption_events(date);
@@ -196,6 +201,7 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA)
     _ensure_poll_columns(conn)
+    _ensure_absorption_columns(conn)
     conn.commit()
     return conn
 
@@ -211,6 +217,19 @@ def _ensure_poll_columns(conn: sqlite3.Connection) -> None:
     for col in POLL_COUNT_COLS:
         if col not in existing:
             conn.execute(f"ALTER TABLE polls ADD COLUMN {col} INTEGER")
+
+
+# Colonnes de confirmation HVL ajoutées le 2026-09-30 (cf. ABSORPTION_HVL_COLS)
+# à une table `absorption_events` qui existait déjà en production.
+ABSORPTION_HVL_COLS = (("hvl_price", "REAL"), ("hvl_delta", "REAL"), ("hvl_side", "TEXT"))
+
+
+def _ensure_absorption_columns(conn: sqlite3.Connection) -> None:
+    """Même logique que `_ensure_poll_columns`, pour `absorption_events`."""
+    existing = {r["name"] for r in conn.execute("PRAGMA table_info(absorption_events)")}
+    for col, sqltype in ABSORPTION_HVL_COLS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE absorption_events ADD COLUMN {col} {sqltype}")
 
 
 # --------------------------------------------------------------------------
@@ -518,16 +537,23 @@ def resolve_scalp_signal(conn: sqlite3.Connection, *, signal_id: int, resolved_t
 
 def record_absorption(conn: sqlite3.Connection, *, date: str, ts: str, symbol: str,
                       side: str, price: float, ratio: float | None = None,
-                      total: float | None = None, n_prints: int | None = None) -> None:
+                      total: float | None = None, n_prints: int | None = None,
+                      hvl_price: float | None = None, hvl_delta: float | None = None,
+                      hvl_side: str | None = None) -> None:
     """Journalise une salve d'absorption détectée (cf. gex/iceberg.py). INSERT
     OR IGNORE : une salve relue plusieurs cycles de suite (fenêtre glissante,
     cf. TickCapture.absorption_recent) ne crée jamais de doublon (UNIQUE(symbol,
-    ts)) — sert de filet, l'appelant est censé dédoublonner lui-même en amont."""
+    ts)) — sert de filet, l'appelant est censé dédoublonner lui-même en amont.
+
+    `hvl_*` : confirmation par le volume profile de séance (cf.
+    gex/iceberg.py::hvl_near), None si aucun HVL n'était à proximité."""
     conn.execute(
         """INSERT OR IGNORE INTO absorption_events
-           (date, ts, symbol, side, price, ratio, total, n_prints)
-           VALUES (?,?,?,?,?,?,?,?)""",
-        (date, ts, symbol, side, price, ratio, total, n_prints),
+           (date, ts, symbol, side, price, ratio, total, n_prints,
+            hvl_price, hvl_delta, hvl_side)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        (date, ts, symbol, side, price, ratio, total, n_prints,
+         hvl_price, hvl_delta, hvl_side),
     )
     conn.commit()
 

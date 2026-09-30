@@ -123,6 +123,88 @@ def flag_absorption(sweeps: list[Sweep], symbol: str, min_ratio: float = MIN_RAT
     return out
 
 
+
+# --- Volume profile de séance (HVL — High Volume Level) --------------------
+# Différent de `build_sweeps`/`flag_absorption`, qui n'ont que quelques minutes
+# de mémoire : ceci accumule TOUTE la séance (cf. TickCapture._vp, remis à zéro
+# à chaque nouvelle séance CME). La question posée n'est plus « il y a eu une
+# absorption il y a peu » mais « ce prix concentre-t-il, depuis l'ouverture,
+# beaucoup plus de volume que ses voisins ET un déséquilibre acheteur/vendeur
+# marqué ? ». Un niveau qui coche les deux réagit souvent (tape reading
+# classique) — sert de CONFIRMATION à une salve détectée au même prix, jamais
+# de détecteur à lui seul. Seuils posés au jugé (pas encore calibrés sur des
+# données réelles, cf. THRESHOLDS_VERSION pour les seuils de salve) : à revoir
+# après une séance RTH si trop/pas assez de niveaux ressortent.
+VP_BUCKET = {"NQ": 5.0, "ES": 5.0}          # points par palier de regroupement
+DEFAULT_VP_BUCKET = 5.0
+HVL_MIN_VOL_RATIO = 3.0          # palier retenu si volume >= 3x la médiane des paliers actifs
+HVL_MIN_DELTA_FRACTION = 0.35    # et delta net >= 35 % du volume du palier
+
+
+def _vp_bucket(symbol: str) -> float:
+    return VP_BUCKET.get(symbol.upper(), DEFAULT_VP_BUCKET)
+
+
+def bucket_price(price: float, symbol: str) -> float:
+    """Palier de regroupement du volume profile — un HVL par prix exact
+    n'aurait aucun sens (bruit), on regroupe par tranches de `_vp_bucket`."""
+    size = _vp_bucket(symbol)
+    return round(price / size) * size
+
+
+def update_profile(levels: dict[float, dict], price: float, side: str,
+                   volume: float, symbol: str) -> None:
+    """Ajoute un print au volume profile de séance, EN PLACE. `levels` : dict
+    palier -> {vol, bid_vol, ask_vol}, remis à zéro par l'appelant (TickCapture)
+    au changement de séance. Un côté indéterminé est ignoré (compte quand même
+    dans aucun agrégat plutôt que de fausser un delta)."""
+    if side not in ("BUY", "SELL"):
+        return
+    key = bucket_price(price, symbol)
+    lvl = levels.setdefault(key, {"vol": 0.0, "bid_vol": 0.0, "ask_vol": 0.0})
+    lvl["vol"] += volume
+    if side == "BUY":
+        lvl["ask_vol"] += volume
+    else:
+        lvl["bid_vol"] += volume
+
+
+def hvl_levels(levels: dict[float, dict], min_vol_ratio: float = HVL_MIN_VOL_RATIO,
+              min_delta_fraction: float = HVL_MIN_DELTA_FRACTION) -> list[dict]:
+    """Paliers retenus comme HVL : volume nettement au-dessus de la médiane des
+    paliers actifs de la séance ET delta net marqué, triés par volume
+    décroissant. Pure — ne lit ni n'écrit l'état de `TickCapture`."""
+    actifs = sorted(l["vol"] for l in levels.values() if l["vol"] > 0)
+    if len(actifs) < 3:
+        return []
+    mediane = actifs[len(actifs) // 2]
+    if mediane <= 0:
+        return []
+    out = []
+    for price, lvl in levels.items():
+        vol = lvl["vol"]
+        if vol < mediane * min_vol_ratio:
+            continue
+        delta = lvl["ask_vol"] - lvl["bid_vol"]
+        if abs(delta) / vol < min_delta_fraction:
+            continue
+        out.append({"price": price, "vol": vol, "delta": delta,
+                    "side": "BUY" if delta > 0 else "SELL"})
+    return sorted(out, key=lambda d: -d["vol"])
+
+
+def hvl_near(levels: dict[float, dict], price: float, symbol: str,
+            tol_buckets: int = 1, **kwargs) -> dict | None:
+    """Le HVL le plus proche de `price` (à `tol_buckets` paliers près), ou None
+    — sert à confirmer une salve d'absorption détectée au même niveau."""
+    target = bucket_price(price, symbol)
+    size = _vp_bucket(symbol)
+    for hv in hvl_levels(levels, **kwargs):
+        if abs(hv["price"] - target) <= tol_buckets * size:
+            return hv
+    return None
+
+
 def analyze(ticks: pd.DataFrame, symbol: str) -> dict:
     """Résumé : nombre de salves, nombre retenues comme absorption, détail des
     plus fortes (par ratio). Pratique pour un rapport ou un test d'ensemble."""

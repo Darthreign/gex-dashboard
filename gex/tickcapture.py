@@ -53,7 +53,9 @@ import logging
 import threading
 import time
 from collections import deque
+from datetime import UTC, datetime, timedelta
 
+from .metrics import ET
 from .rtquote import (
     BACKOFF_MAX,
     BACKOFF_START,
@@ -72,6 +74,17 @@ log = logging.getLogger(__name__)
 # ABSORPTION_FRESH_S.
 ICEBERG_WINDOW_S = 180.0
 ABSORPTION_RECOMPUTE_S = 2.0
+
+
+def _session_day(ts: float) -> str:
+    """Séance CME (18:00 ET -> 16:59 ET le lendemain) contenant `ts` (epoch s),
+    même convention que scheduler.flush_ticks : `date = (heure ET + 6h).date()`.
+    L'ET est la seule référence stable (cf. scheduler.flush_ticks pour le
+    piège du décalage Paris/ET hors des bascules DST synchronisées)."""
+    return (datetime.fromtimestamp(ts, tz=UTC).astimezone(ET)
+           + timedelta(hours=6)).strftime("%Y-%m-%d")
+
+
 ABSORPTION_FRESH_S = 20.0
 
 # Les deux futures suivis : le libellé sert de dossier de stockage
@@ -114,6 +127,11 @@ class TickCapture:
         # disque (cf. record), directement consommables par gex.iceberg.
         self._recent: dict[str, deque] = {}
         self._absorb_cache: dict[str, tuple[float, list]] = {}
+        # Volume profile de LA SÉANCE (cf. gex.iceberg.update_profile/hvl_levels) :
+        # {"session": "YYYY-MM-DD" (séance CME, cf. _session_day), "levels": {...}}
+        # par symbole, remis à zéro au changement de séance. Contrairement à
+        # `_recent`, ceci n'oublie jamais rien avant le prochain reset.
+        self._vp: dict[str, dict] = {}
 
     def last_price(self, symbol: str) -> float | None:
         """Dernier prix échangé pour `symbol` ("NQ" ou "ES"), ou None."""
@@ -150,11 +168,15 @@ class TickCapture:
             self._absorb_cache[symbol] = (now, flags)
         return flags
 
-    @staticmethod
-    def _sweep_dict(f) -> dict:
+    def _sweep_dict(self, f, symbol: str) -> dict:
+        """`hvl` : le niveau HVL de séance le plus proche (cf. gex.iceberg.hvl_near),
+        None si aucun — CONFIRMATION, pas une condition pour afficher la salve."""
+        from . import iceberg as ib
+        hvl = ib.hvl_near(self.session_profile(symbol), f.price, symbol)
         return {"side": f.side, "price": f.price,
                "ratio": round(f.ratio, 1) if f.ratio else None,
-               "total": f.total_size, "n_prints": f.n_prints, "ts": f.end_ts}
+               "total": f.total_size, "n_prints": f.n_prints, "ts": f.end_ts,
+               "hvl": hvl}
 
     def absorption_now(self, symbol: str, now: float | None = None) -> dict | None:
         """Salve d'absorption la plus marquée, ACHEVÉE depuis moins de
@@ -164,7 +186,7 @@ class TickCapture:
                    if now - f.end_ts <= ABSORPTION_FRESH_S]
         if not fraiches:
             return None
-        return self._sweep_dict(max(fraiches, key=lambda s: s.ratio or 0.0))
+        return self._sweep_dict(max(fraiches, key=lambda s: s.ratio or 0.0), symbol)
 
     def absorption_recent(self, symbol: str, limit: int = 3,
                           now: float | None = None) -> list[dict]:
@@ -173,7 +195,7 @@ class TickCapture:
         que fraîches), pour garder une trace des derniers niveaux vus."""
         now = time.time() if now is None else now
         flags = self._absorption_flags(symbol, now)
-        return [self._sweep_dict(f) for f in flags[-limit:][::-1]]
+        return [self._sweep_dict(f, symbol) for f in flags[-limit:][::-1]]
 
     def quote(self, item: dict) -> None:
         """Retient l'état de la cotation d'un contrat (bid/ask, tailles).
@@ -283,6 +305,30 @@ class TickCapture:
             cutoff = row["ts"] - ICEBERG_WINDOW_S
             while recent and recent[0]["ts"] < cutoff:
                 recent.popleft()
+            # volume profile de séance (cf. gex.iceberg.update_profile) : remis
+            # à zéro au changement de séance CME, jamais sur la fenêtre glissante
+            from . import iceberg as ib
+            session = _session_day(row["ts"])
+            vp = self._vp.get(symbol)
+            if vp is None or vp["session"] != session:
+                vp = {"session": session, "levels": {}}
+                self._vp[symbol] = vp
+            ib.update_profile(vp["levels"], row["price"], row["side"],
+                              row["volume"], symbol)
+
+    def session_profile(self, symbol: str) -> dict[float, dict]:
+        """Copie du volume profile de la séance CME en cours pour `symbol` —
+        {palier: {vol, bid_vol, ask_vol}}. Public : point testable, aussi lu
+        par capturebus pour les niveaux HVL relayés au dashboard."""
+        with self._lock:
+            vp = self._vp.get(symbol)
+            return dict(vp["levels"]) if vp else {}
+
+    def hvl_levels(self, symbol: str, **kwargs) -> list[dict]:
+        """Niveaux HVL (fort volume + delta marqué) de la séance en cours pour
+        `symbol` — cf. gex.iceberg.hvl_levels."""
+        from . import iceberg as ib
+        return ib.hvl_levels(self.session_profile(symbol), **kwargs)
 
     def _build_universe(self, access: str) -> dict[str, tuple[str, str]]:
         """streamer -> (libellé NQ/ES, code contrat), pour le contrat ACTIF ET

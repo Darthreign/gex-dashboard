@@ -1,7 +1,7 @@
 """Bandeau d'amplification de la page Scalp : entrées (mouvement 5 min, flux) et rendu."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import sys
 import time
@@ -67,6 +67,7 @@ def test_banner_hors_seance_donnees_insuffisantes(monkeypatch, flux):
 
 
 def test_graphe_sous_jacent_bougies_et_niveaux_dans_la_plage(monkeypatch):
+    app._LIVE_BAR.clear()
     now = pd.Timestamp(datetime.now(ET).replace(tzinfo=None)).floor("min")
     bars = pd.DataFrame([{"timestamp": now - pd.Timedelta(minutes=m), "open": 30000.0 + m,
                           "high": 30005.0 + m, "low": 29995.0 + m, "close": 30001.0 + m}
@@ -75,10 +76,25 @@ def test_graphe_sous_jacent_bougies_et_niveaux_dans_la_plage(monkeypatch):
     ctx = {"zg": 30020.0, "hvl": None, "keys": {"call_wall": 30100.0, "put_support": 20000.0},
            "walls": []}
     fig = app.scalp_price_fig("NQ", ctx, 30050.0)
-    assert fig.data[0].type == "candlestick" and len(fig.data[0].x) == 60
+    # 60 bougies achevées + la minute en cours reconstruite en direct (cf.
+    # _live_forming_bar) : sans elle, le graphe ne montrait rien de moins de 1-2 min.
+    assert fig.data[0].type == "candlestick" and len(fig.data[0].x) == 61
+    assert fig.data[0].close[-1] == 30050.0
     notes = [a.text for a in fig.layout.annotations]
     assert any("Gamma Flip" in n for n in notes) and any("Call Wall" in n for n in notes)
     assert not any("Put Support" in n for n in notes)          # 10 000 pts hors plage : pas de ligne
+
+
+def test_live_forming_bar_accumule_puis_se_reset_au_changement_de_minute():
+    app._LIVE_BAR.clear()
+    m0 = datetime(2026, 9, 30, 15, 32, 10, tzinfo=ET)
+    app._live_forming_bar("NQ", 30000.0, m0)
+    app._live_forming_bar("NQ", 30010.0, m0.replace(second=40))     # même minute : high/close bougent
+    bar = app._live_forming_bar("NQ", 29995.0, m0.replace(second=50))
+    assert bar == {"minute": m0.replace(second=0, microsecond=0, tzinfo=None),
+                   "open": 30000.0, "high": 30010.0, "low": 29995.0, "close": 29995.0}
+    bar2 = app._live_forming_bar("NQ", 30500.0, m0 + timedelta(minutes=1))
+    assert bar2["open"] == bar2["close"] == 30500.0                 # nouvelle minute : reset
 
 
 def test_graphe_sous_jacent_retombe_sur_le_dernier_jour(monkeypatch):
