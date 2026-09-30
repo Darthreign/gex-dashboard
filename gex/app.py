@@ -2148,8 +2148,11 @@ def create_app() -> Dash:
             ]),
 
             dcc.Interval(id="tick", interval=SETTINGS.flow_interval_s * 1000),
-            # le Tape doit défiler vivant, pas au rythme des pulls (60 s)
-            dcc.Interval(id="tape-tick", interval=2000),
+            # le Tape doit défiler vivant, pas au rythme des pulls (60 s) —
+            # 250 ms plutôt que 2 s (cf. discussion 2026-09-30) : disque quasi
+            # inutilisé à 2 s (quelques Ko/lecture), scalp_context protégé par
+            # son propre cache de 10 s (SCALP_CACHE_S) quoi qu'il arrive ici.
+            dcc.Interval(id="tape-tick", interval=250),
             # Ticker de prix /scalp : vrai flux poussé (EventSource, cf.
             # clientside_callback plus bas), aucun sondage — donc pas de dcc.Interval
             # ici. Cible inerte requise par Dash pour un callback JS sans Output
