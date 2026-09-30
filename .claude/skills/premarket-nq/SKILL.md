@@ -24,7 +24,7 @@ moins que rien dans un message de trading.
 |---|---|
 | Options / positionnement dealers | ✅ le cœur du projet |
 | NQ vs ES (leadership) | ✅ |
-| Semis / mégacaps (SMH, NVDA, AMD, AVGO, MU, TSM, AAPL, MSFT, AMZN, META, GOOGL, TSLA) | ✅ |
+| Semis / mégacaps / top 30 Nasdaq-100 (cf. liste complète plus bas) | ✅ |
 | **Taux 2Y / 10Y** | ✅ futures **ZT / ZN** |
 | **Intermarket** | ✅ **CL** (WTI), **GC** (or), **6E** (EUR/USD) |
 | Volatilité implicite | ⚠️ VIX seulement (VXN et VOLQ inaccessibles) |
@@ -46,11 +46,16 @@ courtier. **6E** (EUR/USD) en tient lieu : l'euro pèse ~57 % du panier DXY,
 **3. Le breadth de marché n'existe pas ici.** Ni la CDN CBOE ni le flux courtier
 ne servent TICK/ADD/TRIN (vérifié le 2026-09-22). Écris « Non disponible » pour
 le breadth, et utilise à la place la **participation du complexe Nasdaq** :
-combien des 12 constituants suivis (SMH, NVDA, AVGO, AMD, MU, TSM, AAPL, MSFT,
-AMZN, META, GOOGL, TSLA) sont en hausse vs leur clôture de la veille, avec les
-extrêmes. Ce n'est PAS du breadth de marché — 12 valeurs, pas 3 000 — et tu dois
-le présenter comme tel. Mais pour un scalpeur NQ, « les mégacaps confirment-elles ? »
-pese plus lourd que l'advance/decline du NYSE.
+combien des 32 constituants suivis (SMH, NVDA, AVGO, AMD, MU, TSM, AAPL, MSFT,
+AMZN, META, GOOGL, TSLA, COST, NFLX, PEP, ADBE, CSCO, AMAT, QCOM, TXN, INTU,
+ADP, BKNG, GILD, VRTX, AMGN, PANW, ISRG, CMCSA, HON, TMUS, LIN — top 30
+Nasdaq-100 par capitalisation, ajouté le 2026-09-30) sont en hausse vs leur
+clôture de la veille, avec les extrêmes. Ce n'est PAS du breadth de marché —
+32 valeurs, pas 3 000 — et tu dois le présenter comme tel. Mais pour un
+scalpeur NQ, « les mégacaps confirment-elles ? » pese plus lourd que
+l'advance/decline du NYSE. Avec 32 noms, ne les liste pas tous dans le brief —
+ne cite que les extrêmes (2-3 plus forts, 2-3 plus faibles) et le compte
+hausse/baisse global.
 
 ## Sources
 
@@ -188,7 +193,7 @@ maximum**, lisible en 90 secondes sur mobile.
 6. **Taux et intermarket** — ZT/ZN (en rappelant l'inversion prix/rendement),
    CL, GC, 6E. Cherche la **confirmation ou la divergence** avec le NQ, sans
    jamais affirmer une causalité : « cohérent avec », « semble contribuer à ».
-7. **Participation Nasdaq** — combien des 12 constituants en hausse, et les
+7. **Participation Nasdaq** — combien des 32 constituants en hausse, et les
    extrêmes. Rappelle que ce n'est pas du breadth de marché.
 8. **Calendrier du jour** — heure Paris, événement, et fenêtres de risque.
 9. **Semis / mégacaps** — uniquement ce qui est significatif.

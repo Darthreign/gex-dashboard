@@ -103,6 +103,16 @@ UNDERLYINGS: dict[str, Underlying] = {
         *[Underlying(k, k, k, family="ND", role="constituent",
                      links=("NDX", "SPX"))
           for k in ("AAPL", "MSFT", "AMZN", "META", "GOOGL", "TSLA")],
+        # Reste du top 30 Nasdaq-100 par capitalisation (ajouté le 2026-09-30 —
+        # Micron avait été repéré manquant alors qu'il pèse sur le complexe
+        # semis). Tous membres à la fois du Nasdaq-100 et du S&P 500. Liste
+        # recoupée avec earnings_calendar.json (source externe rafraîchie
+        # chaque matin) plutôt que composée de mémoire.
+        *[Underlying(k, k, k, family="ND", role="constituent",
+                     links=("NDX", "SPX"))
+          for k in ("COST", "NFLX", "PEP", "ADBE", "CSCO", "AMAT", "QCOM",
+                    "TXN", "INTU", "ADP", "BKNG", "GILD", "VRTX", "AMGN",
+                    "PANW", "ISRG", "CMCSA", "HON", "TMUS", "LIN")],
         # Secteurs absents du Nasdaq-100 : ils n'informent que le S&P
         *[Underlying(k, k, k, family="SP", role="constituent", links=("SPX",))
           for k in ("XLF", "XLE")],
