@@ -41,11 +41,18 @@ def main(host: str = "127.0.0.1", port: int = 8050) -> None:
         TAPE.start()
         # capture tick-par-tick continue NQ/ES (24/5) : session dxLink dédiée
         CAPTURE.start()
-    # threaded=True : sans ça, le serveur de dev Werkzeug traite les requêtes
-    # UNE PAR UNE — un callback lent sur la page principale (calcul Greeks sur
-    # une chaîne complète SPX/NDX) bloquait /scalp derrière lui, alors que
-    # /scalp ne dépend d'aucune de ces données (constaté le 2026-10-01).
-    create_app().run(host=host, port=port, debug=False, threaded=True)
+    # ⚠️ threaded=True RETIRÉ le 2026-10-01 : testé plus tôt dans la même
+    # journée pour débloquer /scalp derrière un callback lent, mais sous
+    # charge réelle il a empiré la situation — Python a un GIL, donc plus de
+    # threads pour du travail CPU (reconstruire des figures Plotly) n'apporte
+    # aucun parallélisme réel, juste du changement de contexte, et risque de
+    # tomber sur un verrou partagé (cache, journal). Constaté : la file de
+    # requêtes _dash-update-component en attente grossissait sans se vider
+    # (57 -> 216 en 1 min) même après avoir réglé la vraie cause du jour
+    # (un process `find` orphelin qui saturait le CPU/disque). Revenir à
+    # threaded=True un jour suppose d'abord de vérifier qu'aucun chemin
+    # chaud (callbacks /scalp) ne fait de travail CPU lourd synchrone.
+    create_app().run(host=host, port=port, debug=False)
 
 
 if __name__ == "__main__":
