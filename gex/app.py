@@ -2180,17 +2180,15 @@ def create_app() -> Dash:
 
             dcc.Interval(id="tick", interval=SETTINGS.flow_interval_s * 1000),
             # le Tape doit défiler vivant, pas au rythme des pulls (60 s).
-            # ⚠️ 250 ms testé le 2026-09-30, REVENU à 1000 ms le 2026-10-01 :
-            # refresh_scalp reconstruit 2 figures Plotly (hedge + bougies) +
-            # la table des prints + l'absorption à CHAQUE cycle — sous charge
-            # réelle (pas le test synthétique à vide), ce travail prend plus
-            # de 250 ms, donc les requêtes s'empilent plus vite qu'elles ne se
-            # terminent (constaté : dizaines de _dash-update-component
-            # jamais résolues, ERR_INSUFFICIENT_RESOURCES côté navigateur,
-            # page blanche). Le risque que l'utilisateur avait anticipé par
-            # avance ("ça va pas surcharger le flux ?") — sous-estimé la
-            # première fois en ne comptant que le coût disque, pas CPU.
-            dcc.Interval(id="tape-tick", interval=1000),
+            # ⚠️ Repassé plusieurs fois entre 250 ms et 1000 ms le 2026-10-01 :
+            # les essais à 250 ms coïncidaient à chaque fois avec d'autres
+            # soucis (un `find` orphelin saturant le CPU, puis `threaded=True`
+            # qui aggravait la contention sous charge) — jamais mesuré isolé.
+            # Repassé à 250 ms le 2026-10-01 une fois ces deux confondus
+            # réglés, À SURVEILLER : si les requêtes _dash-update-component
+            # recommencent à s'empiler sans se résorber, redescendre à 1000 ms
+            # (cf. historique dans git log de cette ligne).
+            dcc.Interval(id="tape-tick", interval=250),
             # Ticker de prix /scalp : vrai flux poussé (EventSource, cf.
             # clientside_callback plus bas), aucun sondage — donc pas de dcc.Interval
             # ici. Cible inerte requise par Dash pour un callback JS sans Output
