@@ -339,7 +339,6 @@ class TickCapture:
             order = self._order.get(symbol)
             if order and contract != order[0]:
                 return
-            self._last[symbol] = float(price)
             # fenêtre glissante pour la détection d'absorption en direct (indépendante
             # du contrat : le dominant peut changer au roll, la fenêtre reste continue)
             recent = self._recent.setdefault(symbol, deque())
@@ -349,6 +348,7 @@ class TickCapture:
                 recent.popleft()
             # volume profile de séance (cf. gex.iceberg.update_profile) : remis
             # à zéro au changement de séance CME, jamais sur la fenêtre glissante
+            # — update_profile ignore déjà un côté indéterminé, rien à faire ici.
             from . import iceberg as ib
             session = _session_day(row["ts"])
             vp = self._vp.get(symbol)
@@ -357,6 +357,17 @@ class TickCapture:
                 self._vp[symbol] = vp
             ib.update_profile(vp["levels"], row["price"], row["side"],
                               row["volume"], symbol)
+            # ⚠️ Spot affiché (_last) et bougie (_price_bar) : un print au côté
+            # agresseur INDÉTERMINÉ (ex. "UNDEFINED" dxFeed, cf. side ci-dessus)
+            # peut être un print aberrant — constaté le 2026-10-01, un seul print
+            # à +150 pts du marché a fait exploser une bougie. Aucune plateforme
+            # grand public n'affiche ce genre de tick : on l'ignore purement pour
+            # ces deux agrégats, tout en le gardant dans `_buf` (brut jamais
+            # altéré) et `_recent` (déjà filtré en aval par build_sweeps/
+            # flag_absorption, qui excluent aussi un côté indéterminé).
+            if row["side"] not in ("BUY", "SELL"):
+                return
+            self._last[symbol] = float(price)
             # bougie 1 min depuis les vraies transactions (cf. PriceBar)
             minute = int(row["ts"] // 60) * 60
             cur = self._price_bar.get(symbol)

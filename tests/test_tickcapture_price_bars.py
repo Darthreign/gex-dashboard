@@ -89,6 +89,24 @@ def test_contrat_suivant_exclu_des_agregats_mais_bufferise():
     assert buf["NQ"]["/NQH7"][0]["price"] == 31200.0           # bufferisé quand même
 
 
+def test_cote_indetermine_ignore_pour_prix_et_bougie_mais_bufferise():
+    """Constaté le 2026-10-01 : un print side="UNDEFINED" à +150 pts du marché
+    (10:06 ET) a fait exploser une bougie (range 166 pts contre ~13 pts de
+    moyenne). Aucune plateforme grand public n'affiche ce genre de tick —
+    purement ignoré pour le spot affiché et la bougie, mais toujours bufferisé
+    (brut jamais altéré) et déjà filtré en aval pour l'absorption/volume
+    profile (build_sweeps/update_profile excluent un côté indéterminé)."""
+    cap = TickCapture()
+    cap.record(UNIV, _sale(30900.0, 60_000, side="BUY"), 60.0)
+    cap.record(UNIV, _sale(31035.0, 60_500, side="UNDEFINED"), 60.5)
+    cap.record(UNIV, _sale(30905.0, 61_000, side="BUY"), 61.0)
+    assert cap.last_price("NQ") == 30905.0              # jamais passé par 31035
+    bar = cap._price_bar["NQ"]
+    assert bar.high == 30905.0 and bar.low == 30900.0   # pas 31035
+    buf = cap.drain()
+    assert 31035.0 in [r["price"] for r in buf["NQ"]["/NQZ6"]]   # bufferisé quand même
+
+
 def test_ordre_pas_encore_connu_naexclut_rien():
     """Avant la résolution de l'univers (self._order vide), on n'a aucun moyen
     de savoir lequel est actif — mieux vaut tout garder que tout perdre."""
