@@ -60,6 +60,26 @@ def _replace_with_retry(tmp: Path, path: Path) -> None:
             time.sleep(REPLACE_DELAY_S * (essai + 1))
 
 
+def _read_parquet_retry(path: Path) -> pd.DataFrame:
+    """`pd.read_parquet`, en réessayant sur verrou transitoire (~5 s au total).
+
+    Symétrique à `_replace_with_retry` côté lecture : constaté le 2026-10-01,
+    `load_history` (lue par le dashboard, écrite par 3 producteurs côté
+    capture, cf. append_history) a planté avec `PermissionError` en tombant
+    sur le court instant où `os.replace` remplace le fichier — Windows refuse
+    l'ouverture en lecture pendant ce remplacement. Sans reprise, une seule
+    collision faisait planter le callback /scalp entier (page blanche,
+    « Error loading layout »)."""
+    for essai in range(REPLACE_RETRIES):
+        try:
+            return pd.read_parquet(path)
+        except PermissionError:
+            if essai == REPLACE_RETRIES - 1:
+                raise
+            time.sleep(REPLACE_DELAY_S * (essai + 1))
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 def _write_atomic(df: pd.DataFrame, path: Path) -> None:
     """Écrit via un fichier temporaire puis remplace.
 
@@ -201,7 +221,7 @@ def price_days(symbol: str) -> list[str]:
 
 def load_prices(symbol: str, day: str) -> pd.DataFrame:
     path = SETTINGS.data_dir / "prices" / symbol / f"{day}.parquet"
-    return pd.read_parquet(path) if path.exists() else pd.DataFrame()
+    return _read_parquet_retry(path) if path.exists() else pd.DataFrame()
 
 
 def append_ticks(symbol: str, rows: list[dict], ts: datetime) -> Path | None:
@@ -421,5 +441,5 @@ def load_history(symbol: str | None = None) -> pd.DataFrame:
     path = SETTINGS.data_dir / "history" / "metrics.parquet"
     if not path.exists():
         return pd.DataFrame()
-    df = pd.read_parquet(path)
+    df = _read_parquet_retry(path)
     return df[df["symbol"] == symbol] if symbol else df

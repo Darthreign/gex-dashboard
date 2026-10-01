@@ -70,6 +70,62 @@ def test_temporaire_unique_par_ecriture(tmp_path, monkeypatch):
     assert all(v != str(cible) for v in vus)
 
 
+def test_read_parquet_retry_reussit_apres_verrou_transitoire(tmp_path, monkeypatch):
+    """Symétrique côté lecture de _replace_with_retry — constaté le 2026-10-01 :
+    load_history (lue par le dashboard, écrite par 3 producteurs côté capture)
+    plantait avec PermissionError en tombant sur le court instant où
+    os.replace remplace le fichier, faisant planter tout le callback /scalp
+    (page blanche, « Error loading layout »)."""
+    path = tmp_path / "x.parquet"
+    pd.DataFrame({"a": [1, 2]}).to_parquet(path, index=False)
+    reel = pd.read_parquet
+    appels = {"n": 0}
+
+    def flaky(p, *a, **kw):
+        appels["n"] += 1
+        if appels["n"] < 3:
+            raise PermissionError("verrou transitoire")
+        return reel(p, *a, **kw)
+
+    monkeypatch.setattr(pd, "read_parquet", flaky)
+    monkeypatch.setattr(store.time, "sleep", lambda s: None)
+    df = store._read_parquet_retry(path)
+    assert len(df) == 2 and appels["n"] == 3
+
+
+def test_read_parquet_retry_finit_par_lever_si_le_verrou_persiste(tmp_path, monkeypatch):
+    path = tmp_path / "x.parquet"
+
+    def toujours_verrouille(p, *a, **kw):
+        raise PermissionError("verrouillé")
+
+    monkeypatch.setattr(pd, "read_parquet", toujours_verrouille)
+    monkeypatch.setattr(store.time, "sleep", lambda s: None)
+    with pytest.raises(PermissionError):
+        store._read_parquet_retry(path)
+
+
+def test_load_history_survit_a_un_verrou_transitoire(tmp_path, monkeypatch):
+    monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
+    store.append_history({"timestamp": pd.Timestamp("2026-10-01 10:00"), "symbol": "NDX",
+                          "spot": 100.0, "net_gex": 1e9, "zero_gamma": 101.0,
+                          "pc_oi": 1.0, "pc_volume": 1.0, "net_gex_0dte": 0.0,
+                          "basis": None, "source": "cboe", "net_dex": 0.0})
+    reel = pd.read_parquet
+    appels = {"n": 0}
+
+    def flaky(p, *a, **kw):
+        appels["n"] += 1
+        if appels["n"] < 2:
+            raise PermissionError("verrou transitoire")
+        return reel(p, *a, **kw)
+
+    monkeypatch.setattr(pd, "read_parquet", flaky)
+    monkeypatch.setattr(store.time, "sleep", lambda s: None)
+    df = store.load_history("NDX")
+    assert len(df) == 1 and appels["n"] == 2
+
+
 def test_pas_de_temporaire_orphelin_apres_echec(tmp_path, monkeypatch):
     """Une écriture qui échoue ne doit pas laisser de `.tmp` derrière elle."""
     monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
