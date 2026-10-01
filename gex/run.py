@@ -41,7 +41,11 @@ def main(host: str = "127.0.0.1", port: int = 8050) -> None:
         TAPE.start()
         # capture tick-par-tick continue NQ/ES (24/5) : session dxLink dédiée
         CAPTURE.start()
-    create_app().run(host=host, port=port, debug=False)
+    # threaded=True : sans ça, le serveur de dev Werkzeug traite les requêtes
+    # UNE PAR UNE — un callback lent sur la page principale (calcul Greeks sur
+    # une chaîne complète SPX/NDX) bloquait /scalp derrière lui, alors que
+    # /scalp ne dépend d'aucune de ces données (constaté le 2026-10-01).
+    create_app().run(host=host, port=port, debug=False, threaded=True)
 
 
 if __name__ == "__main__":
