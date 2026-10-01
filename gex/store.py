@@ -437,9 +437,27 @@ def load_previous_snapshot(symbol: str, before_day: str) -> tuple[str, pd.DataFr
     return (prev, df) if df is not None else None
 
 
+_HISTORY_CACHE: tuple[float, pd.DataFrame] | None = None
+HISTORY_CACHE_S = 5.0
+
+
 def load_history(symbol: str | None = None) -> pd.DataFrame:
+    """⚠️ Mis en cache `HISTORY_CACHE_S` (lecture BRUTE, avant filtrage par
+    symbole) : `metrics.parquet` a 3 producteurs côté capture (cf.
+    append_history) ET plusieurs lecteurs par cycle côté dashboard (5 points
+    d'appel dans gex/app.py). Sans ce cache, `_read_parquet_retry` tolère la
+    collision mais ne la réduit pas — constaté le 2026-10-01 : les échecs
+    d'écriture sont passés d'un toutes les 15-45 min à un toutes les 15-50 s
+    après l'ajout de la seule reprise en lecture, le dashboard retenant le
+    fichier plus longtemps (jusqu'à ~5 s de retries) sans en lire moins
+    souvent. L'historique n'a de toute façon pas besoin d'une fraîcheur
+    inférieure à la cadence des pulls (20-60 s par symbole)."""
+    global _HISTORY_CACHE
     path = SETTINGS.data_dir / "history" / "metrics.parquet"
-    if not path.exists():
-        return pd.DataFrame()
-    df = _read_parquet_retry(path)
-    return df[df["symbol"] == symbol] if symbol else df
+    now = time.time()
+    if _HISTORY_CACHE and now - _HISTORY_CACHE[0] < HISTORY_CACHE_S:
+        df = _HISTORY_CACHE[1]
+    else:
+        df = _read_parquet_retry(path) if path.exists() else pd.DataFrame()
+        _HISTORY_CACHE = (now, df)
+    return df[df["symbol"] == symbol] if symbol and not df.empty else df

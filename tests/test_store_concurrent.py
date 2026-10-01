@@ -106,6 +106,7 @@ def test_read_parquet_retry_finit_par_lever_si_le_verrou_persiste(tmp_path, monk
 
 
 def test_load_history_survit_a_un_verrou_transitoire(tmp_path, monkeypatch):
+    store._HISTORY_CACHE = None
     monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
     store.append_history({"timestamp": pd.Timestamp("2026-10-01 10:00"), "symbol": "NDX",
                           "spot": 100.0, "net_gex": 1e9, "zero_gamma": 101.0,
