@@ -31,6 +31,7 @@ def flux(monkeypatch):
 
 
 def test_mouvement_5_min_depuis_la_bougie_assez_ancienne(monkeypatch, flux):
+    app._PRICES_CACHE.clear()
     monkeypatch.setattr(store, "load_prices",
                         lambda s, d: _bars({8: 30000.0, 6: 30010.0, 1: 30030.0}))
     flux += [(1.0, 200e6, 0), (2.0, 150e6, 0)]
@@ -40,13 +41,16 @@ def test_mouvement_5_min_depuis_la_bougie_assez_ancienne(monkeypatch, flux):
 
 
 def test_pas_de_mouvement_si_aucune_bougie_recente(monkeypatch, flux):
+    app._PRICES_CACHE.clear()
     monkeypatch.setattr(store, "load_prices", lambda s, d: _bars({120: 30000.0, 90: 30010.0}))
     assert app.scalp_inputs("NQ", 30040.0)[0] is None       # dernière bougie trop ancienne
+    app._PRICES_CACHE.clear()
     monkeypatch.setattr(store, "load_prices", lambda s, d: pd.DataFrame())
     assert app.scalp_inputs("NQ", 30040.0)[0] is None
 
 
 def test_banner_amplification_rendu(monkeypatch, flux):
+    app._PRICES_CACHE.clear()
     from gex import capturebus
     monkeypatch.setattr(capturebus, "remote_url", lambda: None)
     monkeypatch.setattr(store, "load_prices", lambda s, d: _bars({8: 30000.0, 1: 30030.0}))
@@ -59,6 +63,7 @@ def test_banner_amplification_rendu(monkeypatch, flux):
 
 
 def test_banner_hors_seance_donnees_insuffisantes(monkeypatch, flux):
+    app._PRICES_CACHE.clear()
     from gex import capturebus
     monkeypatch.setattr(capturebus, "remote_url", lambda: None)
     monkeypatch.setattr(store, "load_prices", lambda s, d: pd.DataFrame())
@@ -68,6 +73,7 @@ def test_banner_hors_seance_donnees_insuffisantes(monkeypatch, flux):
 
 def test_graphe_sous_jacent_bougies_et_niveaux_dans_la_plage(monkeypatch):
     app._LIVE_BARS.clear()
+    app._PRICES_CACHE.clear()
     now = pd.Timestamp(datetime.now(ET).replace(tzinfo=None)).floor("min")
     bars = pd.DataFrame([{"timestamp": now - pd.Timedelta(minutes=m), "open": 30000.0 + m,
                           "high": 30005.0 + m, "low": 29995.0 + m, "close": 30001.0 + m}
@@ -91,6 +97,7 @@ def test_graphe_sous_jacent_comble_le_trou_si_le_disque_a_du_retard(monkeypatch)
     que l'horloge a déjà basculé sur la suivante — sans repli, un trou d'une
     bougie apparaissait entre la dernière du disque et la minute en cours."""
     app._LIVE_BARS.clear()
+    app._PRICES_CACHE.clear()
     now = pd.Timestamp(datetime.now(ET).replace(tzinfo=None)).floor("min")
     # le disque s'arrête 2 minutes avant la minute courante (now-4, now-3, now-2)
     bars = pd.DataFrame([{"timestamp": now - pd.Timedelta(minutes=m), "open": 30000.0,
@@ -137,6 +144,7 @@ def test_update_live_bar_purge_les_minutes_trop_vieilles():
 
 
 def test_graphe_sous_jacent_retombe_sur_le_dernier_jour(monkeypatch):
+    app._PRICES_CACHE.clear()
     bars = pd.DataFrame([{"timestamp": pd.Timestamp("2026-09-25 15:00") + pd.Timedelta(minutes=m),
                           "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5} for m in range(30)])
     monkeypatch.setattr(store, "load_prices",
@@ -225,6 +233,7 @@ def test_scalp_head_lang_en():
 
 
 def test_banner_voyants_lang_en(monkeypatch, flux):
+    app._PRICES_CACHE.clear()
     from gex import capturebus
     monkeypatch.setattr(capturebus, "remote_url", lambda: None)
     monkeypatch.setattr(store, "load_prices", lambda s, d: _bars({8: 30000.0, 1: 30030.0}))

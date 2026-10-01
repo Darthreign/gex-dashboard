@@ -1194,7 +1194,7 @@ def scalp_inputs(symbol: str, spot: float) -> tuple[float | None, float, float]:
     from .flowtape import TAPE
     move = None
     day = datetime.now(ET).strftime("%Y-%m-%d")
-    bars = store.load_prices(symbol, day)
+    bars = _load_prices_cached(symbol, day)
     if not bars.empty:
         cible = pd.Timestamp(datetime.now(ET).replace(tzinfo=None)) - pd.Timedelta(seconds=scalp.WINDOW_S)
         ts = pd.to_datetime(bars["timestamp"])
@@ -1294,6 +1294,31 @@ def _update_live_bar(symbol: str, spot: float, now_et: datetime) -> dict[datetim
     return bars
 
 
+_PRICES_CACHE: dict[tuple[str, str], tuple[float, pd.DataFrame]] = {}
+PRICES_CACHE_S = 2.0
+
+
+def _load_prices_cached(symbol: str, day: str) -> pd.DataFrame:
+    """`store.load_prices`, mis en cache quelques secondes.
+
+    ⚠️ Sans ce cache, un lecteur toutes les 250 ms (cf. dcc.Interval
+    "tape-tick") entre en collision avec l'écriture atomique périodique du
+    process capture (os.replace, qui exige un accès exclusif sous Windows) —
+    constaté le 2026-10-01 : échec de flush NQ quasi continu pendant ~30 min
+    (`gex.store` : « verrouillé par un autre processus », PID du dashboard).
+    2 s suffit largement (une bougie ne change qu'une fois par minute, ou par
+    cycle de rendu pour la minute en cours via _update_live_bar) et retombe
+    le risque de collision à une fraction de celui à 250 ms."""
+    key = (symbol, day)
+    now = time.time()
+    hit = _PRICES_CACHE.get(key)
+    if hit and now - hit[0] < PRICES_CACHE_S:
+        return hit[1]
+    bars = store.load_prices(symbol, day)
+    _PRICES_CACHE[key] = (now, bars)
+    return bars
+
+
 def scalp_price_fig(symbol: str, ctx: dict, spot: float, minutes: int = 180) -> go.Figure:
     """Sous-jacent en bougies 1 min (les `minutes` dernières) avec les niveaux de
     l'échelle en lignes horizontales. Lit les bougies ACHEVÉES écrites par le
@@ -1306,12 +1331,12 @@ def scalp_price_fig(symbol: str, ctx: dict, spot: float, minutes: int = 180) -> 
     title = f"{symbol} · bougies 1 min"
     today = datetime.now(ET).strftime("%Y-%m-%d")
     day = today
-    bars = store.load_prices(symbol, day)
+    bars = _load_prices_cached(symbol, day)
     if bars.empty:
         days = store.price_days(symbol)
         if days:
             day = days[-1]
-            bars = store.load_prices(symbol, day)
+            bars = _load_prices_cached(symbol, day)
             title += f" · dernier jour disponible ({day})"
             # hors séance : on montre la séance US (jusqu'à la clôture 16h ET), pas la nuit
             bars = bars[pd.to_datetime(bars["timestamp"]) <= pd.Timestamp(f"{day} 16:00")]
