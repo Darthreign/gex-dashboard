@@ -2180,15 +2180,16 @@ def create_app() -> Dash:
 
             dcc.Interval(id="tick", interval=SETTINGS.flow_interval_s * 1000),
             # le Tape doit défiler vivant, pas au rythme des pulls (60 s).
-            # ⚠️ Repassé plusieurs fois entre 250 ms et 1000 ms le 2026-10-01 :
-            # les essais à 250 ms coïncidaient à chaque fois avec d'autres
-            # soucis (un `find` orphelin saturant le CPU, puis `threaded=True`
-            # qui aggravait la contention sous charge) — jamais mesuré isolé.
-            # Repassé à 250 ms le 2026-10-01 une fois ces deux confondus
-            # réglés, À SURVEILLER : si les requêtes _dash-update-component
-            # recommencent à s'empiler sans se résorber, redescendre à 1000 ms
-            # (cf. historique dans git log de cette ligne).
-            dcc.Interval(id="tape-tick", interval=250),
+            # ⚠️ 250 ms MESURÉ et ÉCARTÉ le 2026-10-01, cette fois sans aucun
+            # confondu (pas de process orphelin, pas de threaded=True) : même
+            # isolé, 250 ms suffit à saturer le serveur de dev Werkzeug, qui
+            # est MONO-THREAD — curl direct sur /api/v1/NQ/last (lecture
+            # triviale en mémoire) à 2-6 s au lieu de <0.3 s. 1000 ms est la
+            # valeur qui tient. Ne pas redescendre sans un vrai serveur
+            # multi-worker (gunicorn/waitress), pas juste threaded=True (cf.
+            # commit qui l'a retiré — le GIL rend ça contre-productif pour du
+            # travail CPU comme la reconstruction des figures Plotly).
+            dcc.Interval(id="tape-tick", interval=1000),
             # Ticker de prix /scalp : vrai flux poussé (EventSource, cf.
             # clientside_callback plus bas), aucun sondage — donc pas de dcc.Interval
             # ici. Cible inerte requise par Dash pour un callback JS sans Output
