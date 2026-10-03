@@ -9,9 +9,9 @@ import pytest
 from gex import app, store, tickcapture
 
 
-def _ticks(n: int, start_price: float = 30000.0) -> pd.DataFrame:
-    now = time.time()
-    rows = [{"ts": now - (n - i) * 1.0, "price": start_price + i * 0.25,
+def _ticks(n: int, start_price: float = 30000.0, end: float | None = None) -> pd.DataFrame:
+    end = end if end is not None else time.time()
+    rows = [{"ts": end - (n - i) * 1.0, "price": start_price + i * 0.25,
              "side": "BUY" if i % 2 == 0 else "SELL", "volume": 1}
             for i in range(n)]
     return pd.DataFrame(rows)
@@ -20,8 +20,11 @@ def _ticks(n: int, start_price: float = 30000.0) -> pd.DataFrame:
 _CTX = {"zg": 29900.0, "hvl": 29950.0, "keys": {"call_wall": 30200.0}, "walls": []}
 
 
-def test_pas_de_ticks_renvoie_des_niveaux_sans_bougies(monkeypatch):
+def test_pas_de_ticks_du_tout_renvoie_des_niveaux_sans_bougies(monkeypatch):
+    """Aucun tick aujourd'hui NI aucun jour de repli disponible — seul cas
+    où le graphique reste vraiment vide (candles=[])."""
     monkeypatch.setattr(store, "load_ticks", lambda s, d: pd.DataFrame())
+    monkeypatch.setattr(store, "tick_days", lambda s: [])
     monkeypatch.setattr(tickcapture, "_session_day", lambda ts: "2026-10-03")
     out = app.scalp_v2_chart_data("NQ", _CTX, 30040.0)
     assert out["candles"] == [] and out["markers"] == []
@@ -38,10 +41,27 @@ def test_construit_des_bougies_depuis_des_ticks_recents(monkeypatch):
     assert out["levels"] and set(out["levels"][0]) == {"name", "price", "color"}
 
 
-def test_ticks_trop_vieux_sont_exclus_du_lookback(monkeypatch):
-    old = time.time() - 3600 * 5  # 5h dans le passé, hors lookback_min=90
-    df = pd.DataFrame([{"ts": old, "price": 30000.0, "side": "BUY", "volume": 1}])
-    monkeypatch.setattr(store, "load_ticks", lambda s, d: df)
+def test_repli_sur_le_dernier_jour_dispo_si_la_seance_du_jour_est_vide(monkeypatch):
+    """Séance en cours (ex. week-end) sans aucun tick -> au lieu d'un
+    graphique vide, on remonte le dernier jour qui en a — demandé
+    explicitement le 2026-10-03 ("L'idéal serait de charger à minima
+    l'historique")."""
+    old_day_end = time.time() - 3600 * 10  # séance d'il y a 10h, bien finie
+    old_ticks = _ticks(300, end=old_day_end)
+
+    def fake_load_ticks(symbol, day):
+        return old_ticks if day == "2026-10-02" else pd.DataFrame()
+
+    monkeypatch.setattr(store, "load_ticks", fake_load_ticks)
+    monkeypatch.setattr(store, "tick_days", lambda s: ["2026-09-30", "2026-10-02"])
+    monkeypatch.setattr(tickcapture, "_session_day", lambda ts: "2026-10-03")
+    out = app.scalp_v2_chart_data("NQ", _CTX, 30040.0)
+    assert len(out["candles"]) > 0  # pas vide : la séance de repli est montrée
+
+
+def test_pas_de_jour_de_repli_disponible_reste_vide(monkeypatch):
+    monkeypatch.setattr(store, "load_ticks", lambda s, d: pd.DataFrame())
+    monkeypatch.setattr(store, "tick_days", lambda s: [])
     monkeypatch.setattr(tickcapture, "_session_day", lambda ts: "2026-10-03")
     out = app.scalp_v2_chart_data("NQ", _CTX, 30040.0)
     assert out["candles"] == [] and out["markers"] == []

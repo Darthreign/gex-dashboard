@@ -255,6 +255,16 @@ def load_ticks(symbol: str, day: str) -> pd.DataFrame:
     return pd.read_parquet(path) if path.exists() else pd.DataFrame()
 
 
+def tick_days(symbol: str) -> list[str]:
+    """Jours (YYYY-MM-DD) pour lesquels des ticks bruts existent — même
+    pattern que `price_days`, pour le repli du graphique /scalp v2 quand la
+    séance en cours n'a encore aucun tick (nuit, week-end)."""
+    root = SETTINGS.data_dir / "ticks" / symbol
+    if not root.exists():
+        return []
+    return sorted(p.stem for p in root.glob("*.parquet"))
+
+
 def append_tape(symbol: str, rows: list[dict], ts: datetime) -> Path:
     """Ajoute des barres d'order flow signé (1 min) au fichier du jour.
 

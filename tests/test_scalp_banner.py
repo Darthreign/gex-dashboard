@@ -139,6 +139,28 @@ def test_banner_swing_amplification_rendu(monkeypatch, flux):
     assert "sc-tone-alert" in txt and "Amplification haussière" in txt
 
 
+def test_scalp_v2_hedge_data_mode_live(flux):
+    """scalp_v2_hedge_data (JSON pour Lightweight Charts) doit porter la
+    même donnée que hedge_fig (Plotly) — 4 catégories + le net cumulé,
+    cf. _hedge_series partagée entre les deux."""
+    flux += [(time.time() - 1.0, 200e6, 0), (time.time() - 0.5, -50e6, 2)]
+    day = datetime.now(ET).strftime("%Y-%m-%d")
+    out = app.scalp_v2_hedge_data("NQ", -1, day)  # -1 = mode live
+    assert len(out["series"]) == 5
+    names = {s["name"] for s in out["series"]}
+    assert "Net cumulé" in names
+    net = next(s for s in out["series"] if s["name"] == "Net cumulé")
+    assert len(net["points"]) > 0
+    assert set(net["points"][0]) == {"time", "value"}
+
+
+def test_scalp_v2_hedge_data_vide_sans_flux(monkeypatch):
+    monkeypatch.setattr(flowtape.TAPE, "live_points", lambda s, w=300, now=None: [])
+    day = datetime.now(ET).strftime("%Y-%m-%d")
+    out = app.scalp_v2_hedge_data("NQ", -1, day)
+    assert out == {"series": []}
+
+
 def test_banner_hors_seance_donnees_insuffisantes(monkeypatch, flux):
     app._PRICES_CACHE.clear()
     from gex import capturebus

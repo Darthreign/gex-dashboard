@@ -41,17 +41,15 @@ def main(host: str = "127.0.0.1", port: int = 8050) -> None:
         TAPE.start()
         # capture tick-par-tick continue NQ/ES (24/5) : session dxLink dédiée
         CAPTURE.start()
-    # ⚠️ threaded=True RETIRÉ le 2026-10-01 : testé plus tôt dans la même
-    # journée pour débloquer /scalp derrière un callback lent, mais sous
-    # charge réelle il a empiré la situation — Python a un GIL, donc plus de
-    # threads pour du travail CPU (reconstruire des figures Plotly) n'apporte
-    # aucun parallélisme réel, juste du changement de contexte, et risque de
-    # tomber sur un verrou partagé (cache, journal). Constaté : la file de
-    # requêtes _dash-update-component en attente grossissait sans se vider
-    # (57 -> 216 en 1 min) même après avoir réglé la vraie cause du jour
-    # (un process `find` orphelin qui saturait le CPU/disque). Revenir à
-    # threaded=True un jour suppose d'abord de vérifier qu'aucun chemin
-    # chaud (callbacks /scalp) ne fait de travail CPU lourd synchrone.
+    # threaded=True essayé À NOUVEAU le 2026-10-03 (soir), re-retiré dans la
+    # même minute : l'utilisateur l'a observé en direct comme PIRE, confirme
+    # exactement la leçon du 2026-10-01 (cf. historique git) — un thread de
+    # plus ne règle pas un blocage derrière du travail CPU synchrone
+    # (scalp_confluence_zones/scalp_order_flow_zones ajoutés ce soir en
+    # font, cf. commit du jour), ça ajoute de la contention. NE PAS
+    # réessayer sans d'abord alléger ces calculs ou passer à un vrai
+    # serveur multi-worker (waitress — pas installé, cf. tentative du
+    # 2026-10-03) pour du vrai parallélisme hors-GIL.
     create_app().run(host=host, port=port, debug=False)
 
 

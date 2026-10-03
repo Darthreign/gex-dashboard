@@ -876,6 +876,41 @@ def hedge_frame(symbol: str, day: str, window_min: int = 15) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+def _hedge_series(symbol: str, window_min: int, day: str):
+    """Calcul partagé par `hedge_fig` (Plotly, /scalpv1) et
+    `scalp_v2_hedge_data` (JSON, /scalp v2 Lightweight Charts) — même
+    donnée, deux rendus. Renvoie `(ts, cats, cum, live, xrange)` ou `None`
+    si rien à montrer (cf. docstring de `hedge_fig` pour le détail des
+    modes live/fenêtre)."""
+    live = window_min < 0          # mode « live » : un point PAR PRINT, fenêtre glissante
+    now = time.time()
+    if live:
+        from .flowtape import TAPE
+        pts = TAPE.live_points(symbol, LIVE_WINDOW_S, now)
+        if not pts:
+            return None
+        x0 = now - LIVE_WINDOW_S
+        # départ à 0 au bord gauche, un point par print, prolongé jusqu'à
+        # « maintenant » : les courbes défilent même sans nouveau print
+        epochs = [x0] + [p[0] for p in pts] + [now]
+        cats = []
+        for k in range(len(HEDGE_COLS)):
+            v = np.array([p[1] if p[2] == k else 0.0 for p in pts]) / 1e6
+            c = np.concatenate([[0.0], np.cumsum(v)])
+            cats.append(np.append(c, c[-1]))
+        ts = (pd.to_datetime(epochs, unit="s", utc=True)
+              .tz_convert(LOCAL_TZ).tz_localize(None))
+        xrange = [ts[0], ts[-1]]
+    else:
+        df = hedge_frame(symbol, day, window_min)
+        if df.empty or not any(df[c].abs().sum() > 0 for c in HEDGE_COLS):
+            return None
+        ts = to_local(df["timestamp"])
+        cats = [np.cumsum(df[c].to_numpy()) / 1e6 for c in HEDGE_COLS]
+        xrange = None
+    return ts, cats, sum(cats), live, xrange
+
+
 def hedge_fig(symbol: str, lang: str, window_min: int = 15,
               day: str | None = None) -> go.Figure:
     """Pression de couverture des dealers sur le sous-jacent, en direct.
@@ -892,33 +927,10 @@ def hedge_fig(symbol: str, lang: str, window_min: int = 15,
     rythme il se couvre."""
     day = day or datetime.now(ET).strftime("%Y-%m-%d")
     title = t(lang, "hedge_title")
-    live = window_min < 0          # mode « live » : un point PAR PRINT, fenêtre glissante
-    now = time.time()
-    if live:
-        from .flowtape import TAPE
-        pts = TAPE.live_points(symbol, LIVE_WINDOW_S, now)
-        if not pts:
-            return empty_fig(t(lang, "hedge_empty"), title)
-        x0 = now - LIVE_WINDOW_S
-        # départ à 0 au bord gauche, un point par print, prolongé jusqu'à
-        # « maintenant » : les courbes défilent même sans nouveau print
-        epochs = [x0] + [p[0] for p in pts] + [now]
-        cats = []
-        for k in range(len(HEDGE_COLS)):
-            v = np.array([p[1] if p[2] == k else 0.0 for p in pts]) / 1e6
-            c = np.concatenate([[0.0], np.cumsum(v)])
-            cats.append(np.append(c, c[-1]))
-        ts = (pd.to_datetime(epochs, unit="s", utc=True)
-              .tz_convert(LOCAL_TZ).tz_localize(None))
-        xrange = [ts[0], ts[-1]]
-    else:
-        df = hedge_frame(symbol, day, window_min)
-        if df.empty or not any(df[c].abs().sum() > 0 for c in HEDGE_COLS):
-            return empty_fig(t(lang, "hedge_empty"), title)
-        ts = to_local(df["timestamp"])
-        cats = [np.cumsum(df[c].to_numpy()) / 1e6 for c in HEDGE_COLS]
-        xrange = None
-    cum = sum(cats)
+    res = _hedge_series(symbol, window_min, day)
+    if res is None:
+        return empty_fig(t(lang, "hedge_empty"), title)
+    ts, cats, cum, live, xrange = res
     total = float(cum[-1])
     verdict = t(lang, "hedge_buy" if total >= 0 else "hedge_sell")
     lab = (f"live {LIVE_WINDOW_S // 60} min" if live else
@@ -956,6 +968,30 @@ def hedge_fig(symbol: str, lang: str, window_min: int = 15,
     fig.update_layout(**lay)
     fig.add_hline(y=0, line_color=C["axis"], line_width=1)
     return fig
+
+
+def scalp_v2_hedge_data(symbol: str, window_min: int, day: str) -> dict:
+    """Même donnée que `hedge_fig` (via `_hedge_series`, partagée — pas de
+    second calcul), en JSON pour les LineSeries Lightweight Charts de
+    `/scalp` v2. `/scalpv1` continue d'utiliser `hedge_fig` (Plotly)
+    inchangée."""
+    res = _hedge_series(symbol, window_min, day)
+    if res is None:
+        return {"series": []}
+    ts, cats, cum, live, xrange = res
+    # ts est naïf en heure LOCALE (cf. to_local/le bloc live de
+    # _hedge_series) — reconverti en epoch UTC pour Lightweight Charts, qui
+    # affiche déjà dans le fuseau du NAVIGATEUR (même logique que les
+    # bougies de scalp_v2_chart_data).
+    epoch = (pd.Series(ts).dt.tz_localize(LOCAL_TZ).astype("int64") // 10**9).to_numpy()
+    spec = (("Calls achetés", "#3987e5"), ("Puts vendus", "#8dbbf0"),
+            ("Puts achetés", "#e66767"), ("Calls vendus", "#f0a3a3"))
+    series = [{"name": name, "color": color,
+              "points": [{"time": int(e), "value": float(v)} for e, v in zip(epoch, y)]}
+             for (name, color), y in zip(spec, cats)]
+    series.append({"name": "Net cumulé", "color": "#ffffff", "width": 3,
+                   "points": [{"time": int(e), "value": float(v)} for e, v in zip(epoch, cum)]})
+    return {"series": series}
 
 
 # --- Page « Scalp » ---------------------------------------------------------
@@ -1468,6 +1504,17 @@ def _scalp_live_spot(symbol: str, ctx: dict) -> float:
 _CONFLUENCE_FAMILIES = ("SPX", "NDX", "QQQ", "SPY", "NQ", "ES")
 
 
+# Cache séparé de _SCALP_CACHE (même principe, 10s) — AJOUTÉ le 2026-10-03
+# (soir) après avoir cassé /scalp en live : boucler sur 6 familles (STATE.lock
+# + metrics.zero_gamma x2 par famille) à CHAQUE cycle de tape-tick (1s) a
+# saturé le serveur mono-thread (CPU cumulé très supérieur au temps écoulé,
+# bandeau resté vide plusieurs dizaines de secondes). Ces niveaux ne
+# bougent pas à la seconde près, un cache de 10s est largement suffisant.
+_CONFLUENCE_CACHE: dict[str, tuple[float, list[dict]]] = {}
+_ORDER_FLOW_CACHE: dict[str, tuple[float, list[dict]]] = {}
+SCALP_HEAVY_CACHE_S = 10.0
+
+
 def scalp_confluence_zones(symbol: str) -> list[dict]:
     """Zones où des niveaux de familles DIFFÉRENTES (SPX/NDX/QQQ/NQ/ES)
     tombent proches une fois transposés sur l'échelle de `symbol` — cf.
@@ -1482,6 +1529,10 @@ def scalp_confluence_zones(symbol: str) -> list[dict]:
     une confluence, juste un niveau — cf. docstring de confluence.py."""
     if _confluence is None or not _confluence.supported(symbol):
         return []
+    now = time.time()
+    hit = _CONFLUENCE_CACHE.get(symbol)
+    if hit and now - hit[0] < SCALP_HEAVY_CACHE_S:
+        return hit[1]
     combined: dict[str, float] = {}
     for src in _CONFLUENCE_FAMILIES:
         st = chain_state(src)
@@ -1512,9 +1563,11 @@ def scalp_confluence_zones(symbol: str) -> list[dict]:
     # de clustering du symbole : filtre d'AFFICHAGE seulement, ne touche pas
     # à cluster_levels ni à ses seuils (le chantier de l'utilisateur).
     max_width = _confluence.CLUSTER_POINTS[symbol] * 3
-    return [{"price": (z.low + z.high) / 2, "width": z.width, "n": len(z),
-             "names": sorted(z.levels.keys())}
-            for z in zones if len(z) >= 2 and z.width <= max_width]
+    out = [{"price": (z.low + z.high) / 2, "width": z.width, "n": len(z),
+           "names": sorted(z.levels.keys())}
+          for z in zones if len(z) >= 2 and z.width <= max_width]
+    _CONFLUENCE_CACHE[symbol] = (now, out)
+    return out
 
 
 def scalp_order_flow_zones(symbol: str, day_ticks: pd.DataFrame) -> list[dict]:
@@ -1530,22 +1583,40 @@ def scalp_order_flow_zones(symbol: str, day_ticks: pd.DataFrame) -> list[dict]:
     Construction du volume profile VECTORISÉE (groupby pandas), PAS une
     boucle Python ligne à ligne sur des centaines de milliers de ticks —
     c'est exactement le genre de travail CPU synchrone par cycle qui a
-    saturé le serveur 1-thread Werkzeug le 2026-10-01 (cf. passation)."""
+    saturé le serveur 1-thread Werkzeug le 2026-10-01 (cf. passation).
+
+    Mis en cache 10s (cf. _ORDER_FLOW_CACHE) : même `groupby().apply()`
+    vectorisé reste un travail non négligeable sur une séance pleine (des
+    centaines de milliers de ticks, potentiellement des milliers de paliers
+    de prix) — inutile de le refaire à chaque cycle de 1s."""
     if day_ticks.empty:
         return []
+    now = time.time()
+    hit = _ORDER_FLOW_CACHE.get(symbol)
+    if hit and now - hit[0] < SCALP_HEAVY_CACHE_S:
+        return hit[1]
     from . import iceberg as ib
-    bucket = ib.bucket_price
-    keys = day_ticks["price"].map(lambda p: bucket(p, symbol))
-    g = day_ticks.groupby(keys).apply(lambda d: pd.Series({
-        "vol": d["volume"].sum(),
-        "ask_vol": d.loc[d["side"] == "BUY", "volume"].sum(),
-        "bid_vol": d.loc[d["side"] == "SELL", "volume"].sum(),
-    }), include_groups=False)
+    # Entièrement vectorisé — ni .map(lambda) ni .groupby().apply(lambda),
+    # tous les deux en réalité un appel Python PAR LIGNE/PAR GROUPE malgré
+    # l'air "vectorisé". Sur une vraie séance (repli historique ajouté ce
+    # soir, des centaines de milliers de ticks), ça a fait exploser le
+    # temps CPU et bloqué tout /scalp derrière le thread unique Werkzeug —
+    # constaté en live le 2026-10-03, pas une supposition.
+    bucket_size = ib._vp_bucket(symbol)
+    bucket_key = (day_ticks["price"] / bucket_size).round() * bucket_size
+    g = pd.DataFrame({
+        "vol": day_ticks["volume"],
+        "ask_vol": day_ticks["volume"].where(day_ticks["side"] == "BUY", 0),
+        "bid_vol": day_ticks["volume"].where(day_ticks["side"] == "SELL", 0),
+        "_bucket": bucket_key,
+    }).groupby("_bucket").sum()
     levels = {float(price): {"vol": float(row["vol"]), "ask_vol": float(row["ask_vol"]),
                              "bid_vol": float(row["bid_vol"])}
              for price, row in g.iterrows()}
-    return [{"price": h["price"], "vol": h["vol"], "side": h["side"]}
-            for h in ib.hvl_levels(levels)]
+    out = [{"price": h["price"], "vol": h["vol"], "side": h["side"]}
+          for h in ib.hvl_levels(levels)]
+    _ORDER_FLOW_CACHE[symbol] = (now, out)
+    return out
 
 
 def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float, lookback_min: int = 90) -> dict:
@@ -1574,12 +1645,28 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float, lookback_min: int =
     day_ticks = store.load_ticks(symbol, day)
     if not day_ticks.empty:
         day_ticks = day_ticks[day_ticks["side"].isin(("BUY", "SELL"))]
+    if day_ticks.empty:
+        # Repli : séance en cours encore vide (nuit, week-end) — dernier jour
+        # avec des ticks, même principe que `scalp_price_fig` pour les
+        # bougies Plotly. Mieux qu'un graphique vide : au moins l'historique
+        # le plus récent, demandé explicitement le 2026-10-03.
+        days = store.tick_days(symbol)
+        if days:
+            day = days[-1]
+            day_ticks = store.load_ticks(symbol, day)
+            if not day_ticks.empty:
+                day_ticks = day_ticks[day_ticks["side"].isin(("BUY", "SELL"))]
     order_flow = scalp_order_flow_zones(symbol, day_ticks)
     if day_ticks.empty:
         return {"candles": [], "markers": [], "levels": levels, "confluence": confluence,
                 "order_flow": order_flow}
     ticks = day_ticks.sort_values("ts", kind="stable")
-    cutoff = time.time() - lookback_min * 60
+    # En repli sur un jour passé, "maintenant" n'a aucun sens pour la
+    # fenêtre glissante — on prend les dernières `lookback_min` minutes DE
+    # CETTE séance plutôt que de tout filtrer à vide.
+    last_ts = float(ticks["ts"].iloc[-1])
+    anchor = last_ts if last_ts < time.time() - 3600 else time.time()
+    cutoff = anchor - lookback_min * 60
     ticks = ticks[ticks["ts"] >= cutoff]
     if ticks.empty:
         return {"candles": [], "markers": [], "levels": levels, "confluence": confluence,
@@ -2322,33 +2409,41 @@ def create_app() -> Dash:
                 # grille. Toujours dans le DOM, masqué par CSS hors
                 # body.scalp-v2-page (même pattern que .scalp-link/.full-link) ;
                 # état persisté en localStorage côté client, aucun état serveur.
+                # Panneau "Personnalisation" — refondu le 2026-10-03 (soir) :
+                # la première version (une ligne discrète sous la nav) était
+                # restée invisible à l'usage réel. Carte à part entière,
+                # avec un titre, pour qu'elle se remarque comme n'importe
+                # quelle autre carte de la page.
                 html.Div([
-                    html.Button("↕ Disposition verticale", id="sc-layout-toggle",
-                               className="sc-layout-toggle", n_clicks=0),
-                    # Ergonomie/concentration (/scalp v2 seulement) — piste
-                    # d'origine : "masquage de graphiques/tape, mode mots-clés
-                    # uniquement, pour des utilisateurs ayant des soucis de
-                    # concentration". Chaque option toggle une classe body,
-                    # cf. style.css ; persisté en localStorage (gex-scalp-ergo),
-                    # même pattern que la disposition verticale juste au-dessus.
-                    dcc.Checklist(
-                        id="sc-ergo-options", className="sc-ergo-options", value=[],
-                        options=[
-                            {"label": "Masquer graphiques", "value": "hide_charts"},
-                            {"label": "Masquer tape", "value": "hide_tape"},
-                            {"label": "Mode mots-clés", "value": "keywords_only"},
-                        ],
-                    ),
-                    # Ordre d'affichage (/scalp v2, disposition verticale
-                    # uniquement) — demandé explicitement : "permet la
-                    # personnalisation des positions". Priorité 1-4 par bloc
-                    # plutôt qu'un vrai glisser-déposer : un drag-and-drop
-                    # déplacerait les noeuds DOM directement, hors du contrôle
-                    # de React/Dash, qui réconcilie sa propre copie virtuelle
-                    # du DOM — risque réel de désynchronisation sur un site
-                    # déjà fragile (cf. passation, incident du 1-thread
-                    # Werkzeug). CSS `order` pur : aucun noeud ne bouge,
-                    # seulement l'ordre visuel, zéro risque de ce genre.
+                    html.Div("⚙ Personnalisation de l'affichage", className="sc-controls-title"),
+                    html.Div([
+                        html.Button("↕ Disposition verticale", id="sc-layout-toggle",
+                                   className="sc-layout-toggle", n_clicks=0),
+                        # Ergonomie/concentration (/scalp v2 seulement) — piste
+                        # d'origine : "masquage de graphiques/tape, mode mots-clés
+                        # uniquement, pour des utilisateurs ayant des soucis de
+                        # concentration". Chaque option toggle une classe body,
+                        # cf. style.css ; persisté en localStorage (gex-scalp-ergo).
+                        dcc.Checklist(
+                            id="sc-ergo-options", className="sc-ergo-options", value=[],
+                            options=[
+                                {"label": "Masquer niveaux", "value": "hide_ladder"},
+                                {"label": "Masquer graphique prix", "value": "hide_price_chart"},
+                                {"label": "Masquer couverture dealers", "value": "hide_hedge_chart"},
+                                {"label": "Masquer tape", "value": "hide_tape"},
+                                {"label": "Mode mots-clés", "value": "keywords_only"},
+                            ],
+                        ),
+                    ], className="sc-controls-row"),
+                    # Ordre d'affichage (disposition verticale uniquement —
+                    # demandé explicitement : "permet la personnalisation des
+                    # positions"). Priorité 1-4 par bloc plutôt qu'un vrai
+                    # glisser-déposer : un drag-and-drop déplacerait les
+                    # noeuds DOM directement, hors du contrôle de React/Dash,
+                    # qui réconcilie sa propre copie virtuelle du DOM — risque
+                    # réel de désynchronisation sur un site déjà fragile (cf.
+                    # passation, incident du 1-thread Werkzeug). CSS `order`
+                    # pur : aucun noeud ne bouge, seulement l'ordre visuel.
                     html.Div([
                         html.Span("Ordre :", className="sc-order-label"),
                         *[html.Div([
@@ -2362,6 +2457,8 @@ def create_app() -> Dash:
                               ("ladder", "Niveaux", 2), ("chart", "Graphique", 1),
                               ("hedge", "Couverture", 3), ("prints", "Prints", 4)]],
                     ], className="sc-order-controls"),
+                    html.Span("Ordre personnalisable en disposition verticale",
+                             className="sc-order-hint"),
                 ], className="sc-controls"),
                 html.Div([
                     html.Div(id="scalp-banner", className="sc-bannerbox"),
@@ -2396,7 +2493,14 @@ def create_app() -> Dash:
                                                           {"label": "15 min", "value": 15},
                                                           {"label": "30 min", "value": 30}])],
                                  className="sc-cardhead"),
-                        dcc.Graph(config=GRAPH_CONFIG, id="scalp-hedge"),
+                        html.Div([dcc.Graph(config=GRAPH_CONFIG, id="scalp-hedge")],
+                                 id="scalp-hedge-card"),
+                        # Carte v2 (Lightweight Charts, LineSeries) : même
+                        # bascule Plotly/LW que scalp-price/scalp-lw-card —
+                        # /scalpv1 garde scalp-hedge (Plotly) inchangée.
+                        html.Div([html.Div(id="scalp-lw-hedge", className="sc-lw-chart")],
+                                 id="scalp-lw-hedge-card"),
+                        dcc.Store(id="scalp-lw-hedge-data"),
                     ], className="sc-card sc-hedge"),
                 ], className="sc-grid"),
             ]),
@@ -2668,6 +2772,48 @@ def create_app() -> Dash:
         Input("scalp-lw-data", "data"),
     )
 
+    # Couverture des dealers (/scalp v2) — même principe que le graphique de
+    # prix : un LineSeries par catégorie, créés UNE fois (persistés dans
+    # window._gexLwHedge), seulement `setData` ensuite. Piège du canvas à
+    # largeur 0 déjà réglé pour le graphique de prix, même fix ici.
+    app.clientside_callback(
+        """
+        function(data) {
+            const container = document.getElementById('scalp-lw-hedge');
+            if (!container || !data || !window.LightweightCharts) {
+                return window.dash_clientside.no_update;
+            }
+            if (!window._gexLwHedge || window._gexLwHedge.container !== container) {
+                container.innerHTML = '';
+                const chart = LightweightCharts.createChart(container, {
+                    width: container.clientWidth, height: container.clientHeight,
+                    layout: { background: { color: 'transparent' }, textColor: '#cfd3da' },
+                    grid: { vertLines: { color: '#1e222a' }, horzLines: { color: '#1e222a' } },
+                    timeScale: { timeVisible: true, secondsVisible: true },
+                });
+                const onResize = () => chart.resize(container.clientWidth, container.clientHeight);
+                window.addEventListener('resize', onResize);
+                window._gexLwHedge = { container: container, chart: chart, series: {} };
+            }
+            const state = window._gexLwHedge;
+            (data.series || []).forEach(function(s) {
+                if (!state.series[s.name]) {
+                    state.series[s.name] = state.chart.addLineSeries({
+                        color: s.color, lineWidth: s.width || 1, title: s.name,
+                    });
+                }
+                state.series[s.name].setData(s.points || []);
+            });
+            if ((data.series || []).length && (data.series[0].points || []).length) {
+                state.chart.timeScale().fitContent();
+            }
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("scalp-lw-hedge", "title"),
+        Input("scalp-lw-hedge-data", "data"),
+    )
+
     @app.callback(
         Output("symbol", "value", allow_duplicate=True),
         Input("url", "pathname"),
@@ -2738,7 +2884,9 @@ def create_app() -> Dash:
         """
         function(values) {
             values = values || [];
-            document.body.classList.toggle('sc-hide-charts', values.includes('hide_charts'));
+            document.body.classList.toggle('sc-hide-ladder', values.includes('hide_ladder'));
+            document.body.classList.toggle('sc-hide-price-chart', values.includes('hide_price_chart'));
+            document.body.classList.toggle('sc-hide-hedge-chart', values.includes('hide_hedge_chart'));
             document.body.classList.toggle('sc-hide-tape', values.includes('hide_tape'));
             document.body.classList.toggle('sc-keywords-only', values.includes('keywords_only'));
             window.localStorage.setItem('gex-scalp-ergo', JSON.stringify(values));
@@ -3254,6 +3402,20 @@ def create_app() -> Dash:
             raise PreventUpdate
         spot = _scalp_live_spot(symbol, ctx)
         return scalp_v2_chart_data(symbol, ctx, spot)
+
+    @app.callback(
+        Output("scalp-lw-hedge-data", "data"),
+        [Input("tape-tick", "n_intervals"), Input("url", "pathname"),
+         Input("symbol", "value"), Input("scalp-window", "value")],
+    )
+    def refresh_scalp_lw_hedge(_, path, symbol, window):
+        """Même garde que `refresh_scalp_lw` — `/scalp` EXACT seulement,
+        `/scalpv1` garde `scalp-hedge`/Plotly (via `hedge_fig` dans
+        `refresh_scalp`) inchangée."""
+        if (path or "/") != "/scalp" or symbol not in ("NQ", "ES"):
+            raise PreventUpdate
+        day = datetime.now(ET).strftime("%Y-%m-%d")
+        return scalp_v2_hedge_data(symbol, int(window if window is not None else -1), day)
 
     @app.callback(
         Output("tape-table", "children"),
