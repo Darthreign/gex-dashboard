@@ -9,7 +9,7 @@ import time
 import pandas as pd
 import pytest
 
-from gex import app, flowtape, store
+from gex import app, flowtape, store, tickcapture
 from gex.metrics import ET
 
 
@@ -28,6 +28,16 @@ def flux(monkeypatch):
     monkeypatch.setattr(flowtape.TAPE, "live_points",
                         lambda s, w=300, now=None: list(pts))
     return pts
+
+
+def test_is_scalp_path_reconnait_v2_et_v1():
+    assert app.is_scalp_path("/scalp")
+    assert app.is_scalp_path("/scalpv1")
+    assert app.is_scalp_path("/scalp/")
+    assert app.is_scalp_path("/scalpv1/")
+    assert not app.is_scalp_path("/")
+    assert not app.is_scalp_path(None)
+    assert not app.is_scalp_path("/scalping-autre-chose")  # pas un simple préfixe
 
 
 def test_mouvement_5_min_depuis_la_bougie_assez_ancienne(monkeypatch, flux):
@@ -49,6 +59,45 @@ def test_pas_de_mouvement_si_aucune_bougie_recente(monkeypatch, flux):
     assert app.scalp_inputs("NQ", 30040.0)[0] is None
 
 
+def test_scalp_inputs_swing_utilise_les_ticks_pas_les_bougies(monkeypatch, flux):
+    """scalp_inputs_swing ne doit RIEN lire de store.load_prices (bougies 1 min,
+    circuit de /scalpv1) — seulement store.load_ticks, via gex/bars.py."""
+    monkeypatch.setattr(store, "load_prices",
+                        lambda s, d: (_ for _ in ()).throw(AssertionError("ne doit pas être appelé")))
+    now = time.time()
+    prices = [30000.0 + i * 0.5 for i in range(100)] + [30050.0 - i * 0.5 for i in range(100)]
+    ticks = pd.DataFrame([{"ts": now - (200 - i), "price": p,
+                           "side": "BUY" if i % 2 == 0 else "SELL", "volume": 1}
+                          for i, p in enumerate(prices)])
+    monkeypatch.setattr(store, "load_ticks", lambda s, d: ticks)
+    monkeypatch.setattr(tickcapture, "_session_day", lambda ts: "2026-10-03")
+    flux += [(1.0, 200e6, 0)]
+    move, net, gross = app.scalp_inputs_swing("NQ", 30020.0)
+    assert net == pytest.approx(200.0) and gross == pytest.approx(200.0)  # flux inchangé
+
+
+def test_scalp_inputs_swing_none_sans_ticks(monkeypatch, flux):
+    monkeypatch.setattr(store, "load_ticks", lambda s, d: pd.DataFrame())
+    monkeypatch.setattr(tickcapture, "_session_day", lambda ts: "2026-10-03")
+    assert app.scalp_inputs_swing("NQ", 30020.0)[0] is None
+
+
+def test_log_scalp_signal_cloisonne_par_basis(monkeypatch):
+    """Deux bases différentes pour le même symbole ne doivent pas partager le
+    même dédup/cooldown — sinon un onglet /scalp et un onglet /scalpv1 ouverts
+    en même temps se marcheraient dessus (cf. commentaire dans app.py)."""
+    app._SCALP_SIGNAL_SEEN.clear()
+    app._SCALP_SIGNAL_LAST_LOGGED.clear()
+    calls = []
+    monkeypatch.setattr(app, "_journal", lambda: None)  # pas de vraie DB dans ce test
+    a1 = {"state": "amplification", "tone": "alert", "direction": 1, "title": "t1"}
+    app.log_scalp_signal("NQ", a1, 30000.0, 40.0, 100.0, 200.0, basis="fenetre_5min")
+    app.log_scalp_signal("NQ", a1, 30000.0, 40.0, 100.0, 200.0, basis="swing_v60")
+    # les deux bases ont chacune vu une PREMIÈRE transition -> les deux "vues"
+    assert app._SCALP_SIGNAL_SEEN[("NQ", "fenetre_5min")] == ("amplification", 1)
+    assert app._SCALP_SIGNAL_SEEN[("NQ", "swing_v60")] == ("amplification", 1)
+
+
 def test_banner_amplification_rendu(monkeypatch, flux):
     app._PRICES_CACHE.clear()
     from gex import capturebus
@@ -60,6 +109,34 @@ def test_banner_amplification_rendu(monkeypatch, flux):
     txt = str(div.to_plotly_json())
     assert "sc-tone-alert" in txt and "Amplification haussière" in txt
     assert "malgré un gamma positif" in txt
+
+
+def test_banner_swing_amplification_rendu(monkeypatch, flux):
+    """Bout en bout pour /scalp v2 (swing=True) : scalp_inputs_swing ->
+    scalp.assess -> rendu, exactement comme test_banner_amplification_rendu
+    mais sur la base swing — vérifie que le branchement `swing` de
+    scalp_banner produit un bandeau cohérent, pas juste que les deux
+    fonctions d'entrée existent séparément. C'est la vérification de bout en
+    bout que le marché fermé (samedi, ctx=None en vrai) empêche de faire en
+    conditions réelles ce soir."""
+    app._PRICES_CACHE.clear()
+    from gex import capturebus
+    monkeypatch.setattr(capturebus, "remote_url", lambda: None)
+    now = time.time()
+    # poussée haussière franche sur assez de ticks pour >= 5 barres-volume=60
+    # (swing_move l'exige, cf. gex/bars.py) : 420 prints, 1 pt tous les 10 ticks
+    n = 420
+    prices = [30000.0 + i * 0.1 for i in range(n)]
+    ticks = pd.DataFrame([{"ts": now - (n + 10 - i), "price": p,
+                           "side": "BUY" if i % 2 == 0 else "SELL", "volume": 1}
+                          for i, p in enumerate(prices)])
+    monkeypatch.setattr(store, "load_ticks", lambda s, d: ticks)
+    monkeypatch.setattr(tickcapture, "_session_day", lambda ts: "2026-10-03")
+    flux += [(1.0, 300e6, 0), (2.0, 80e6, 1)]
+    ctx = {"zg": 29900.0, "gamma": "Gamma Positif"}
+    div = app.scalp_banner("NQ", ctx, 30059.0, "fr", swing=True)
+    txt = str(div.to_plotly_json())
+    assert "sc-tone-alert" in txt and "Amplification haussière" in txt
 
 
 def test_banner_hors_seance_donnees_insuffisantes(monkeypatch, flux):

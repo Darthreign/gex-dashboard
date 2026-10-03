@@ -22,7 +22,8 @@ from dash.dependencies import Input, Output, State
 from dash.exceptions import PreventUpdate
 
 from . import digest, metrics, scales, scalp, store
-from .api import register_api
+from .bars import swing_move, volume_bars, zigzag
+from .api import _futures_last_price, register_api
 from .tt_web import connection_status, register_oauth
 from .config import SETTINGS, UNDERLYINGS, targets
 from .i18n import LANGS, regime_text, t, wall_labels
@@ -988,15 +989,27 @@ def _journal():
 
 
 def log_scalp_signal(symbol: str, a: dict, spot: float, move: float | None,
-                     net: float, gross: float) -> None:
+                     net: float, gross: float, basis: str = "fenetre_5min") -> None:
     """Journalise une TRANSITION vers un état-signal (cf. scalp.should_log_signal)
-    — jamais à chaque cycle. Étanche : toute erreur reste locale à cette fonction."""
-    prev = _SCALP_SIGNAL_SEEN.get(symbol)
+    — jamais à chaque cycle. Étanche : toute erreur reste locale à cette fonction.
+
+    `basis` : quelle mesure de mouvement a produit `a` — `"fenetre_5min"`
+    (`/scalpv1`, `scalp_inputs`) ou `"swing_v60"` (`/scalp` v2,
+    `scalp_inputs_swing`). Clé de dédup/cooldown PAR (symbole, basis), pas
+    juste par symbole : les deux moteurs peuvent tourner en même temps (deux
+    onglets, un sur chaque page) et ne doivent jamais se marcher dessus — sans
+    ça, une transition vue par l'un réinitialiserait le cooldown de l'autre.
+    `basis` est aussi écrit en base (cf. journal.py) pour ne jamais remélanger
+    deux méthodologies dans une même colonne sans distinction, comme ça a été
+    le cas par accident avec le bug spot=30040 (cf. mémoire du projet
+    audit-bug-spot-amplification-30040)."""
+    key = (symbol, basis)
+    prev = _SCALP_SIGNAL_SEEN.get(key)
     state, direction = a["state"], a["direction"]
-    _SCALP_SIGNAL_SEEN[symbol] = (state, direction)
+    _SCALP_SIGNAL_SEEN[key] = (state, direction)
     now_epoch = time.time()
     if not scalp.should_log_signal(prev, state, direction,
-                                   _SCALP_SIGNAL_LAST_LOGGED.get(symbol), now_epoch):
+                                   _SCALP_SIGNAL_LAST_LOGGED.get(key), now_epoch):
         return
     conn = _journal()
     if conn is None:
@@ -1008,10 +1021,10 @@ def log_scalp_signal(symbol: str, a: dict, spot: float, move: float | None,
             journal.record_scalp_signal(
                 conn, date=now.date().isoformat(), ts=now.isoformat(), symbol=symbol,
                 state=state, tone=a["tone"], direction=direction, title=a["title"],
-                spot=spot, move_pts=move, net_musd=net, gross_musd=gross)
-        _SCALP_SIGNAL_LAST_LOGGED[symbol] = (state, direction, now_epoch)
+                spot=spot, move_pts=move, net_musd=net, gross_musd=gross, basis=basis)
+        _SCALP_SIGNAL_LAST_LOGGED[key] = (state, direction, now_epoch)
     except Exception:  # noqa: BLE001 — ne doit jamais casser le bandeau
-        log.exception("Écriture du signal /scalp échouée (%s, %s)", symbol, state)
+        log.exception("Écriture du signal /scalp échouée (%s, %s, %s)", symbol, state, basis)
 
 
 # Salves d'absorption déjà journalisées par symbole (leur `ts` = fin de salve),
@@ -1185,6 +1198,17 @@ def scalp_head(symbol: str, lang: str, ctx: dict, spot: float) -> html.Div:
 _SC_KIND_COLOR = {"cw": "cw", "ps": "ps", "zg": "zg", "hvl": "hvl", "d1": "d1", "gex": "lvl"}
 
 
+def is_scalp_path(path: str | None) -> bool:
+    """True pour `/scalp` (v2, en construction) ET `/scalpv1` (page actuelle,
+    gelée) — les deux affichent aujourd'hui le même rendu, cf. commentaire du
+    clientside_callback `scalp-page` dans `register_callbacks`. Dispatch
+    explicite plutôt que l'accident que `"/scalpv1".startswith("/scalp")` soit
+    vrai : le jour où `/scalp` a un contenu propre, le branchement se fait
+    précisément ici."""
+    p = path or "/"
+    return p == "/scalp" or p.startswith("/scalp/") or p == "/scalpv1" or p.startswith("/scalpv1/")
+
+
 def scalp_inputs(symbol: str, spot: float) -> tuple[float | None, float, float]:
     """(mouvement sur 5 min en points, flux net M$, flux brut M$) pour le bandeau.
 
@@ -1208,13 +1232,44 @@ def scalp_inputs(symbol: str, spot: float) -> tuple[float | None, float, float]:
     return move, net, gross
 
 
+def scalp_inputs_swing(symbol: str, spot: float) -> tuple[float | None, float, float]:
+    """Variante swing-ancrée de `scalp_inputs`, pour `/scalp` v2 UNIQUEMENT —
+    même calcul de flux (`TAPE.live_points`, inchangé), seul le mouvement
+    change de base : dernier pivot zigzag confirmé plutôt que la bougie d'il
+    y a 5 min (cf. gex/bars.py::swing_move). Validé le 2026-10-03 sur le cas
+    réel du 30/09 (cf. mémoire du projet roadmap-scalp-v2) : la fenêtre fixe
+    annonçait "sans soutien" en pleine poussée et "soutenu" pile au sommet —
+    la lecture swing donnait une structure cohérente aux deux moments.
+    N'EST PAS câblée sur `/scalpv1`, qui garde `scalp_inputs` sans y toucher."""
+    from .flowtape import TAPE
+    from .tickcapture import _session_day
+    move = None
+    day = _session_day(time.time())
+    ticks = store.load_ticks(symbol, day)
+    if not ticks.empty:
+        ticks = ticks[ticks["side"].isin(("BUY", "SELL"))].sort_values("ts", kind="stable")
+        recent_ticks = ticks[ticks["ts"] >= time.time() - 90 * 60]
+        if not recent_ticks.empty:
+            move = swing_move(recent_ticks, spot, bar_volume=60.0,
+                              min_move=scalp.move_threshold(symbol) * 0.6)
+    pts = TAPE.live_points(symbol, scalp.WINDOW_S)
+    net = sum(p[1] for p in pts) / 1e6
+    gross = sum(abs(p[1]) for p in pts) / 1e6
+    return move, net, gross
+
+
 def scalp_banner(symbol: str, ctx: dict, spot: float, lang: str,
-                 absorb: dict | None = None) -> html.Div:
-    move, net, gross = scalp_inputs(symbol, spot)
+                 absorb: dict | None = None, *, swing: bool = False) -> html.Div:
+    """`swing=True` (réservé à `/scalp` v2, cf. `refresh_scalp`) : mouvement
+    ancré-structure (`scalp_inputs_swing`) au lieu de la fenêtre fixe 5 min —
+    `/scalpv1` appelle toujours cette fonction avec `swing=False` (défaut),
+    comportement strictement inchangé."""
+    basis = "swing_v60" if swing else "fenetre_5min"
+    move, net, gross = (scalp_inputs_swing if swing else scalp_inputs)(symbol, spot)
     zg = ctx.get("zg")
     neg = bool(ctx.get("gamma")) and "Négatif" in ctx["gamma"]
     a = scalp.assess(symbol, move, net, gross, neg, (zg - spot) if zg is not None else None, lang)
-    log_scalp_signal(symbol, a, spot, move, net, gross)
+    log_scalp_signal(symbol, a, spot, move, net, gross, basis=basis)
     recent = scalp_absorption_recent(symbol)
     log_absorption_levels(symbol, recent)
     voyants = [html.Span(f"{'●' if on else '○'} {t(lang, f'sc_light_{name}')}",
@@ -1370,6 +1425,74 @@ def scalp_price_fig(symbol: str, ctx: dict, spot: float, minutes: int = 180) -> 
     lay["yaxis"]["range"] = [lo - pad * 0.4, hi + pad * 0.4]
     fig.update_layout(**lay)
     return fig
+
+
+def _scalp_live_spot(symbol: str, ctx: dict) -> float:
+    """Dernier prix RÉELLEMENT échangé (jamais le milieu bid/ask, qui peut
+    tomber entre deux pas de cotation — cf. gex/rtquote.py Tick.price).
+
+    ⚠️ Jusqu'au 2026-10-03, cette ligne lisait QUOTES.last() (flux Quote
+    CONFLATÉ, un appel API par cycle) avec repli sur ctx["snap_spot"]
+    (snapshot d'options périmé) si QUOTES.last() renvoyait une valeur fausse
+    — sous charge (tape-tick à 250ms, cf. passation 2026-10-01), ce repli se
+    déclenchait pendant que snap_spot lui-même était figé, journalisant un
+    spot à des centaines de points du marché réel (cf. mémoire du projet
+    audit-bug-spot-amplification-30040 : 46 signaux amplification pollués,
+    spot=30040 immobile pendant des heures). `_futures_last_price`
+    (gex/api.py) est la source tick-accurate déjà utilisée pour la
+    résolution des outcomes (gex/scheduler.py::resolve_scalp_signals) — même
+    source ici, cohérence entre ce qui déclenche un signal et ce qui le
+    résout. Factorisée le 2026-10-03 (soir) : utilisée par `refresh_scalp`
+    ET `refresh_scalp_lw`, un seul endroit à corriger si ça change encore."""
+    raw = _futures_last_price(symbol)
+    if raw is None:
+        raw = QUOTES.last(symbol) if credentials_present() else None
+    raw = float(raw) if raw else float(ctx["snap_spot"])
+    return scalp.round_to_tick(symbol, raw)
+
+
+def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float, lookback_min: int = 90) -> dict:
+    """Bougies-volume + pivots swing + niveaux (GEX/HVL/Flip/murs) pour le
+    graphique TradingView Lightweight Charts de `/scalp` v2 — remplace
+    `scalp_price_fig` (Plotly, bougies 1 min) SEULEMENT sur la nouvelle page,
+    `/scalpv1` continue d'utiliser cette dernière inchangée.
+
+    Lit les ticks du jour sur disque (`store.load_ticks`), rafraîchis par
+    `flush_ticks` toutes les 60 s côté process capture — même fraîcheur que
+    tout le reste de `/scalp` aujourd'hui (pas encore de canal dédié temps
+    réel pour des barres, cf. mémoire du projet chantier-scalp-sse-integral :
+    la cible SSE reste à construire, ceci est l'étape intermédiaire qui
+    fonctionne sans elle). `bar_volume`/`min_move` repris des valeurs
+    validées le 2026-10-03 sur le cas du 30/09 (cf. gex/bars.py::swing_move),
+    pas d'une calibration formelle.
+
+    `ctx`/`spot` : mêmes objets que `scalp_price_fig` (pas de second calcul
+    de ladder) — `levels` renvoyés même sans ticks (candles vides), le
+    graphique peut afficher les niveaux avant d'avoir des bougies."""
+    levels = [{"name": r.name, "price": r.price, "color": C[_SC_KIND_COLOR[r.kind]]}
+             for r in scalp.build_ladder(symbol, spot, ctx["zg"], ctx["hvl"], ctx["keys"], ctx["walls"])]
+    from .tickcapture import _session_day
+    day = _session_day(time.time())
+    ticks = store.load_ticks(symbol, day)
+    if ticks.empty:
+        return {"candles": [], "markers": [], "levels": levels}
+    ticks = ticks[ticks["side"].isin(("BUY", "SELL"))].sort_values("ts", kind="stable")
+    cutoff = time.time() - lookback_min * 60
+    ticks = ticks[ticks["ts"] >= cutoff]
+    if ticks.empty:
+        return {"candles": [], "markers": [], "levels": levels}
+    bars_df = volume_bars(ticks, bar_volume=60.0)
+    if bars_df.empty:
+        return {"candles": [], "markers": [], "levels": levels}
+    candles = [{"time": int(r.ts_open), "open": r.open, "high": r.high,
+                "low": r.low, "close": r.close} for r in bars_df.itertuples()]
+    markers = []
+    if len(bars_df) >= 5:
+        swings = zigzag(bars_df, min_move=scalp.move_threshold(symbol) * 0.6)
+        confirmed = swings[~swings["kind"].str.endswith("?")]
+        markers = [{"time": int(r.ts), "price": r.price, "kind": r.kind}
+                   for r in confirmed.itertuples()]
+    return {"candles": candles, "markers": markers, "levels": levels}
 
 
 def flow_fig(symbol: str, lang: str, day: str | None = None) -> go.Figure:
@@ -2092,7 +2215,15 @@ def create_app() -> Dash:
                     html.Div([html.Div("Niveaux · distance au spot (pts)", className="sc-title"),
                               html.Div(id="scalp-ladder")], className="sc-card sc-ladder"),
                     html.Div([dcc.Graph(config=GRAPH_CONFIG, id="scalp-price")],
-                             className="sc-card sc-underlying"),
+                             id="scalp-price-card", className="sc-card sc-underlying"),
+                    # Carte v2 (Lightweight Charts) : masquée par défaut (CSS),
+                    # affichée seulement sur /scalp EXACT (pas /scalpv1) — cf.
+                    # classe body.scalp-v2-page dans style.css, distincte de
+                    # body.scalp-page (partagée par les deux). /scalpv1 ne
+                    # charge jamais cette carte, garde scalp-price inchangée.
+                    html.Div([html.Div(id="scalp-lw-chart", className="sc-lw-chart")],
+                             id="scalp-lw-card", className="sc-card sc-underlying"),
+                    dcc.Store(id="scalp-lw-data"),
                     html.Div([
                         html.Div([html.Span("Gros prints", className="sc-title"),
                                   dcc.RadioItems(id="scalp-min", className="seg", inline=True,
@@ -2263,15 +2394,98 @@ def create_app() -> Dash:
         Input("lang-boot", "data"),
     )
     # Page /scalp : classe sur <body> qui masque le reste du dashboard (cf. style.css)
+    #
+    # /scalp et /scalpv1 partagent AUJOURD'HUI le même rendu (le chantier v2 n'a
+    # pas encore de contenu propre à afficher) — mais `is_scalp_path` distingue
+    # déjà les deux explicitement plutôt que de compter sur l'accident que
+    # "/scalpv1".startswith("/scalp") est vrai en Python/JS. Le jour où /scalp
+    # diverge (nouveaux composants v2), le branchement se fait ICI, sans devoir
+    # d'abord défaire un couplage implicite. /scalpv1 ne doit JAMAIS être touché
+    # par ce qui est ajouté pour /scalp (cf. mémoire du projet
+    # roadmap-scalp-v2 : la page actuelle doit rester vivable pendant tout le
+    # chantier, appréciée des scalpeurs testeurs).
     app.clientside_callback(
         """
         function(path) {
-            document.body.classList.toggle('scalp-page', (path || '/').startsWith('/scalp'));
+            const p = path || '/';
+            const isScalpV2 = p === '/scalp' || p.startsWith('/scalp/');
+            const isScalpV1 = p === '/scalpv1' || p.startsWith('/scalpv1/');
+            document.body.classList.toggle('scalp-page', isScalpV2 || isScalpV1);
+            document.body.classList.toggle('scalp-v2-page', isScalpV2);
             return window.dash_clientside.no_update;
         }
         """,
         Output("url", "hash"),
         Input("url", "pathname"),
+    )
+
+    # Rendu du graphique Lightweight Charts (/scalp v2 uniquement) — crée le
+    # chart UNE fois (cf. window._gexLwChart, persiste entre les cycles) puis
+    # ne fait plus que `setData`/`setMarkers` dessus, jamais `createChart` à
+    # nouveau : recréer détruirait le zoom utilisateur à chaque rafraîchissement
+    # (exactement le problème que la migration Plotly->Lightweight Charts est
+    # censée régler, cf. mémoire du projet chantier-scalp-sse-integral).
+    #
+    # ⚠️ Piège vérifié le 2026-10-03 (prototype hors Dash) : `createChart` sur
+    # un conteneur dont la taille CSS n'est pas encore stable au montage fige
+    # le canvas interne à largeur 0, SANS AUCUNE ERREUR JS — d'où le
+    # `width`/`height` explicites ci-dessous plutôt qu'un simple 100%/100vh.
+    app.clientside_callback(
+        """
+        function(data) {
+            const container = document.getElementById('scalp-lw-chart');
+            if (!container || !data || !window.LightweightCharts) {
+                return window.dash_clientside.no_update;
+            }
+            if (!window._gexLwChart || window._gexLwChart.container !== container) {
+                container.innerHTML = '';
+                const chart = LightweightCharts.createChart(container, {
+                    width: container.clientWidth, height: container.clientHeight,
+                    layout: { background: { color: 'transparent' }, textColor: '#cfd3da' },
+                    grid: { vertLines: { color: '#1e222a' }, horzLines: { color: '#1e222a' } },
+                    timeScale: { timeVisible: true, secondsVisible: true },
+                });
+                const series = chart.addCandlestickSeries({
+                    upColor: '#199e70', downColor: '#e66767', borderVisible: false,
+                    wickUpColor: '#199e70', wickDownColor: '#e66767',
+                });
+                const onResize = () => chart.resize(container.clientWidth, container.clientHeight);
+                window.addEventListener('resize', onResize);
+                window._gexLwChart = { container: container, chart: chart, series: series, priceLines: [] };
+            }
+            const state = window._gexLwChart;
+            // Déduplique les barres au même timestamp entier (activité dense) :
+            // Lightweight Charts exige un temps strictement croissant.
+            const byTime = new Map();
+            for (const c of (data.candles || [])) byTime.set(c.time, c);
+            const candles = Array.from(byTime.values()).sort(function(a, b) { return a.time - b.time; });
+            state.series.setData(candles);
+            state.series.setMarkers((data.markers || []).map(function(m) {
+                const isHigh = m.kind.startsWith('H');
+                return {
+                    time: m.time, position: isHigh ? 'aboveBar' : 'belowBar',
+                    color: isHigh ? '#e66767' : '#199e70',
+                    shape: isHigh ? 'arrowDown' : 'arrowUp',
+                    text: m.kind + ' ' + Math.round(m.price),
+                };
+            }));
+            if (candles.length) { state.chart.timeScale().fitContent(); }
+            // Niveaux GEX/HVL/Flip/murs : enlève les anciennes lignes avant
+            // d'en recréer — Lightweight Charts n'a pas de "setPriceLines"
+            // qui remplace en bloc, seulement add/remove une par une.
+            for (const pl of state.priceLines) { state.series.removePriceLine(pl); }
+            state.priceLines = (data.levels || []).map(function(lv) {
+                return state.series.createPriceLine({
+                    price: lv.price, color: lv.color, lineWidth: 1,
+                    lineStyle: LightweightCharts.LineStyle.Dashed,
+                    axisLabelVisible: true, title: lv.name,
+                });
+            });
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("scalp-lw-chart", "title"),
+        Input("scalp-lw-data", "data"),
     )
 
     @app.callback(
@@ -2281,8 +2495,9 @@ def create_app() -> Dash:
         prevent_initial_call="initial_duplicate",
     )
     def scalp_symbol(path, symbol):
-        """Sur /scalp, seuls NQ et ES existent : un autre sous-jacent retombe sur NQ."""
-        if (path or "/").startswith("/scalp") and symbol not in ("NQ", "ES"):
+        """Sur /scalp ou /scalpv1, seuls NQ et ES existent : un autre
+        sous-jacent retombe sur NQ."""
+        if is_scalp_path(path) and symbol not in ("NQ", "ES"):
             return "NQ"
         raise PreventUpdate
 
@@ -2722,7 +2937,7 @@ def create_app() -> Dash:
          Input("scalp-window", "value"), Input("scalp-min", "value")],
     )
     def refresh_scalp(_, path, symbol, lang, window, min_size):
-        if not (path or "/").startswith("/scalp") or symbol not in ("NQ", "ES"):
+        if not is_scalp_path(path) or symbol not in ("NQ", "ES"):
             raise PreventUpdate
         hedge = hedge_fig(symbol, lang, int(window if window is not None else -1))
         hedge.update_layout(height=300, uirevision=f"scalp-{symbol}-{window}")
@@ -2732,16 +2947,32 @@ def create_app() -> Dash:
             wait = html.Div(t(lang, "waiting_native" if symbol in ("NQ", "ES")
                               else "waiting_first_pull"), className="hint")
             return wait, wait, wait, hedge, prints, empty_fig(t(lang, "sc_waiting_levels"), symbol)
-        # dernier prix RÉELLEMENT échangé (jamais le milieu bid/ask, qui peut
-        # tomber entre deux pas de cotation — cf. gex/rtquote.py Tick.price)
-        raw = QUOTES.last(symbol) if credentials_present() else None
-        raw = float(raw) if raw else float(ctx["snap_spot"])
-        spot = scalp.round_to_tick(symbol, raw)
+        spot = _scalp_live_spot(symbol, ctx)
         price = scalp_price_fig(symbol, ctx, spot)
         price.update_layout(uirevision=f"scalp-price-{symbol}")
         absorb = scalp_absorption(symbol)
-        return (scalp_banner(symbol, ctx, spot, lang, absorb), scalp_head(symbol, lang, ctx, spot),
+        # swing=True SEULEMENT sur /scalp exact — même garde que scalp-lw-card/
+        # refresh_scalp_lw, /scalpv1 ne doit jamais recevoir swing=True.
+        return (scalp_banner(symbol, ctx, spot, lang, absorb, swing=(path or "/") == "/scalp"),
+                scalp_head(symbol, lang, ctx, spot),
                 scalp_ladder(symbol, ctx, spot), hedge, prints, price)
+
+    @app.callback(
+        Output("scalp-lw-data", "data"),
+        [Input("tape-tick", "n_intervals"), Input("url", "pathname"), Input("symbol", "value")],
+    )
+    def refresh_scalp_lw(_, path, symbol):
+        """Alimente la carte Lightweight Charts — SEULEMENT sur `/scalp`
+        EXACT (pas `/scalpv1`, qui garde `scalp-price`/Plotly inchangée) :
+        `is_scalp_path` est volontairement PAS utilisé ici, il reconnaît les
+        deux pages, ce callback doit reconnaître uniquement la nouvelle."""
+        if (path or "/") != "/scalp" or symbol not in ("NQ", "ES"):
+            raise PreventUpdate
+        ctx = scalp_context(symbol)
+        if ctx is None:
+            raise PreventUpdate
+        spot = _scalp_live_spot(symbol, ctx)
+        return scalp_v2_chart_data(symbol, ctx, spot)
 
     @app.callback(
         Output("tape-table", "children"),

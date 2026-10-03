@@ -669,6 +669,15 @@ body.scalp-page #symbol label:has(input[value="SPY"]), body.scalp-page #symbol l
 body:not(.scalp-page) .full-link, body.scalp-page .scalp-link { display: none; }
 a.scalp-link, a.full-link { text-decoration: none; }
 
+/* Graphique /scalp v2 (Lightweight Charts) : /scalpv1 garde scalp-price
+   (Plotly) inchangée, seule /scalp EXACT bascule sur la nouvelle carte —
+   cf. classe body.scalp-v2-page (distincte de body.scalp-page, partagée par
+   les deux pages), posée par le clientside_callback dans gex/app.py. */
+#scalp-lw-card { display: none; }
+body.scalp-v2-page #scalp-price-card { display: none; }
+body.scalp-v2-page #scalp-lw-card { display: block; }
+.sc-lw-chart { width: 100%; height: 360px; }
+
 
 /* Bandeau d'amplification : en tête de la page Scalp */
 .sc-bannerbox { grid-area: banner; }
