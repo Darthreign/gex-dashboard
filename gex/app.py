@@ -1683,7 +1683,7 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
                 day_ticks = day_ticks[day_ticks["side"].isin(("BUY", "SELL"))]
     order_flow = scalp_order_flow_zones(symbol, day_ticks)
     empty = {"candles": [], "markers": [], "levels": levels, "confluence": confluence,
-            "order_flow": order_flow}
+            "order_flow": order_flow, "symbol": symbol}
 
     kind, size = tf[0], int(tf[1:])
 
@@ -1713,7 +1713,7 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
                     "low": float(r.low), "close": float(r.close)}
                   for e, r in zip(epoch, bars.itertuples())]
         return {"candles": candles, "markers": [], "levels": levels,
-                "confluence": confluence, "order_flow": order_flow}
+                "confluence": confluence, "order_flow": order_flow, "symbol": symbol}
 
     # kind == "v" : barres-volume, base du swing (gex/bars.py, validé le 2026-10-03)
     if day_ticks.empty:
@@ -1740,7 +1740,7 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
         markers = [{"time": int(r.ts), "price": r.price, "kind": r.kind}
                    for r in confirmed.itertuples()]
     return {"candles": candles, "markers": markers, "levels": levels, "confluence": confluence,
-            "order_flow": order_flow}
+            "order_flow": order_flow, "symbol": symbol}
 
 
 def flow_fig(symbol: str, lang: str, day: str | None = None) -> go.Figure:
@@ -2537,6 +2537,44 @@ def create_app() -> Dash:
                         dcc.Dropdown(id="scalp-chart-tf", className="sc-tf-dd",
                                     clearable=False, searchable=False,
                                     options=CHART_TF_OPTIONS, value=CHART_TF_DEFAULT),
+                        # Outils de dessin — moteur extrait d'OpenCharts (MIT,
+                        # github.com/dylanpersonguy/OpenCharts) sous forme de
+                        # primitive Lightweight Charts, compilé en bundle vendu
+                        # dans gex/assets/gex-drawing-tools.js (cf.
+                        # tools/drawing-tools-src/). Tracés persistés en
+                        # localStorage par symbole, pas de dialogue de style
+                        # pour l'instant (couleur/épaisseur par défaut
+                        # seulement) — amélioration possible plus tard.
+                        html.Div([
+                            html.Button("⬚", title="Sélection (Échap)", id="scalp-draw-tool-none",
+                                        className="sc-draw-btn sc-draw-active", **{"data-tool": "none"}),
+                            html.Button("／", title="Tendance (Alt+T)", className="sc-draw-btn",
+                                        **{"data-tool": "trendline"}),
+                            html.Button("—", title="Horizontale (Alt+H)", className="sc-draw-btn",
+                                        **{"data-tool": "horizontal"}),
+                            html.Button("¦", title="Verticale", className="sc-draw-btn",
+                                        **{"data-tool": "vertical"}),
+                            html.Button("↗", title="Rayon", className="sc-draw-btn",
+                                        **{"data-tool": "ray"}),
+                            html.Button("⇉", title="Canal parallèle", className="sc-draw-btn",
+                                        **{"data-tool": "channel"}),
+                            html.Button("▭", title="Rectangle (Alt+R)", className="sc-draw-btn",
+                                        **{"data-tool": "rectangle"}),
+                            html.Button("◯", title="Ellipse", className="sc-draw-btn",
+                                        **{"data-tool": "ellipse"}),
+                            html.Button("Fib", title="Fibonacci (Alt+F)", className="sc-draw-btn",
+                                        **{"data-tool": "fibonacci"}),
+                            html.Button("T", title="Texte", className="sc-draw-btn",
+                                        **{"data-tool": "text"}),
+                            html.Button("🧲", title="Aimant (accroche OHLC)", id="scalp-draw-magnet",
+                                        className="sc-draw-btn"),
+                            html.Button("↶", title="Annuler (Ctrl+Z)", id="scalp-draw-undo",
+                                        className="sc-draw-btn"),
+                            html.Button("↷", title="Rétablir (Ctrl+Y)", id="scalp-draw-redo",
+                                        className="sc-draw-btn"),
+                            html.Button("🗑", title="Tout effacer", id="scalp-draw-clear",
+                                        className="sc-draw-btn"),
+                        ], id="scalp-draw-toolbar", className="sc-draw-toolbar"),
                         html.Div(id="scalp-lw-chart", className="sc-lw-chart"),
                     ], id="scalp-lw-card", className="sc-card sc-underlying"),
                     dcc.Store(id="scalp-lw-data"),
@@ -2763,6 +2801,168 @@ def create_app() -> Dash:
             if (!container || !data || !window.LightweightCharts) {
                 return window.dash_clientside.no_update;
             }
+
+            // ── Outils de dessin (moteur extrait d'OpenCharts, MIT —
+            // github.com/dylanpersonguy/OpenCharts — compilé en bundle
+            // vanilla dans gex/assets/gex-drawing-tools.js, cf.
+            // tools/drawing-tools-src/). Tracés persistés en localStorage,
+            // un jeu par symbole. Pas de dialogue de style pour l'instant
+            // (couleur/épaisseur par défaut) — amélioration possible plus
+            // tard, pas demandée pour cette première passe.
+            function drawStorageKey(symbol) { return 'gex-scalp-draw-' + symbol; }
+
+            function loadDrawings(symbol) {
+                try {
+                    const raw = window.localStorage.getItem(drawStorageKey(symbol));
+                    return raw ? JSON.parse(raw) : [];
+                } catch (e) { return []; }
+            }
+
+            function saveDrawings(symbol, list) {
+                try {
+                    window.localStorage.setItem(drawStorageKey(symbol), JSON.stringify(list));
+                } catch (e) { /* quota / navigation privée : tant pis, pas bloquant */ }
+            }
+
+            function sortByZ(list) {
+                return list.slice().sort(function(a, b) { return (a.zIndex || 0) - (b.zIndex || 0); });
+            }
+
+            function drawState() {
+                const g = window._gexDraw;
+                return g.bySymbol[g.symbol];
+            }
+
+            // Appliers "primitifs" : mutent l'état + localStorage + repoussent
+            // vers le manager, SANS toucher à l'historique annuler/rétablir
+            // (undo/redo s'appuient dessus pour rejouer une opération sans
+            // créer une nouvelle entrée d'historique).
+            function applyAdd(d) {
+                const st = drawState();
+                st.drawings = sortByZ(st.drawings.concat([d]));
+                saveDrawings(window._gexDraw.symbol, st.drawings);
+                window._gexDraw.manager.setDrawings(st.drawings);
+            }
+            function applyUpdate(d) {
+                const st = drawState();
+                st.drawings = sortByZ(st.drawings.map(function(x) { return x.id === d.id ? d : x; }));
+                saveDrawings(window._gexDraw.symbol, st.drawings);
+                window._gexDraw.manager.setDrawings(st.drawings);
+            }
+            function applyRemove(id) {
+                const st = drawState();
+                st.drawings = st.drawings.filter(function(x) { return x.id !== id; });
+                saveDrawings(window._gexDraw.symbol, st.drawings);
+                window._gexDraw.manager.setDrawings(st.drawings);
+            }
+
+            function pushHistory(op) {
+                const st = drawState();
+                st.undo.push(op);
+                if (st.undo.length > 100) st.undo.shift();
+                st.redo = [];
+            }
+
+            function undo() {
+                const st = drawState();
+                const op = st.undo.pop();
+                if (!op) return;
+                if (op.kind === 'add') applyRemove(op.drawing.id);
+                else if (op.kind === 'update') applyUpdate(op.before);
+                else if (op.kind === 'remove') applyAdd(op.drawing);
+                else for (const d of op.drawings) applyAdd(d);
+                st.redo.push(op);
+            }
+
+            function redo() {
+                const st = drawState();
+                const op = st.redo.pop();
+                if (!op) return;
+                if (op.kind === 'add') applyAdd(op.drawing);
+                else if (op.kind === 'update') applyUpdate(op.after);
+                else if (op.kind === 'remove') applyRemove(op.drawing.id);
+                else for (const d of op.drawings) applyRemove(d.id);
+                st.undo.push(op);
+            }
+
+            function clearAll() {
+                const st = drawState();
+                if (st.drawings.length > 0) pushHistory({ kind: 'clear', drawings: st.drawings });
+                st.drawings = [];
+                saveDrawings(window._gexDraw.symbol, st.drawings);
+                window._gexDraw.manager.setDrawings(st.drawings);
+            }
+
+            function setActiveToolUI(tool) {
+                const toolbar = document.getElementById('scalp-draw-toolbar');
+                if (!toolbar) return;
+                toolbar.querySelectorAll('[data-tool]').forEach(function(btn) {
+                    btn.classList.toggle('sc-draw-active', btn.getAttribute('data-tool') === tool);
+                });
+            }
+
+            function switchDrawSymbol(symbol) {
+                const g = window._gexDraw;
+                if (!g.bySymbol[symbol]) {
+                    g.bySymbol[symbol] = { drawings: sortByZ(loadDrawings(symbol)), undo: [], redo: [] };
+                }
+                g.symbol = symbol;
+                g.manager.setDrawings(g.bySymbol[symbol].drawings);
+            }
+
+            function setupDrawingTools(chart, series, container) {
+                if (!window.GexDrawingTools) return;  // bundle absent (build pas lancé) : chart marche sans
+                window._gexDraw = { bySymbol: {}, manager: null, symbol: null, magnet: 'none' };
+                const manager = new window.GexDrawingTools.DrawingToolsManager({
+                    chart: chart, series: series, container: container,
+                    intervalSec: 60, timeframe: 'scalp',
+                    callbacks: {
+                        onAdd: function(d) { pushHistory({ kind: 'add', drawing: d }); applyAdd(d); },
+                        onUpdate: function(d) {
+                            const before = drawState().drawings.find(function(x) { return x.id === d.id; });
+                            if (before) pushHistory({ kind: 'update', before: before, after: d });
+                            applyUpdate(d);
+                        },
+                        onRemove: function(id) {
+                            const drawing = drawState().drawings.find(function(x) { return x.id === id; });
+                            if (drawing) pushHistory({ kind: 'remove', drawing: drawing });
+                            applyRemove(id);
+                        },
+                        onToolFinished: function() { setActiveToolUI('none'); },
+                        onSelectTool: function(tool) { manager.setTool(tool); setActiveToolUI(tool); },
+                        onUndo: function() { undo(); },
+                        onRedo: function() { redo(); },
+                    },
+                });
+                window._gexDraw.manager = manager;
+
+                const toolbar = document.getElementById('scalp-draw-toolbar');
+                if (toolbar && !toolbar.dataset.wired) {
+                    toolbar.dataset.wired = '1';
+                    toolbar.addEventListener('click', function(e) {
+                        const btn = e.target.closest('[data-tool]');
+                        if (!btn) return;
+                        const tool = btn.getAttribute('data-tool');
+                        manager.setTool(tool);
+                        setActiveToolUI(tool);
+                    });
+                    const magnetBtn = document.getElementById('scalp-draw-magnet');
+                    if (magnetBtn) magnetBtn.addEventListener('click', function() {
+                        const g = window._gexDraw;
+                        g.magnet = g.magnet === 'none' ? 'weak' : 'none';
+                        manager.setMagnetMode(g.magnet);
+                        magnetBtn.classList.toggle('sc-draw-active', g.magnet !== 'none');
+                    });
+                    const undoBtn = document.getElementById('scalp-draw-undo');
+                    if (undoBtn) undoBtn.addEventListener('click', undo);
+                    const redoBtn = document.getElementById('scalp-draw-redo');
+                    if (redoBtn) redoBtn.addEventListener('click', redo);
+                    const clearBtn = document.getElementById('scalp-draw-clear');
+                    if (clearBtn) clearBtn.addEventListener('click', function() {
+                        if (window.confirm('Effacer tous les tracés de ce symbole ?')) clearAll();
+                    });
+                }
+            }
             if (!window._gexLwChart || window._gexLwChart.container !== container) {
                 container.innerHTML = '';
                 const chart = LightweightCharts.createChart(container, {
@@ -2779,8 +2979,16 @@ def create_app() -> Dash:
                 window.addEventListener('resize', onResize);
                 window._gexLwChart = { container: container, chart: chart, series: series,
                                        priceLines: [], fitted: false };
+                setupDrawingTools(chart, series, container);
             }
             const state = window._gexLwChart;
+            // Outils de dessin : tracés persistés par symbole (localStorage),
+            // indépendants du chart/series qui restent stables — seul le jeu
+            // de tracés affiché change quand le symbole change.
+            if (window._gexDraw && window._gexDraw.manager && data.symbol
+                    && window._gexDraw.symbol !== data.symbol) {
+                switchDrawSymbol(data.symbol);
+            }
             // Déduplique les barres au même timestamp entier (activité dense) :
             // Lightweight Charts exige un temps strictement croissant.
             const byTime = new Map();

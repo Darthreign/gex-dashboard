@@ -8,3 +8,4 @@ logs/
 build/
 dist/
 discord_bot/.env
+node_modules/

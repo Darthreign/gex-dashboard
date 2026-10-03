@@ -1,0 +1,12 @@
+{
+  "name": "gex-drawing-tools-build",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Build-only: compile the extracted OpenCharts drawing-tools engine into gex/assets/gex-drawing-tools.js. Not a runtime dependency of the app.",
+  "scripts": {
+    "build": "esbuild entry.ts --bundle --format=iife --global-name=GexDrawingTools --outfile=../../gex/assets/gex-drawing-tools.js --target=es2019 --banner:js=\"/* Drawing-tools engine extracted from OpenCharts (MIT) - https://github.com/dylanpersonguy/OpenCharts - see tools/drawing-tools-src/LICENSE-opencharts */\""
+  },
+  "devDependencies": {
+    "esbuild": "^0.23.0"
+  }
+}

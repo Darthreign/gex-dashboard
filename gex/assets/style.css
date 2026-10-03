@@ -790,6 +790,21 @@ body.scalp-v2-page #scalp-lw-card { display: block; }
    "donner la possibilité de choisir sa TF". */
 .sc-tf-dd { width: 110px; margin-bottom: 6px; font-size: 12.5px; }
 
+/* Outils de dessin (/scalp v2) — moteur extrait d'OpenCharts (MIT), câblé
+   dans gex/app.py sur window.GexDrawingTools (gex/assets/gex-drawing-tools.js).
+   Barre compacte au-dessus du graphique, pas une palette flottante : plus
+   simple à wire sans gérer de positionnement libre. */
+.sc-draw-toolbar {
+  display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 6px;
+}
+.sc-draw-btn {
+  width: 28px; height: 26px; padding: 0; border-radius: 4px;
+  border: 1px solid var(--line); background: var(--surface-2); color: var(--ink-2);
+  font-size: 13px; line-height: 1; cursor: pointer;
+}
+.sc-draw-btn:hover { border-color: var(--accent); color: var(--ink); }
+.sc-draw-btn.sc-draw-active { border-color: var(--accent); color: var(--ink); background: #1f3a5c; }
+
 /* Même bascule pour la couverture des dealers (demandé le 2026-10-03,
    "tu ne passes pas par Lightweight Charts ?") — /scalpv1 garde
    scalp-hedge (Plotly, LineSeries en marches). */
