@@ -650,6 +650,28 @@ body {
 .sc-spot-row { background: #ffffff; color: #111; font-weight: 700; }
 .sc-spot-row .sc-price { color: #111; }
 
+/* Disposition verticale /scalp v2, optionnelle (bouton #sc-layout-toggle,
+   demande de Noé sur Discord le 01/10 : "pouvoir avoir les graphiques
+   verticalement plutôt que horizontalement") — réutilise exactement la
+   même règle empilée que le repli mobile ci-dessous plutôt que d'en écrire
+   une deuxième, juste activable au choix sur grand écran. Préférence
+   mémorisée dans localStorage (gex-scalp-layout), pas de serveur, pas
+   d'identité nécessaire. */
+.sc-layout-toggle {
+  display: none;    /* visible seulement sur /scalp v2 (body.scalp-v2-page ci-dessous) */
+  margin: -4px 0 10px; background: var(--surface); color: var(--ink2);
+  border: 1px solid var(--line); border-radius: 7px; padding: 6px 13px;
+  font-size: 12.5px; cursor: pointer; transition: all 0.12s ease;
+}
+.sc-layout-toggle:hover { background: var(--surface-2); color: var(--ink); border-color: #3a3a37; }
+body.scalp-v2-page .sc-layout-toggle { display: inline-flex; }
+body.scalp-v2-page.sc-layout-vertical .sc-layout-toggle { background: var(--surface-2); color: var(--ink); }
+
+body.scalp-v2-page.sc-layout-vertical .sc-grid {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "banner" "head" "ladder" "price" "hedge" "prints";
+}
+
 @media (max-width: 900px) {
   .sc-grid { grid-template-columns: minmax(0, 1fr); grid-template-areas: "banner" "head" "ladder" "price" "hedge" "prints"; }
   .sc-spot { font-size: 30px; }

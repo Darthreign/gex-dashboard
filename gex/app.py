@@ -2209,6 +2209,16 @@ def create_app() -> Dash:
             ]),
 
             html.Div(id="pane-scalp", children=[
+                # Disposition verticale (/scalp v2 seulement) : demande de Noé
+                # (Discord, 01/10) — "pouvoir avoir les graphiques verticalement
+                # plutôt que horizontalement". HORS de .sc-grid à dessein : un
+                # enfant sans zone déclarée dans grid-template-areas se
+                # positionne n'importe où/invisible, pas un simple bloc avant la
+                # grille. Toujours dans le DOM, masqué par CSS hors
+                # body.scalp-v2-page (même pattern que .scalp-link/.full-link) ;
+                # état persisté en localStorage côté client, aucun état serveur.
+                html.Button("↕ Disposition verticale", id="sc-layout-toggle",
+                           className="sc-layout-toggle", n_clicks=0),
                 html.Div([
                     html.Div(id="scalp-banner", className="sc-bannerbox"),
                     html.Div(id="scalp-head", className="sc-head"),
@@ -2330,6 +2340,7 @@ def create_app() -> Dash:
             # voir tout de suite, pas au prochain pull (60 s)
             dcc.Interval(id="rt-tick", interval=5000),
             dcc.Store(id="lang-boot", data=0),
+            dcc.Store(id="sc-layout-boot", data=0),
             html.Div(id="footer", className="footer"),
         ], className="page"),
         dcc.Store(id="native-alt"),  # "NDX" ou "SPY" : cible du bouton OK
@@ -2505,6 +2516,36 @@ def create_app() -> Dash:
         "function(l) { window.localStorage.setItem('gex-lang', l); return window.dash_clientside.no_update; }",
         Output("lang-boot", "data"),
         Input("lang", "value"),
+        prevent_initial_call=True,
+    )
+
+    # Disposition verticale /scalp v2 (cf. .sc-layout-toggle, style.css) :
+    # restaure la préférence au chargement (localStorage, pas de serveur).
+    app.clientside_callback(
+        """
+        function(_) {
+            if (window.localStorage.getItem('gex-scalp-layout') === 'vertical') {
+                document.body.classList.add('sc-layout-vertical');
+            }
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("sc-layout-toggle", "title"),
+        Input("sc-layout-boot", "data"),
+    )
+    # Bascule au clic + persiste — lit l'état actuel sur <body> plutôt que de
+    # suivre n_clicks (pair/impair), robuste à un rechargement entre-temps.
+    app.clientside_callback(
+        """
+        function(n_clicks) {
+            if (!n_clicks) { return window.dash_clientside.no_update; }
+            const vertical = document.body.classList.toggle('sc-layout-vertical');
+            window.localStorage.setItem('gex-scalp-layout', vertical ? 'vertical' : 'horizontal');
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("sc-layout-toggle", "title", allow_duplicate=True),
+        Input("sc-layout-toggle", "n_clicks"),
         prevent_initial_call=True,
     )
 
