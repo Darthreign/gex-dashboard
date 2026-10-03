@@ -202,6 +202,7 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     conn.executescript(_SCHEMA)
     _ensure_poll_columns(conn)
     _ensure_absorption_columns(conn)
+    _ensure_scalp_signal_columns(conn)
     conn.commit()
     return conn
 
@@ -230,6 +231,28 @@ def _ensure_absorption_columns(conn: sqlite3.Connection) -> None:
     for col, sqltype in ABSORPTION_HVL_COLS:
         if col not in existing:
             conn.execute(f"ALTER TABLE absorption_events ADD COLUMN {col} {sqltype}")
+
+
+# Colonne ajoutée le 2026-10-03 : exclure une ligne polluée d'une calibration
+# SANS la supprimer (donnée brute gardée pour audit) — ex. le bug du spot
+# figé à 30040 (saturation 1-thread Werkzeug, cf. mémoire du projet
+# audit-bug-spot-amplification-30040). NULL = ligne saine, utilisable.
+# "basis" ajoutée le 2026-10-03 : quelle mesure de mouvement a produit la
+# ligne — "fenetre_5min" (historique, /scalpv1) ou "swing_v60" (/scalp v2,
+# cf. gex/app.py::scalp_inputs_swing). NULL = lignes d'avant cette colonne,
+# toutes "fenetre_5min" implicitement (seul moteur qui existait alors).
+# Distinguer dès l'écriture, PAS après coup — c'est exactement l'absence de
+# cette distinction qui a rendu le bug spot=30040 difficile à isoler (cf.
+# mémoire du projet audit-bug-spot-amplification-30040).
+SCALP_SIGNALS_EXTRA_COLS = (("excluded_reason", "TEXT"), ("basis", "TEXT"))
+
+
+def _ensure_scalp_signal_columns(conn: sqlite3.Connection) -> None:
+    """Même logique que `_ensure_poll_columns`, pour `scalp_signals`."""
+    existing = {r["name"] for r in conn.execute("PRAGMA table_info(scalp_signals)")}
+    for col, sqltype in SCALP_SIGNALS_EXTRA_COLS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE scalp_signals ADD COLUMN {col} {sqltype}")
 
 
 # --------------------------------------------------------------------------
@@ -500,17 +523,21 @@ def set_entry_status(conn: sqlite3.Connection, entry_id: int, status: str,
 def record_scalp_signal(conn: sqlite3.Connection, *, date: str, ts: str, symbol: str,
                         state: str, tone: str, direction: int, title: str, spot: float,
                         move_pts: float | None = None, net_musd: float | None = None,
-                        gross_musd: float | None = None) -> int:
+                        gross_musd: float | None = None, basis: str | None = None) -> int:
     """Enregistre le DÉBUT d'un signal-état (transition) — jamais un doublon
     à chaque cycle où l'état n'a pas changé, c'est à l'appelant de le garantir
-    (cf. gex.scalp.should_log_signal). Renvoie l'id, pour la résolution."""
+    (cf. gex.scalp.should_log_signal). Renvoie l'id, pour la résolution.
+
+    `basis` : cf. SCALP_SIGNALS_EXTRA_COLS — quelle mesure de mouvement a
+    produit cette ligne ("fenetre_5min" | "swing_v60"), None pour un appelant
+    qui ne le précise pas (compat)."""
     cur = conn.execute(
         """INSERT INTO scalp_signals
            (date, ts, symbol, state, tone, direction, title, spot,
-            move_pts, net_musd, gross_musd)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            move_pts, net_musd, gross_musd, basis)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
         (date, ts, symbol, state, tone, int(direction), title, spot,
-         move_pts, net_musd, gross_musd),
+         move_pts, net_musd, gross_musd, basis),
     )
     conn.commit()
     return int(cur.lastrowid)
