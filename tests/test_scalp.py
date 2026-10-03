@@ -89,9 +89,12 @@ def test_couverture_a_contre_courant_est_un_frein():
     assert "mouvement haussier" in a["title"]
 
 
-def test_mouvement_sans_soutien_des_dealers():
+def test_mouvement_sans_lecture_de_flux():
     a = _a(+40.0, +10.0, 400.0)                       # flux quasi équilibré
-    assert a["state"] == "unsupported" and a["tone"] == "ok"
+    # tone="neutral", pas "ok" : ce branchement ne mesure jamais un flux
+    # opposé (cf. commentaire dans scalp.py), seulement son absence — pas un
+    # signal contrarien, cf. mémoire du projet roadmap-scalp-v2.
+    assert a["state"] == "unsupported" and a["tone"] == "neutral"
     assert "Mouvement haussier" in a["title"]
     assert "Mouvement baissier" in _a(-40.0, -10.0, 400.0)["title"]
     assert scalp.assess("NQ", 40.0, 50.0, 60.0, False, None)["state"] == "unsupported"  # brut < 100
@@ -136,7 +139,7 @@ def test_assess_lang_en_frein_et_sans_soutien():
     brake = scalp.assess("NQ", +40.0, -300.0, 400.0, False, None, lang="en")
     assert "bearish" not in brake["title"] and "bullish" in brake["title"]
     unsupported = scalp.assess("NQ", -40.0, -10.0, 400.0, False, None, lang="en")
-    assert "bearish move without dealer support" in unsupported["title"]
+    assert "bearish move" in unsupported["title"] and "no dealer flow reading" in unsupported["title"]
 
 
 def test_prix_qui_fonce_vers_le_flip_allume_le_voyant_gamma():

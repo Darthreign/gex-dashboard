@@ -217,7 +217,7 @@ TR: dict[str, dict[str, str]] = {
         "sc_calm_title": "Pas de mouvement directionnel",
         "sc_amplification_title": "Amplification {side} détectée{renforce}",
         "sc_brake_title": "Couverture à contre-courant : frein sur le mouvement {side_m}",
-        "sc_unsupported_title": "Mouvement {side_m} sans soutien des dealers — extension à corriger ?",
+        "sc_unsupported_title": "Mouvement {side_m} — pas de lecture de flux dealers",
         "sc_renforce_defavorable": " — gamma défavorable",
         "sc_renforce_favorable": " — malgré un gamma positif",
         "sc_detail": "Mouvement {move_pts:+.0f} pts / 5 min · {flux_txt}"
@@ -452,7 +452,7 @@ TR: dict[str, dict[str, str]] = {
         "sc_calm_title": "No directional move",
         "sc_amplification_title": "{side} amplification detected{renforce}",
         "sc_brake_title": "Counter-trend hedging: brake on the {side_m} move",
-        "sc_unsupported_title": "{side_m} move without dealer support — extension to correct?",
+        "sc_unsupported_title": "{side_m} move — no dealer flow reading",
         "sc_renforce_defavorable": " — unfavorable gamma",
         "sc_renforce_favorable": " — despite positive gamma",
         "sc_detail": "Move {move_pts:+.0f} pts / 5 min · {flux_txt}"

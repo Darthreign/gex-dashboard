@@ -136,7 +136,9 @@ def assess(symbol: str, move_pts: float | None, net_musd: float, gross_musd: flo
     dist_to_flip : niveau du Gamma Flip - spot, en points (None si inconnu)
 
     États (`state`) : insufficient | calm | amplification | unsupported | brake.
-    `tone` : alert (amplification), ok (favorable au contrarien), neutral."""
+    `tone` : alert (amplification) ; ok (favorable au contrarien — seulement
+    `brake`, le seul état qui mesure un flux OPPOSÉ au mouvement) ; neutral
+    (`unsupported` inclus — absence de lecture de flux, pas un signal)."""
     if move_pts is None:
         return {"state": "insufficient", "tone": "neutral", "direction": 0,
                 "title": i18n.t(lang, "sc_insufficient_title"),
@@ -175,7 +177,15 @@ def assess(symbol: str, move_pts: float | None, net_musd: float, gross_musd: flo
         return {"state": "brake", "tone": "ok", "direction": direction,
                 "title": i18n.t(lang, "sc_brake_title", side_m=side_m),
                 "detail": detail, "lights": lights}
-    return {"state": "unsupported", "tone": "ok", "direction": direction,
+    # tone="neutral", pas "ok" : vérifié le 2026-10-03 sur 321 signaux réels
+    # (cf. mémoire du projet roadmap-scalp-v2) — ce branchement n'est atteint
+    # QUE quand flow_dir==0 (flux insignifiant, sous GROSS_MIN_MUSD/RATIO_MIN),
+    # jamais quand le flux s'oppose activement au mouvement (ce cas renvoie
+    # "brake" juste au-dessus). "unsupported" ne mesure donc jamais un vrai
+    # signal contrarien, seulement l'ABSENCE de lecture de flux — lui donner
+    # tone="ok" (vert, "favorable au contrarien") était trompeur : aucun edge
+    # mesuré (44% continued sur les 4 jours audités, = taux de base).
+    return {"state": "unsupported", "tone": "neutral", "direction": direction,
             "title": i18n.t(lang, "sc_unsupported_title", side_m=side_m),
             "detail": detail, "lights": lights}
 
