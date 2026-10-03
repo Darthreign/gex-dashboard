@@ -1,132 +1,49 @@
-# Passation — 2026-10-03, session de l'après-midi (mise à jour en cours de route, contexte long)
+# Passation — 2026-10-03/04 (nuit), avant clear de session
 
-État au moment de l'écriture : dashboard et capture tournent proprement, aucune erreur connue en cours. Marché fermé (samedi). **Site en maintenance, personne ne l'utilise actuellement** — l'utilisateur a donné carte blanche pour avancer sans validation intermédiaire sur le chantier /scalp v2 ("ne t'arrête que si je te dis de le faire").
+État au moment de l'écriture : dashboard et capture tournent proprement, dernier redémarrage vérifié sans erreur. Marché fermé (week-end). Tout le travail de cette session est **commité et poussé** (`git log` : de `9f743f7` à `92c17c2`, 9 commits). `git status` propre — seuls des fichiers non suivis préexistants traînent (`Env.txt`, `GEX_formules.pdf`, `icone.png`, `scripts/nightly_migrate.py`, `gex/scheduler.py.bak-20260818`, `graphify-out/`, `.claude/settings.json`), présents dès le début de session, sans rapport avec ce chantier.
 
 ## À lire en premier
 
 **La feuille de route /scalp v2 est dans la mémoire du projet, pas dans ce fichier** :
 `C:\Users\sk8bo\.claude\projects\D--Gex\memory\roadmap-scalp-v2.md`
 
-Elle a beaucoup changé depuis la version du matin — relire en entier, ne pas se fier à un résumé antérieur. Contient maintenant : routage (`/scalp` v2 remplace, `/scalpv1` = actuelle, DOIT rester vivable pendant tout le chantier — appréciée des scalpeurs testeurs), 7 pistes, audit chiffré, **le bug du spot figé à 30040** (cf. `audit-bug-spot-amplification-30040.md`), **le diagnostic HVL** (problème de design — fenêtre de cumul sur toute la séance, pas de seuil), et **le cas validé du 30/09** qui fusionne les points 1 et 2 du chantier (voir plus bas).
+Elle a énormément grossi cette session (14+ sections ajoutées au fil des retours de l'utilisateur) — c'est la source de vérité détaillée, ce fichier-ci n'en est qu'un résumé d'orientation. Mémoires liées : `audit-bug-spot-amplification-30040.md` (bug corrigé), `chantier-scalp-sse-integral.md` (fondu dans la v2, pas un chantier à part), `chantier-analyse-pre-moc.md` (MOC, carve-out explicite — ne pas commencer sans en reparler à l'utilisateur).
 
-Autres mémoires liées :
-- `chantier-scalp-sse-integral.md` — plus un chantier séparé : fondu dans la construction de la v2 (points 2-4 de la roadmap doivent être SSE-natifs dès leur écriture, pas migrés après coup).
-- `chantier-analyse-pre-moc.md` — mode MOC : **carve-out explicite, à discuter avec l'utilisateur avant de coder**, même sous mandat d'autonomie général (vérifier faisabilité hedge, piste max pain à construire de zéro si retenue).
-- `audit-bug-spot-amplification-30040.md` — détail du bug spot=30040.
+## État de /scalp v2 — ce qui tourne réellement en production
 
-## Travail fait cette session (dans l'ordre)
+Routage explicite (`is_scalp_path`) : `/scalp` (v2) et `/scalpv1` (gelée, Plotly inchangée) partagent le même DOM, le CSS/les callbacks bifurquent par chemin exact. **`/scalpv1` n'a jamais régressé à aucune étape** — vérifié en live après chaque redémarrage (une dizaine ce soir).
 
-1. **Vérifié les outcomes de `scalp_signals` contre les vrais ticks** (`data/ticks/`) — ce n'était jamais fait, l'audit du matin s'était fié à la colonne `outcome` stockée.
-2. **Bug trouvé** : 46/131 signaux `amplification` (29/09→01/10) ont `spot` figé à 30040.00 (repli `app.py` vers `QUOTES.last()`/`ctx["snap_spot"]` périmé sous saturation 1-thread Werkzeug). Ça gonflait artificiellement le taux de réussite d'`amplification` affiché dans l'audit du matin (64% → en fait 44,7% une fois nettoyé, identique à `unsupported`).
-3. **Migration DB appliquée** (non destructive) : colonne `excluded_reason` ajoutée à `scalp_signals` (`discord_bot/journal.py`, suit le pattern `_ensure_*_columns` existant). Les 46 lignes marquées `excluded_reason='spot_fallback_30040_2026-10-03'`. Sauvegarde de la base AVANT modif : `data/journal/journal.sqlite.bak-20261003-avant-recalibrage`. Tests `.venv/Scripts/python.exe -m pytest tests/test_journal.py tests/test_resolve_scalp_signals.py` : 25/25 verts (⚠️ utiliser `.venv/Scripts/python.exe`, pas `python` nu — flask absent de l'interpréteur système).
-4. **HVL recalibré — diagnostic, pas de fix appliqué** : reconstruit le volume profile réel au moment de chacune des 257 salves d'absorption depuis les ticks bruts. `delta_fraction` médian = 3,4%, 95e percentile = 19,4% — très loin du seuil `HVL_MIN_DELTA_FRACTION=0.35`. Ce n'est pas un seuil mal réglé : cumuler le delta sur TOUTE la séance lisse presque toujours le déséquilibre directionnel. Le design (fenêtre de cumul) doit changer, pas juste le seuil. **Laissé à l'utilisateur** (il compte affiner l'absorption lui-même, piste 3 de la roadmap).
-5. **Seuils `unsupported`/`amplification` — analyse faite, PAS appliquée au code.** `GROSS_MIN_MUSD` plus élevé améliore réellement `amplification` (44,7%→63,6% continued au 75e percentile de flux, n=22 seulement) mais ne change rien à `unsupported` (reste ~44% peu importe le seuil — pas d'edge, le postulat contrarien n'est pas soutenu).
-6. **Cas concret validé, remonté par l'utilisateur de mémoire, vérifié dans les données** : mercredi 30/09, ids 71-89 (15h25-16h04 CEST), poussée haussière réelle 30691→30871. Le bandeau dit `unsupported` quasi à chaque étape DE LA MONTÉE (alors qu'il y avait du soutien réel), puis passe à `amplification`/soutenu pile au sommet (ids 83/85/87, ~16h02-16h04) — ces 3 signaux se résolvent tous `reversed`. **Les deux lectures sont inversées aux deux moments clés.**
-7. **Conclusion qui change l'ordre du chantier** : le problème n'est pas (que) les seuils, c'est que `net_musd`/`gross_musd` est calculé sur une fenêtre fixe de 5 min glissante (`TAPE.live_points`, `scalp_inputs`) qui peut capter du market-making réactif (pas une vraie conviction directionnelle). **Les points 1 (recalibrage) et 2 (swing H/L) de la roadmap sont fusionnés** — ne pas figer de seuils sur la base 5 min actuelle avant d'avoir testé des bases alternatives (barres-volume, barres-ticks, barres-range).
-8. **Utilisateur a explicitement autorisé le backtest** ("le sur-apprentissage n'est pas une fatalité") et donné carte blanche totale sur les points 1-6 de la roadmap (MOC excepté, carve-out ci-dessus).
+Sur `/scalp` (v2), livré et vérifié en live :
+- **Graphique Lightweight Charts** (lib vendue en local, `gex/assets/`) avec **sélecteur de TF** (1/5/10/15min, 1h, 4h en ré-échantillonnage des bougies 1 min ; 6/60/600 vol en barres-volume avec pivots swing). Niveaux GEX/HVL/Flip/murs + confluence multi-familles (SPX/NDX/QQQ/SPY/NQ/ES) + zones order flow (HVL) en overlay. Repli sur le dernier jour disponible si la séance en cours est vide. Zoom utilisateur préservé (`fitContent()` une seule fois, plus jamais écrasé).
+- **Graphique "Couverture des dealers"** migré en Lightweight Charts lui aussi (LineSeries), même logique que le prix.
+- **Bandeau swing-ancré** (`scalp_inputs_swing`, `bar_volume=60` fixe en interne) au lieu de la fenêtre 5 min — séparé du sélecteur de TF du graphique (qui ne change que l'affichage, jamais le moteur de signal).
+- **Panneau "⚙ Personnalisation"** (carte visible, pas une ligne discrète) : disposition verticale, ordre des blocs (Niveaux/Graphique/Couverture/Prints, CSS `order`, pas de drag-and-drop réel — risque de désync React/Dash), masquage par bloc (niveaux/graphique prix/couverture/tape), mode mots-clés. **Étendu à `/scalpv1` aussi** à la demande de l'utilisateur (préférences partagées via localStorage).
+- **`unsupported`** : ton neutre + titre honnête (ne mesure jamais un flux opposé au mouvement, vérifié sur 321 signaux réels — l'ancien titre/ton laissait croire à un edge contrarien inexistant).
 
-## Module `gex/bars.py` livré (soir du 2026-10-03)
+Suite de tests : **578/578 verts** (`.venv/Scripts/python.exe -m pytest tests/`). Un test (`test_graphe_sous_jacent_comble_le_trou_si_le_disque_a_du_retard`) est **flaky** (dépend de la frontière de la minute en cours) — repasse seul en isolation, sans rapport avec le code de cette session.
 
-**Fait et testé** : `gex/bars.py` (barres tick/volume/range + `zigzag` + `trend_move`), `tests/test_bars.py` (12 tests). Suite complète du projet : **563/563 verts** (`.venv/Scripts/python.exe -m pytest tests/`). Rien dans `app.py`/`scalp.py` n'a encore été touché — module autonome, pas branché.
+## Bugs trouvés et corrigés cette session
 
-**Validation faite sur le cas du 30/09 (ids 71-89, détail dans roadmap-scalp-v2.md)** :
-- Win structurel net : le zigzag (toute base confondue) montre une tendance propre là où le signal 5 min disait l'inverse aux deux moments clés.
-- MAIS testé plus largement sur les 119 signaux résolus du 30/09 : `swing_dir` seul prédit le signe du mouvement suivant à 38,2%, quasi identique aux 38,5% de la direction 5 min actuelle — **aucun edge seul, sur ce jour**.
-- Piste qui mérite d'être creusée mais PAS validée (un seul jour, petits échantillons) : filtrer sur l'ACCORD entre swing et 5 min change les taux de réussite (ex. `unsupported` en accord : 48,2% reversed vs ~35% sans filtre). `amplification` en accord : 87,5% reversed sur seulement 16 signaux — trop peu pour conclure.
+1. **Spot figé à 30040** (46/131 signaux `amplification` pollués, 29/09→01/10) — `_scalp_live_spot` utilise maintenant `_futures_last_price()` (tick-accurate) en source primaire. Détail : `audit-bug-spot-amplification-30040.md`.
+2. **`scalp_order_flow_zones` lent** (`.groupby().apply(lambda)` = appel Python par groupe malgré l'air vectorisé) — a saturé le serveur mono-thread dès que le repli historique a commencé à traiter de vraies séances (500k+ ticks). Réécrit en agrégation pandas pure (0,076s pour 531k ticks). Cache 10s ajouté sur confluence/order_flow en prévention.
+3. **Confluence "x58"** : le chaînage de `cluster_levels` avec 6 familles peut produire une zone de plusieurs centaines de points — plafond d'affichage à 3x le seuil de clustering (ne touche pas à `cluster_levels`).
+4. **Chevauchement CSS** en disposition verticale (`grid-template-areas: none` sur le parent ne suffit pas, `grid-area: auto` à forcer explicitement sur les enfants).
+5. **`threaded=True` retesté puis re-retiré** dans la même minute — observé pire en direct par l'utilisateur, confirme la leçon du 2026-10-01. Ne pas retenter sans d'abord alléger le travail CPU synchrone ou passer à un vrai serveur multi-worker (waitress — pas installé).
 
-## Trouvaille structurelle (soir, après le module bars.py) — la plus solide de la session
+## Décisions explicites de l'utilisateur, pas encore exécutées
 
-Lecture directe de `scalp.assess()` (if/elif chain) + vérification sur les 321 lignes `unsupported` propres : **`unsupported` ne peut STRUCTURELLEMENT jamais représenter un flux qui s'oppose au mouvement** — ce cas (`flow_dir==-direction`) retourne toujours `brake`, jamais `unsupported`. Les 321 lignes `unsupported` ont 100% un flux insignifiant (`flow_dir==0`, sous les seuils), 0% un flux opposant. Donc `unsupported` ("sans soutien des dealers — extension à corriger ?", ton contrarien) ne mesure en réalité jamais "pas de soutien" — il mesure "aucune lecture de flux", qui n'a aucune raison d'avoir un edge contrarien. Ça explique le 44% continued observé = taux de base, pas un signal.
+- **Licence TradingView Advanced Charts** : Lightweight Charts (la lib utilisée) n'a pas d'outils de dessin par design — l'utilisateur veut les vrais outils (lignes de tendance, Fibonacci) via Advanced Charts, mais ça nécessite une demande de licence FAITE PAR LUI auprès de TradingView. Pas commencé — attendre sa démarche.
+- **MOC** : carve-out confirmé, ne pas commencer sans discussion explicite.
+- **HVL / vraie détection d'absorption** : seuils diagnostiqués cassés par design (cumul sur toute la séance lisse le déséquilibre), mais l'utilisateur a dit vouloir affiner ça lui-même — ne pas improviser de nouveaux seuils.
 
-Exploré (négatif) : baisser `RATIO_MIN` pour faire émerger plus de vrais `brake`/`amplification` depuis ce pool ne valide rien de propre (sous-échantillons 21-91, résultats pas cohérents avec la thèse de `brake`). Ne pas creuser plus loin par seuils sans nouvelles données — risque de sur-apprentissage déjà signalé par l'utilisateur.
+## Point en suspens, pas bloquant
 
-**Tranché et appliqué (soir)** : `tone` passé de `"ok"` à `"neutral"` dans `gex/scalp.py`, titre reformulé dans `gex/i18n.py` (FR/EN) pour ne plus laisser croire à un edge contrarien inexistant. Tests mis à jour. 564/564 verts.
+Bruit de log (`IndexError: list index out of range` dans `dash._prepare_grouping`) observé pendant les transitions de page juste après un redémarrage — diagnostiqué comme transitoire (requêtes en vol d'un ancien onglet), stable (n'augmente plus) une fois la page stabilisée sur un onglet propre. Pas de bug fonctionnel constaté, mais à surveiller si ça redevient un flux continu plutôt qu'un pic au moment des transitions.
 
-## Routage `/scalp` vs `/scalpv1` — rendu explicite (soir, après les trouvailles brake/flux)
+## Pour reprendre proprement
 
-`/scalpv1` fonctionnait déjà par accident (`"/scalpv1".startswith("/scalp")` est vrai), donc rien ne cassait, mais c'était fragile pour la suite. Rendu explicite :
-- `gex/app.py` : nouvelle fonction `is_scalp_path(path)` (juste après `_SC_KIND_COLOR`, avant `scalp_inputs`) — reconnaît `/scalp` ET `/scalpv1` explicitement. Les 3 endroits qui testaient `.startswith("/scalp")` (callback clientside JS `scalp-page`, `scalp_symbol`, `refresh_scalp`) l'utilisent maintenant.
-- **Aucun changement de comportement aujourd'hui** : les deux URLs affichent toujours exactement le même rendu (pas de contenu v2 distinct pour l'instant) — c'est juste le point de branchement qui est prêt pour quand `/scalp` divergera.
-- Test ajouté : `tests/test_scalp_banner.py::test_is_scalp_path_reconnait_v2_et_v1`.
-- Suite complète : 563/563 verts après ce changement (`.venv/Scripts/python.exe -m pytest tests/`).
-
-**Autre ajout en mémoire (soir)** : piste de Noé (Discord 01/10) — widgets de page ajoutables/enlevables/redimensionnables (ex. graphiques empilés verticalement), distincte de la personnalisation par identité (Cloudflare). Les deux sont maintenant pistes 6 et 7 séparées dans roadmap-scalp-v2.md (renumérotées, MOC et indicateurs maison décalés à 8/9).
-
-## Bug spot=30040 — CORRIGÉ dans le code (soir, pas juste documenté)
-
-En retravaillant `refresh_scalp` pour le routage, je suis retombé sur le code exact du bug diagnostiqué plus tôt (`gex/app.py`, maintenant ~ligne 2762). **Corrigé** : `spot` utilise maintenant `_futures_last_price()` (tick-accurate, gex/api.py — même source que la résolution des outcomes côté scheduler) comme source primaire, repli sur `QUOTES.last()` puis `ctx["snap_spot"]` seulement si `None`. Avant : `QUOTES.last()` (conflaté) en premier avec repli direct sur un snapshot pouvant être périmé — exactement le chemin qui avait pollué 46 signaux fin septembre/début octobre. Tests : 564/564 verts (`.venv/Scripts/python.exe -m pytest tests/`). Détail dans `audit-bug-spot-amplification-30040.md`.
-
-Ne règle pas tout (la cible reste "tout vient de la capture", cf. chantier SSE), mais élimine la cause immédiate sans attendre cette migration plus large.
-
-## `gex/bars.py` complété : `swing_move()` prêt à l'emploi pour le bandeau v2
-
-Ajout d'une fonction de convenance qui assemble `volume_bars`+`zigzag`+`trend_move` en un seul appel (`bars.swing_move(ticks, current_price, bar_volume=60.0, min_move=15.0)`) — c'est l'équivalent swing-ancré de ce que `scalp_inputs` fait avec la bougie 5 min dans `gex/app.py`. Pas encore appelé nulle part en production (pas de bandeau v2 à qui le donner) — prêt pour quand ce bandeau existera. Défauts (60/15) choisis par cohérence avec la validation du cas du 30/09, pas calibrés formellement. Tests ajoutés, suite complète 566/566 verte.
-
-## Prototype Lightweight Charts — validé visuellement (soir)
-
-Socle de la piste 4 (graphique TradingView) testé hors Dash, hors production (jamais touché le port 8050 de la tâche planifiée — port déjà occupé, deux process dessus d'ailleurs, pas investigué, ne pas y toucher sans comprendre pourquoi il y en a deux). Prototype HTML autonome + serveur statique jetable (arrêté après coup), données réelles du cas 30/09 exportées depuis `gex/bars.py`.
-
-**Résultat : ça marche**, confirmé visuellement dans le navigateur intégré (bougies + pivots swing H/L correctement superposés).
-
-**Piège trouvé, à ne pas refaire lors de la vraie intégration** : `createChart()` sur un conteneur en `100vw/100vh` sans `width`/`height` explicites capture un canvas à largeur 0 — invisible, SANS aucune erreur JS. Fix : passer les dimensions mesurées explicitement + listener `resize`. Détail complet dans roadmap-scalp-v2.md.
-
-Pas encore fait : l'intégration réelle dans `gex/app.py` (composant Dash, mise à jour live via `series.update()` plutôt que `setData()` à chaque cycle, thème clair/sombre, remplacement de `scalp_price_fig`). Le prototype de ce soir valide l'approche, pas encore l'implémentation en place.
-
-## Lightweight Charts INTÉGRÉ (pas juste prototypé) et vérifié EN LIVE
-
-Suite du prototype : câblé pour de vrai dans `gex/app.py` (`scalp_v2_chart_data`, carte `#scalp-lw-card`, classe `body.scalp-v2-page`, callback `refresh_scalp_lw`, clientside callback de rendu, lib vendue dans `gex/assets/`). Détail complet dans roadmap-scalp-v2.md.
-
-**Dashboard redémarré proprement pour charger le code** (`Stop-ScheduledTask "GEX dashboard"` → tuer les 2 PID pythonw restants → `Start-ScheduledTask`, procédure de `redemarrer-dashboard-tuer-pythonw.md`). Un seul listener sur 8050 après coup (le PID Tailscale sur le port est normal, déjà là avant, sans rapport). **Vérifié dans le navigateur** : `/scalp` affiche la nouvelle carte (vide, normal un samedi sans tick), `/scalpv1` affiche toujours l'ancienne figure Plotly intacte. Zéro erreur console, zéro erreur serveur sur plusieurs cycles.
-
-**Pas encore fait** : mise à jour incrémentale (`series.update()`), test en séance réelle (marché ouvert).
-
-## Bandeau swing câblé sur /scalp v2 (soir, après le graphique)
-
-Le bandeau de `/scalp` utilise maintenant `scalp_inputs_swing` (mouvement swing-ancré) au lieu de `scalp_inputs` (fenêtre 5 min) — `scalp_banner(..., swing=True)` seulement sur `/scalp` exact, `/scalpv1` inchangée. Détail complet dans roadmap-scalp-v2.md : `(symbole, basis)` au lieu de juste `symbole` pour le dédup journal (évite que deux onglets se marchent dessus), nouvelle colonne `basis` en base, 4 nouveaux tests, 573/573 verts, dashboard redémarré et vérifié sans erreur.
-
-**Limite connue, à vérifier lundi** : impossible de voir le bandeau swing avec de vraies données ce soir (`ctx is None` le samedi, pas de snapshot NQ frais → `refresh_scalp` s'arrête avant `scalp_banner` quel que soit `swing`). La logique est vérifiée par test bout-en-bout, pas par un oeil humain sur des vraies données de marché.
-
-## Niveaux GEX/HVL/Flip sur le graphique v2 (soir, après le bandeau swing)
-
-`scalp_v2_chart_data` renvoie maintenant aussi `levels` (en plus de `candles`/`markers`), dessinés en `priceLine` sur le graphique. `_scalp_live_spot` factorisée (le fix du bug 30040, un seul endroit). 573/573 verts, 3e redémarrage du dashboard ce soir, vérifié : 11 price lines créées côté `/scalp` (correspond à l'échelle affichée), invisibles seulement parce qu'il n'y a aucune bougie pour ancrer l'échelle un samedi — normal, pas un bug. `/scalpv1` revérifiée intacte.
-
-## Disposition verticale livrée (soir, 4e redémarrage)
-
-Bouton "↕ Disposition verticale" sur `/scalp` v2 — bascule la grille en pleine largeur empilée, persisté en localStorage, `/scalpv1` non affectée. Piège corrigé : un enfant sans zone dans `grid-template-areas` devient invisible (bouton sorti de `.sc-grid`). Commité et poussé. Détail dans roadmap-scalp-v2.md.
-
-**Pistes examinées et écartées ce soir** (pas un oubli, un choix) : "niveaux combinés multi-familles" bute sur `gex/confluence.py`, délibérément hors git (`.git/info/exclude`) — je n'ai pas fait dépendre `app.py` d'un fichier exclu exprès par l'utilisateur, ça casserait l'app pour quiconque clone le repo. "Zones order flow" (HVL multiples) bute sur les seuils HVL déjà diagnostiqués cassés ce soir (0/257 confirmations) — l'utilisateur a dit vouloir refaire l'absorption lui-même, pas à moi d'improviser de nouveaux seuils pour l'afficher quand même.
-
-## Ergonomie + personnalisation des positions (soir, après disposition verticale)
-
-Suite à deux demandes en direct de l'utilisateur : niveaux repassés SOUS le graphique en mode vertical, et personnalisation des positions (Niveaux/Graphique/Couverture/Prints, 4 dropdowns 1-4, CSS `order` — pas de vrai drag-and-drop, décision explicite pour éviter le risque de désync React/Dash). Plus masquage graphiques/tape + mode mots-clés (checklist 3 options). Bug de chevauchement trouvé et corrigé en route (`grid-area: auto` à forcer sur les enfants, `grid-template-areas: none` sur le parent ne suffit pas). Tout vérifié en live, `/scalpv1` intacte. Détail dans roadmap-scalp-v2.md.
-
-## Confluence multi-familles + order flow — TERMINÉ, vérifié en live, committé
-
-Suite de "n'écarte rien, fais tout" : les deux pistes mises de côté plus tôt sont faites.
-
-- **`scalp_confluence_zones(symbol)`** : regroupe les niveaux SPX/NDX/QQQ/SPY/NQ/ES (transposés via `_transform_for`/`gex/scales.py`, infrastructure existante réutilisée) via `gex.confluence.cluster_levels` (import DÉFENSIF — `gex/confluence.py` reste hors git exprès, `app.py` ne plante jamais si absent sur une autre machine).
-- **Bug trouvé et corrigé en vérifiant en live** : avec 6 familles, le chaînage de `cluster_levels` a produit une "Confluence x58" large de plusieurs CENTAINES de points — une vraie grappe chaînée au sens de l'algo, mais inutilisable affichée comme un seul niveau. Plafond ajouté : zones > 3x `CLUSTER_POINTS[symbol]` écartées (filtre d'affichage seulement, ne touche pas à `cluster_levels` ni ses seuils). Revérifié après fix : ne reste qu'une "Confluence x3" raisonnable.
-- **`scalp_order_flow_zones(symbol, day_ticks)`** : zones HVL via `gex.iceberg.hvl_levels`, seuils laissés tels quels (le chantier de l'utilisateur). Construction du volume profile VECTORISÉE (groupby pandas), pas une boucle Python ligne à ligne (aurait recréé l'incident de saturation du 2026-10-01).
-- Rendu JS : lignes dorées pleines (confluence), pointillés bleus (order flow).
-
-**Vérifié en live** (2 redémarrages supplémentaires, un plus lent que d'habitude ~20s à binder le port — pas une anomalie, juste attendre plus longtemps avant de vérifier le listener) : `/scalp` affiche "Confluence x3" correctement après le fix, `/scalpv1` intacte. 573/573 tests. Committé.
-
-## Personnalisation étendue à /scalpv1 (demande explicite de l'utilisateur)
-
-L'utilisateur a remarqué que seul `/scalp` (v2) avait la personnalisation et a demandé la cohérence. Étendu : CSS `body.scalp-v2-page` → `body.scalp-page` pour TOUS les contrôles de personnalisation (disposition verticale, ordre des blocs, ergonomie/mode mots-clés) — seule la bascule Plotly/Lightweight Charts reste scopée à v2 (c'est une vraie différence de moteur, pas un réglage d'affichage). Aucun changement Python nécessaire (les contrôles vivent déjà dans le DOM partagé). Les préférences sont PARTAGÉES entre les deux pages (même localStorage, même origine) — vérifié en live dans les deux sens sur `/scalpv1`. 573/573 tests, committé.
-
-## Sélecteur de TF + correctif zoom (nuit, après la couverture dealers)
-
-Trois retours directs traités : zoom qui s'écrasait à chaque cycle (fitContent() appelé une seule fois maintenant, pas à chaque refresh), clarification Lightweight Charts vs TradingView Advanced Charts (l'utilisateur veut faire la demande de licence Advanced Charts — démarche de SON côté, pas encore faite, à reprendre quand il a la réponse), et sélecteur de TF complet (1/5/10/15min/1h/4h temps + 6/60/600 volume) suite à la confusion sur l'axe temps irrégulier des barres-volume. Bug trouvé et corrigé en route : le mode temps dépendait à tort des ticks bruts. Détail complet dans roadmap-scalp-v2.md. 578/578 tests, vérifié en live, `/scalpv1` intacte.
-
-**Point en suspens, pas bloquant** : du bruit de log (`IndexError` dans dash._prepare_grouping) observé pendant les transitions de page après redémarrage — diagnostiqué comme transitoire (ancien onglet/état en vol), stable une fois la page stabilisée, pas de bug fonctionnel constaté. À surveiller si ça revient en flux continu plutôt qu'au moment des transitions.
-
-## Pour reprendre si la session s'arrête ici
-
-1. `gex/bars.py` existe et fonctionne — ne pas le recréer, l'étendre.
-2. **Prochaine étape logique** : refaire la comparaison accord/désaccord swing vs 5 min sur les 4 jours (29/09→02/10), pas juste le 30/09, avant de songer à toucher `scalp.py`. Scripts de référence (non committés, dans le scratchpad de cette session, à reproduire si besoin) : construction de barres-volume=60 sur une journée entière + comparaison avec `scalp_signals.direction`/`outcome`.
-3. Si la validation 4 jours confirme la piste "accord swing/5min" : proposer une implémentation dans `scalp.py`/`app.py`, en gardant `/scalpv1` intacte (nouveau code isolé, pas de refactor partagé prématuré).
-4. Ne pas committer/pousser sans vérifier `git status` d'abord — plusieurs fichiers non suivis existent déjà en dehors de ce chantier (`Env.txt`, `GEX_formules.pdf`, `icone.png`, `scripts/nightly_migrate.py`, etc., présents dès le début de session, pas liés à ce travail). Rien n'a encore été commité par cette session.
-5. Mode MOC (point 5) : ne pas commencer sans en reparler avec l'utilisateur, même en autonomie.
-6. Chantier SSE : pas une étape séparée, cf. ci-dessus — s'applique au fur et à mesure de la construction de la v2, pas en bloc à part.
-7. **L'utilisateur a dit de ne pas s'arrêter sauf instruction explicite** — cette mise à jour de passation est un checkpoint de sécurité (contexte long), pas une pause. Continuer sur le point 2 ci-dessus si la session reprend sans nouvelle instruction.
+1. **Lire `roadmap-scalp-v2.md` en entier** avant de retoucher `/scalp` v2 — énormément de contexte et de décisions y sont consignées, pas ici.
+2. **Vérifier en séance réelle (marché ouvert)** ce qui n'a pu être testé qu'avec des données vides/historiques ce week-end : le bandeau swing avec de vraies données live, le graphique en conditions de marché actif.
+3. **Ne jamais committer sans vérifier `git status` d'abord** — fichiers non suivis préexistants à ne pas embarquer par erreur.
+4. **Procédure de redémarrage du dashboard** : `Stop-ScheduledTask "GEX dashboard"` → tuer les PID `pythonw run.py` restants (`Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" | Where CommandLine -like "*run.py*"` puis `Stop-Process`) → `Start-ScheduledTask "GEX dashboard"` → attendre 15-20s avant de vérifier le listener sur le port 8050 (parfois plus lent que d'habitude ce soir) → vérifier `Get-NetTCPConnection -LocalPort 8050 -State Listen` donne **un seul** process sur `127.0.0.1` (le PID sur l'adresse Tailscale est normal, sans rapport).
+5. **Mode MOC et licence TradingView** : ne rien commencer sans l'utilisateur, cf. ci-dessus.
