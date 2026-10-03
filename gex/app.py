@@ -1619,24 +1619,49 @@ def scalp_order_flow_zones(symbol: str, day_ticks: pd.DataFrame) -> list[dict]:
     return out
 
 
-def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float, lookback_min: int = 90) -> dict:
-    """Bougies-volume + pivots swing + niveaux (GEX/HVL/Flip/murs) pour le
-    graphique TradingView Lightweight Charts de `/scalp` v2 — remplace
-    `scalp_price_fig` (Plotly, bougies 1 min) SEULEMENT sur la nouvelle page,
-    `/scalpv1` continue d'utiliser cette dernière inchangée.
+# Sélecteur de TF (/scalp v2, demandé explicitement le 2026-10-03 après
+# avoir découvert que les barres-volume espacent le temps de façon
+# irrégulière, déroutant face à un graphique "1 min" classique) : un préfixe
+# "t" = minutes (bougies classiques, ré-échantillonnées depuis les bougies
+# 1 min déjà captées) ou "v" = volume (barres-volume, base du swing validé
+# le 2026-10-03, cf. gex/bars.py). "t" n'a PAS de pivots swing — la
+# détection n'a été validée que sur base volume, pas étendue sans preuve.
+CHART_TF_OPTIONS = [
+    {"label": "1 min", "value": "t1"}, {"label": "5 min", "value": "t5"},
+    {"label": "10 min", "value": "t10"}, {"label": "15 min", "value": "t15"},
+    {"label": "1h", "value": "t60"}, {"label": "4h", "value": "t240"},
+    {"label": "6 vol", "value": "v6"}, {"label": "60 vol", "value": "v60"},
+    {"label": "600 vol", "value": "v600"},
+]
+CHART_TF_DEFAULT = "t1"  # 1 min par défaut, familier — pas le même usage que
+# le bar_volume=60 du bandeau (scalp_inputs_swing), qui reste fixe en
+# interne quel que soit le TF choisi ici pour l'affichage.
 
-    Lit les ticks du jour sur disque (`store.load_ticks`), rafraîchis par
-    `flush_ticks` toutes les 60 s côté process capture — même fraîcheur que
-    tout le reste de `/scalp` aujourd'hui (pas encore de canal dédié temps
-    réel pour des barres, cf. mémoire du projet chantier-scalp-sse-integral :
-    la cible SSE reste à construire, ceci est l'étape intermédiaire qui
-    fonctionne sans elle). `bar_volume`/`min_move` repris des valeurs
-    validées le 2026-10-03 sur le cas du 30/09 (cf. gex/bars.py::swing_move),
-    pas d'une calibration formelle.
+
+def _resample_price_bars(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
+    """Bougies `df` (1 min, colonnes timestamp/open/high/low/close, naïves
+    en heure ET — cf. to_local) ré-échantillonnées à `minutes`."""
+    idx = pd.to_datetime(df["timestamp"])
+    out = (df.set_index(idx)[["open", "high", "low", "close"]]
+          .resample(f"{minutes}min").agg(
+              {"open": "first", "high": "max", "low": "min", "close": "last"})
+          .dropna().reset_index(names="timestamp"))
+    return out
+
+
+def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
+                        tf: str = CHART_TF_DEFAULT, lookback_min: int | None = None) -> dict:
+    """Bougies (volume OU temps, cf. `tf`) + pivots swing (base volume
+    seulement) + niveaux (GEX/HVL/Flip/murs) pour le graphique TradingView
+    Lightweight Charts de `/scalp` v2 — remplace `scalp_price_fig` (Plotly,
+    bougies 1 min) SEULEMENT sur la nouvelle page, `/scalpv1` continue
+    d'utiliser cette dernière inchangée.
 
     `ctx`/`spot` : mêmes objets que `scalp_price_fig` (pas de second calcul
-    de ladder) — `levels` renvoyés même sans ticks (candles vides), le
-    graphique peut afficher les niveaux avant d'avoir des bougies."""
+    de ladder) — `levels`/`confluence`/`order_flow` renvoyés même sans
+    bougies (le graphique peut afficher les niveaux avant d'avoir des
+    données), et restent calculés sur les ticks bruts quelle que soit `tf`
+    (structure de séance, pas le choix d'affichage)."""
     levels = [{"name": r.name, "price": r.price, "color": C[_SC_KIND_COLOR[r.kind]]}
              for r in scalp.build_ladder(symbol, spot, ctx["zg"], ctx["hvl"], ctx["keys"], ctx["walls"])]
     confluence = scalp_confluence_zones(symbol)
@@ -1657,24 +1682,55 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float, lookback_min: int =
             if not day_ticks.empty:
                 day_ticks = day_ticks[day_ticks["side"].isin(("BUY", "SELL"))]
     order_flow = scalp_order_flow_zones(symbol, day_ticks)
+    empty = {"candles": [], "markers": [], "levels": levels, "confluence": confluence,
+            "order_flow": order_flow}
+
+    kind, size = tf[0], int(tf[1:])
+
+    if kind == "t":
+        # Indépendant de day_ticks à dessein : les bougies 1 min déjà
+        # captées (store.load_prices) sont une source À PART, avec son
+        # propre repli (store.price_days, même pattern que scalp_price_fig)
+        # — ne doit JAMAIS dépendre de la présence de ticks bruts du jour.
+        # Bug vérifié le 2026-10-03 : la version précédente retournait vide
+        # dès que day_ticks était vide, même avec des bougies disponibles.
+        bars = store.load_prices(symbol, day)
+        if bars.empty:
+            days = store.price_days(symbol)
+            if days:
+                bars = store.load_prices(symbol, days[-1])
+        if bars.empty:
+            return empty
+        if size > 1:
+            bars = _resample_price_bars(bars, size)
+        n_bars = lookback_min // size if lookback_min else 150
+        bars = bars.tail(max(n_bars, 1))
+        if bars.empty:
+            return empty
+        epoch = (pd.Series(to_local(bars["timestamp"])).dt.tz_localize(LOCAL_TZ)
+                .astype("int64") // 10**9)
+        candles = [{"time": int(e), "open": float(r.open), "high": float(r.high),
+                    "low": float(r.low), "close": float(r.close)}
+                  for e, r in zip(epoch, bars.itertuples())]
+        return {"candles": candles, "markers": [], "levels": levels,
+                "confluence": confluence, "order_flow": order_flow}
+
+    # kind == "v" : barres-volume, base du swing (gex/bars.py, validé le 2026-10-03)
     if day_ticks.empty:
-        return {"candles": [], "markers": [], "levels": levels, "confluence": confluence,
-                "order_flow": order_flow}
+        return empty
     ticks = day_ticks.sort_values("ts", kind="stable")
     # En repli sur un jour passé, "maintenant" n'a aucun sens pour la
     # fenêtre glissante — on prend les dernières `lookback_min` minutes DE
     # CETTE séance plutôt que de tout filtrer à vide.
     last_ts = float(ticks["ts"].iloc[-1])
     anchor = last_ts if last_ts < time.time() - 3600 else time.time()
-    cutoff = anchor - lookback_min * 60
+    cutoff = anchor - (lookback_min or 90) * 60
     ticks = ticks[ticks["ts"] >= cutoff]
     if ticks.empty:
-        return {"candles": [], "markers": [], "levels": levels, "confluence": confluence,
-                "order_flow": order_flow}
-    bars_df = volume_bars(ticks, bar_volume=60.0)
+        return empty
+    bars_df = volume_bars(ticks, bar_volume=float(size))
     if bars_df.empty:
-        return {"candles": [], "markers": [], "levels": levels, "confluence": confluence,
-                "order_flow": order_flow}
+        return empty
     candles = [{"time": int(r.ts_open), "open": r.open, "high": r.high,
                 "low": r.low, "close": r.close} for r in bars_df.itertuples()]
     markers = []
@@ -2472,8 +2528,17 @@ def create_app() -> Dash:
                     # classe body.scalp-v2-page dans style.css, distincte de
                     # body.scalp-page (partagée par les deux). /scalpv1 ne
                     # charge jamais cette carte, garde scalp-price inchangée.
-                    html.Div([html.Div(id="scalp-lw-chart", className="sc-lw-chart")],
-                             id="scalp-lw-card", className="sc-card sc-underlying"),
+                    html.Div([
+                        # Sélecteur de TF — demandé explicitement le
+                        # 2026-10-03 ("donner la possibilité de choisir sa
+                        # TF"). Change UNIQUEMENT l'affichage ; le bandeau
+                        # (scalp_inputs_swing) reste fixé à bar_volume=60 en
+                        # interne, quel que soit le choix ici.
+                        dcc.Dropdown(id="scalp-chart-tf", className="sc-tf-dd",
+                                    clearable=False, searchable=False,
+                                    options=CHART_TF_OPTIONS, value=CHART_TF_DEFAULT),
+                        html.Div(id="scalp-lw-chart", className="sc-lw-chart"),
+                    ], id="scalp-lw-card", className="sc-card sc-underlying"),
                     dcc.Store(id="scalp-lw-data"),
                     html.Div([
                         html.Div([html.Span("Gros prints", className="sc-title"),
@@ -2712,7 +2777,8 @@ def create_app() -> Dash:
                 });
                 const onResize = () => chart.resize(container.clientWidth, container.clientHeight);
                 window.addEventListener('resize', onResize);
-                window._gexLwChart = { container: container, chart: chart, series: series, priceLines: [] };
+                window._gexLwChart = { container: container, chart: chart, series: series,
+                                       priceLines: [], fitted: false };
             }
             const state = window._gexLwChart;
             // Déduplique les barres au même timestamp entier (activité dense) :
@@ -2730,7 +2796,17 @@ def create_app() -> Dash:
                     text: m.kind + ' ' + Math.round(m.price),
                 };
             }));
-            if (candles.length) { state.chart.timeScale().fitContent(); }
+            // fitContent() UNE SEULE FOIS (premier chargement de données) —
+            // le rappeler à chaque rafraîchissement (chaque cycle ~1s)
+            // écrase le zoom/pan de l'utilisateur en permanence, exactement
+            // le défaut que la migration depuis Plotly devait régler.
+            // setData() seul préserve déjà la vue courante, c'est tout le
+            // principe de Lightweight Charts. Signalé en direct le
+            // 2026-10-03 : "pénible de zoomer et se faire dézoomer".
+            if (candles.length && !state.fitted) {
+                state.chart.timeScale().fitContent();
+                state.fitted = true;
+            }
             // Niveaux GEX/HVL/Flip/murs : enlève les anciennes lignes avant
             // d'en recréer — Lightweight Charts n'a pas de "setPriceLines"
             // qui remplace en bloc, seulement add/remove une par une.
@@ -2793,7 +2869,7 @@ def create_app() -> Dash:
                 });
                 const onResize = () => chart.resize(container.clientWidth, container.clientHeight);
                 window.addEventListener('resize', onResize);
-                window._gexLwHedge = { container: container, chart: chart, series: {} };
+                window._gexLwHedge = { container: container, chart: chart, series: {}, fitted: false };
             }
             const state = window._gexLwHedge;
             (data.series || []).forEach(function(s) {
@@ -2804,8 +2880,11 @@ def create_app() -> Dash:
                 }
                 state.series[s.name].setData(s.points || []);
             });
-            if ((data.series || []).length && (data.series[0].points || []).length) {
+            // fitContent() une seule fois — même correctif que le graphique
+            // de prix ci-dessus, même raison (zoom écrasé à chaque cycle).
+            if (!state.fitted && (data.series || []).length && (data.series[0].points || []).length) {
                 state.chart.timeScale().fitContent();
+                state.fitted = true;
             }
             return window.dash_clientside.no_update;
         }
@@ -3388,9 +3467,10 @@ def create_app() -> Dash:
 
     @app.callback(
         Output("scalp-lw-data", "data"),
-        [Input("tape-tick", "n_intervals"), Input("url", "pathname"), Input("symbol", "value")],
+        [Input("tape-tick", "n_intervals"), Input("url", "pathname"),
+         Input("symbol", "value"), Input("scalp-chart-tf", "value")],
     )
-    def refresh_scalp_lw(_, path, symbol):
+    def refresh_scalp_lw(_, path, symbol, tf):
         """Alimente la carte Lightweight Charts — SEULEMENT sur `/scalp`
         EXACT (pas `/scalpv1`, qui garde `scalp-price`/Plotly inchangée) :
         `is_scalp_path` est volontairement PAS utilisé ici, il reconnaît les
@@ -3401,7 +3481,7 @@ def create_app() -> Dash:
         if ctx is None:
             raise PreventUpdate
         spot = _scalp_live_spot(symbol, ctx)
-        return scalp_v2_chart_data(symbol, ctx, spot)
+        return scalp_v2_chart_data(symbol, ctx, spot, tf=tf or CHART_TF_DEFAULT)
 
     @app.callback(
         Output("scalp-lw-hedge-data", "data"),

@@ -115,6 +115,12 @@ Suite de "n'écarte rien, fais tout" : les deux pistes mises de côté plus tôt
 
 L'utilisateur a remarqué que seul `/scalp` (v2) avait la personnalisation et a demandé la cohérence. Étendu : CSS `body.scalp-v2-page` → `body.scalp-page` pour TOUS les contrôles de personnalisation (disposition verticale, ordre des blocs, ergonomie/mode mots-clés) — seule la bascule Plotly/Lightweight Charts reste scopée à v2 (c'est une vraie différence de moteur, pas un réglage d'affichage). Aucun changement Python nécessaire (les contrôles vivent déjà dans le DOM partagé). Les préférences sont PARTAGÉES entre les deux pages (même localStorage, même origine) — vérifié en live dans les deux sens sur `/scalpv1`. 573/573 tests, committé.
 
+## Sélecteur de TF + correctif zoom (nuit, après la couverture dealers)
+
+Trois retours directs traités : zoom qui s'écrasait à chaque cycle (fitContent() appelé une seule fois maintenant, pas à chaque refresh), clarification Lightweight Charts vs TradingView Advanced Charts (l'utilisateur veut faire la demande de licence Advanced Charts — démarche de SON côté, pas encore faite, à reprendre quand il a la réponse), et sélecteur de TF complet (1/5/10/15min/1h/4h temps + 6/60/600 volume) suite à la confusion sur l'axe temps irrégulier des barres-volume. Bug trouvé et corrigé en route : le mode temps dépendait à tort des ticks bruts. Détail complet dans roadmap-scalp-v2.md. 578/578 tests, vérifié en live, `/scalpv1` intacte.
+
+**Point en suspens, pas bloquant** : du bruit de log (`IndexError` dans dash._prepare_grouping) observé pendant les transitions de page après redémarrage — diagnostiqué comme transitoire (ancien onglet/état en vol), stable une fois la page stabilisée, pas de bug fonctionnel constaté. À surveiller si ça revient en flux continu plutôt qu'au moment des transitions.
+
 ## Pour reprendre si la session s'arrête ici
 
 1. `gex/bars.py` existe et fonctionne — ne pas le recréer, l'étendre.

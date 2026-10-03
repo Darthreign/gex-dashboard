@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta
 
 import pandas as pd
 import pytest
 
 from gex import app, store, tickcapture
+from gex.metrics import ET
 
 
 def _ticks(n: int, start_price: float = 30000.0, end: float | None = None) -> pd.DataFrame:
@@ -17,13 +19,23 @@ def _ticks(n: int, start_price: float = 30000.0, end: float | None = None) -> pd
     return pd.DataFrame(rows)
 
 
+def _price_bars(n: int, start_price: float = 30000.0) -> pd.DataFrame:
+    """Bougies 1 min (heure ET naïve), les plus récentes en dernier."""
+    now = pd.Timestamp(datetime.now(ET).replace(tzinfo=None)).floor("min")
+    rows = [{"timestamp": now - pd.Timedelta(minutes=(n - i)), "open": start_price + i,
+             "high": start_price + i + 1, "low": start_price + i - 1, "close": start_price + i}
+            for i in range(n)]
+    return pd.DataFrame(rows)
+
+
 _CTX = {"zg": 29900.0, "hvl": 29950.0, "keys": {"call_wall": 30200.0}, "walls": []}
 
 
-def test_pas_de_ticks_du_tout_renvoie_des_niveaux_sans_bougies(monkeypatch):
-    """Aucun tick aujourd'hui NI aucun jour de repli disponible — seul cas
-    où le graphique reste vraiment vide (candles=[])."""
+# --- TF par défaut (temps, "t1") : lit store.load_prices, pas les ticks ----
+
+def test_defaut_temps_sans_bougies_renvoie_des_niveaux_sans_candles(monkeypatch):
     monkeypatch.setattr(store, "load_ticks", lambda s, d: pd.DataFrame())
+    monkeypatch.setattr(store, "load_prices", lambda s, d: pd.DataFrame())
     monkeypatch.setattr(store, "tick_days", lambda s: [])
     monkeypatch.setattr(tickcapture, "_session_day", lambda ts: "2026-10-03")
     out = app.scalp_v2_chart_data("NQ", _CTX, 30040.0)
@@ -31,17 +43,45 @@ def test_pas_de_ticks_du_tout_renvoie_des_niveaux_sans_bougies(monkeypatch):
     assert len(out["levels"]) == 3  # zg, hvl, call_wall
 
 
-def test_construit_des_bougies_depuis_des_ticks_recents(monkeypatch):
+def test_defaut_temps_construit_des_bougies_1min(monkeypatch):
+    # day_ticks non vide seulement pour satisfaire le repli éventuel —
+    # le chemin "t" ne les utilise pas pour les candles, seulement pour
+    # order_flow (vide ici, pas testé).
+    monkeypatch.setattr(store, "load_ticks", lambda s, d: pd.DataFrame())
+    monkeypatch.setattr(store, "load_prices", lambda s, d: _price_bars(200))
+    monkeypatch.setattr(store, "tick_days", lambda s: [])
+    monkeypatch.setattr(tickcapture, "_session_day", lambda ts: "2026-10-03")
+    out = app.scalp_v2_chart_data("NQ", _CTX, 30040.0)  # tf par défaut = "t1"
+    assert len(out["candles"]) > 0
+    c = out["candles"][0]
+    assert set(c) == {"time", "open", "high", "low", "close"}
+    assert out["markers"] == []  # pas de pivots swing sur base temps
+    assert out["levels"] and set(out["levels"][0]) == {"name", "price", "color"}
+
+
+def test_tf_temps_reechantillonne(monkeypatch):
+    monkeypatch.setattr(store, "load_ticks", lambda s, d: pd.DataFrame())
+    monkeypatch.setattr(store, "load_prices", lambda s, d: _price_bars(200))
+    monkeypatch.setattr(store, "tick_days", lambda s: [])
+    monkeypatch.setattr(tickcapture, "_session_day", lambda ts: "2026-10-03")
+    out_1min = app.scalp_v2_chart_data("NQ", _CTX, 30040.0, tf="t1")
+    out_5min = app.scalp_v2_chart_data("NQ", _CTX, 30040.0, tf="t5")
+    assert len(out_5min["candles"]) < len(out_1min["candles"])
+
+
+# --- TF volume ("v60" etc.) : lit store.load_ticks, chemin swing ----------
+
+def test_tf_volume_construit_des_bougies_depuis_des_ticks_recents(monkeypatch):
     monkeypatch.setattr(store, "load_ticks", lambda s, d: _ticks(300))
     monkeypatch.setattr(tickcapture, "_session_day", lambda ts: "2026-10-03")
-    out = app.scalp_v2_chart_data("NQ", _CTX, 30040.0)
+    out = app.scalp_v2_chart_data("NQ", _CTX, 30040.0, tf="v60")
     assert len(out["candles"]) > 0
     c = out["candles"][0]
     assert set(c) == {"time", "open", "high", "low", "close"}
     assert out["levels"] and set(out["levels"][0]) == {"name", "price", "color"}
 
 
-def test_repli_sur_le_dernier_jour_dispo_si_la_seance_du_jour_est_vide(monkeypatch):
+def test_tf_volume_repli_sur_le_dernier_jour_dispo_si_la_seance_du_jour_est_vide(monkeypatch):
     """Séance en cours (ex. week-end) sans aucun tick -> au lieu d'un
     graphique vide, on remonte le dernier jour qui en a — demandé
     explicitement le 2026-10-03 ("L'idéal serait de charger à minima
@@ -55,13 +95,13 @@ def test_repli_sur_le_dernier_jour_dispo_si_la_seance_du_jour_est_vide(monkeypat
     monkeypatch.setattr(store, "load_ticks", fake_load_ticks)
     monkeypatch.setattr(store, "tick_days", lambda s: ["2026-09-30", "2026-10-02"])
     monkeypatch.setattr(tickcapture, "_session_day", lambda ts: "2026-10-03")
-    out = app.scalp_v2_chart_data("NQ", _CTX, 30040.0)
+    out = app.scalp_v2_chart_data("NQ", _CTX, 30040.0, tf="v60")
     assert len(out["candles"]) > 0  # pas vide : la séance de repli est montrée
 
 
-def test_pas_de_jour_de_repli_disponible_reste_vide(monkeypatch):
+def test_tf_volume_pas_de_jour_de_repli_disponible_reste_vide(monkeypatch):
     monkeypatch.setattr(store, "load_ticks", lambda s, d: pd.DataFrame())
     monkeypatch.setattr(store, "tick_days", lambda s: [])
     monkeypatch.setattr(tickcapture, "_session_day", lambda ts: "2026-10-03")
-    out = app.scalp_v2_chart_data("NQ", _CTX, 30040.0)
+    out = app.scalp_v2_chart_data("NQ", _CTX, 30040.0, tf="v60")
     assert out["candles"] == [] and out["markers"] == []
