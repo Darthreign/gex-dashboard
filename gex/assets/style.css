@@ -658,16 +658,23 @@ body {
    mémorisée dans localStorage (gex-scalp-layout), pas de serveur, pas
    d'identité nécessaire. */
 .sc-controls { display: none; align-items: center; gap: 14px; flex-wrap: wrap; margin: -4px 0 10px; }
-body.scalp-v2-page .sc-controls { display: flex; }
+/* body.scalp-page (pas .scalp-v2-page) : les contrôles de personnalisation
+   sont purement visuels/CSS, aucune logique métier derrière — étendus à
+   /scalpv1 le 2026-10-03 à la demande explicite de l'utilisateur ("si tu
+   fais la modification pour l'un, logique de la faire pour l'autre").
+   Seule la bascule Plotly/Lightweight Charts plus bas reste scopée à
+   .scalp-v2-page : LÀ, c'est une vraie différence de moteur entre les
+   pages, pas un simple réglage d'affichage. */
+body.scalp-page .sc-controls { display: flex; }
 .sc-layout-toggle {
   background: var(--surface); color: var(--ink2);
   border: 1px solid var(--line); border-radius: 7px; padding: 6px 13px;
   font-size: 12.5px; cursor: pointer; transition: all 0.12s ease;
 }
 .sc-layout-toggle:hover { background: var(--surface-2); color: var(--ink); border-color: #3a3a37; }
-body.scalp-v2-page.sc-layout-vertical .sc-layout-toggle { background: var(--surface-2); color: var(--ink); }
+body.scalp-page.sc-layout-vertical .sc-layout-toggle { background: var(--surface-2); color: var(--ink); }
 
-body.scalp-v2-page.sc-layout-vertical .sc-grid {
+body.scalp-page.sc-layout-vertical .sc-grid {
   grid-template-columns: minmax(0, 1fr);
   /* `order` plutôt que grid-template-areas fixe : permet à sc-order-controls
      (gex/app.py) de repositionner les 4 blocs ajustables (ladder/chart/
@@ -681,9 +688,9 @@ body.scalp-v2-page.sc-layout-vertical .sc-grid {
    hedge }, etc., toujours actives) — sans ce reset explicite, plusieurs
    blocs atterrissent dans la même cellule et se superposent. Vérifié en
    live le 2026-10-03 : chevauchement réel, pas une supposition. */
-body.scalp-v2-page.sc-layout-vertical .sc-grid > * { grid-area: auto; }
-body.scalp-v2-page.sc-layout-vertical .sc-bannerbox { order: -2; }
-body.scalp-v2-page.sc-layout-vertical .sc-head { order: -1; }
+body.scalp-page.sc-layout-vertical .sc-grid > * { grid-area: auto; }
+body.scalp-page.sc-layout-vertical .sc-bannerbox { order: -2; }
+body.scalp-page.sc-layout-vertical .sc-head { order: -1; }
 /* Les 4 blocs ajustables reçoivent leur `order` (1-4) en style inline posé
    par JS (cf. clientside_callback "sc-order-*" dans gex/app.py) — la valeur
    vient des dcc.Dropdown, pas d'une règle CSS statique ici. */
@@ -691,7 +698,7 @@ body.scalp-v2-page.sc-layout-vertical .sc-head { order: -1; }
 /* Ordre d'affichage (/scalp v2, disposition verticale) : cf. commentaire
    gex/app.py sur pourquoi CSS `order` plutôt qu'un vrai glisser-déposer. */
 .sc-order-controls { display: none; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12.5px; color: var(--ink2); }
-body.scalp-v2-page.sc-layout-vertical .sc-order-controls { display: flex; }
+body.scalp-page.sc-layout-vertical .sc-order-controls { display: flex; }
 .sc-order-label { color: var(--muted); }
 .sc-order-item { display: flex; align-items: center; gap: 4px; }
 .sc-order-item-label { color: var(--ink2); }

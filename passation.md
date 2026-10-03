@@ -100,6 +100,21 @@ Bouton "↕ Disposition verticale" sur `/scalp` v2 — bascule la grille en plei
 
 Suite à deux demandes en direct de l'utilisateur : niveaux repassés SOUS le graphique en mode vertical, et personnalisation des positions (Niveaux/Graphique/Couverture/Prints, 4 dropdowns 1-4, CSS `order` — pas de vrai drag-and-drop, décision explicite pour éviter le risque de désync React/Dash). Plus masquage graphiques/tape + mode mots-clés (checklist 3 options). Bug de chevauchement trouvé et corrigé en route (`grid-area: auto` à forcer sur les enfants, `grid-template-areas: none` sur le parent ne suffit pas). Tout vérifié en live, `/scalpv1` intacte. Détail dans roadmap-scalp-v2.md.
 
+## Confluence multi-familles + order flow — TERMINÉ, vérifié en live, committé
+
+Suite de "n'écarte rien, fais tout" : les deux pistes mises de côté plus tôt sont faites.
+
+- **`scalp_confluence_zones(symbol)`** : regroupe les niveaux SPX/NDX/QQQ/SPY/NQ/ES (transposés via `_transform_for`/`gex/scales.py`, infrastructure existante réutilisée) via `gex.confluence.cluster_levels` (import DÉFENSIF — `gex/confluence.py` reste hors git exprès, `app.py` ne plante jamais si absent sur une autre machine).
+- **Bug trouvé et corrigé en vérifiant en live** : avec 6 familles, le chaînage de `cluster_levels` a produit une "Confluence x58" large de plusieurs CENTAINES de points — une vraie grappe chaînée au sens de l'algo, mais inutilisable affichée comme un seul niveau. Plafond ajouté : zones > 3x `CLUSTER_POINTS[symbol]` écartées (filtre d'affichage seulement, ne touche pas à `cluster_levels` ni ses seuils). Revérifié après fix : ne reste qu'une "Confluence x3" raisonnable.
+- **`scalp_order_flow_zones(symbol, day_ticks)`** : zones HVL via `gex.iceberg.hvl_levels`, seuils laissés tels quels (le chantier de l'utilisateur). Construction du volume profile VECTORISÉE (groupby pandas), pas une boucle Python ligne à ligne (aurait recréé l'incident de saturation du 2026-10-01).
+- Rendu JS : lignes dorées pleines (confluence), pointillés bleus (order flow).
+
+**Vérifié en live** (2 redémarrages supplémentaires, un plus lent que d'habitude ~20s à binder le port — pas une anomalie, juste attendre plus longtemps avant de vérifier le listener) : `/scalp` affiche "Confluence x3" correctement après le fix, `/scalpv1` intacte. 573/573 tests. Committé.
+
+## Personnalisation étendue à /scalpv1 (demande explicite de l'utilisateur)
+
+L'utilisateur a remarqué que seul `/scalp` (v2) avait la personnalisation et a demandé la cohérence. Étendu : CSS `body.scalp-v2-page` → `body.scalp-page` pour TOUS les contrôles de personnalisation (disposition verticale, ordre des blocs, ergonomie/mode mots-clés) — seule la bascule Plotly/Lightweight Charts reste scopée à v2 (c'est une vraie différence de moteur, pas un réglage d'affichage). Aucun changement Python nécessaire (les contrôles vivent déjà dans le DOM partagé). Les préférences sont PARTAGÉES entre les deux pages (même localStorage, même origine) — vérifié en live dans les deux sens sur `/scalpv1`. 573/573 tests, committé.
+
 ## Pour reprendre si la session s'arrête ici
 
 1. `gex/bars.py` existe et fonctionne — ne pas le recréer, l'étendre.

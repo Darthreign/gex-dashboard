@@ -31,6 +31,17 @@ from .metrics import ET, EXPIRY_BUCKETS
 from . import idxopt
 from .rtquote import PUBLIC_QUOTES, QUOTES, credentials_present
 from .scheduler import STATE, market_is_open
+
+try:
+    # gex/confluence.py est délibérément HORS GIT (.git/info/exclude, choix
+    # de l'utilisateur) — jamais partagé entre machines. Import défensif :
+    # app.py (suivi par git) ne doit jamais planter au démarrage sur une
+    # machine où ce fichier n'existe pas (ex. un autre clone du dépôt). La
+    # piste "niveaux combinés multi-familles" (roadmap /scalp v2) se dégrade
+    # silencieusement en absence plutôt que de casser toute la page /scalp.
+    from . import confluence as _confluence
+except ImportError:
+    _confluence = None
 from .scheduler import native_index_key as scheduler_native_key
 
 # --- Palette (mode sombre, cf. skill dataviz) ---
@@ -1451,6 +1462,92 @@ def _scalp_live_spot(symbol: str, ctx: dict) -> float:
     return scalp.round_to_tick(symbol, raw)
 
 
+# SPX/NDX/QQQ/SPY/NQ/ES uniquement — exactement les familles citées dans la
+# demande d'origine (roadmap /scalp v2, piste "niveaux combinés"), pas les
+# constituants individuels (NVDA, SMH…) qui en gonfleraient le bruit.
+_CONFLUENCE_FAMILIES = ("SPX", "NDX", "QQQ", "SPY", "NQ", "ES")
+
+
+def scalp_confluence_zones(symbol: str) -> list[dict]:
+    """Zones où des niveaux de familles DIFFÉRENTES (SPX/NDX/QQQ/NQ/ES)
+    tombent proches une fois transposés sur l'échelle de `symbol` — cf.
+    gex/confluence.py (cluster_levels) pour la mécanique, gex/scales.py
+    (déjà utilisée ailleurs dans ce fichier pour l'échelle d'affichage) pour
+    la transposition : même infrastructure, pas une conversion réinventée.
+
+    Renvoie [] si `gex/confluence.py` est absent (machine différente — cf.
+    l'import défensif en tête de fichier) ou si `symbol` n'est pas NQ/ES
+    (seules familles pour lesquelles `cluster_levels` a un seuil défini).
+    Ne garde que les zones d'au moins 2 niveaux : un niveau seul n'est pas
+    une confluence, juste un niveau — cf. docstring de confluence.py."""
+    if _confluence is None or not _confluence.supported(symbol):
+        return []
+    combined: dict[str, float] = {}
+    for src in _CONFLUENCE_FAMILIES:
+        st = chain_state(src)
+        with STATE.lock:
+            df, snap = st.enriched, st.snapshot
+        if df is None or snap is None:
+            continue
+        own_levels = _confluence.collect_levels(df, snap.spot)
+        if not own_levels:
+            continue
+        if src == symbol:
+            for name, price in own_levels.items():
+                combined[f"{src}:{name}"] = price
+            continue
+        xf, _ratio, mode = _transform_for(src, symbol)
+        if mode == "native":
+            continue  # transposition impossible (spot cible absent) -> écarté plutôt que faux
+        for name, price in own_levels.items():
+            combined[f"{src}:{name}"] = xf(price)
+    zones = _confluence.cluster_levels(combined, symbol)
+    # Vérifié en live le 2026-10-03 : avec 6 familles, le chaînage de
+    # cluster_levels (documenté dans confluence.py — une grappe dense peut
+    # s'étendre bien au-delà du seuil si les niveaux s'enchaînent de proche
+    # en proche) a produit une zone "Confluence x58" large de PLUSIEURS
+    # CENTAINES de points — techniquement une vraie grappe chaînée, mais
+    # inutilisable affichée comme UN niveau (elle ne dit plus "ici",
+    # seulement "quelque part dans cette fourchette"). Plafond à 3x le seuil
+    # de clustering du symbole : filtre d'AFFICHAGE seulement, ne touche pas
+    # à cluster_levels ni à ses seuils (le chantier de l'utilisateur).
+    max_width = _confluence.CLUSTER_POINTS[symbol] * 3
+    return [{"price": (z.low + z.high) / 2, "width": z.width, "n": len(z),
+             "names": sorted(z.levels.keys())}
+            for z in zones if len(z) >= 2 and z.width <= max_width]
+
+
+def scalp_order_flow_zones(symbol: str, day_ticks: pd.DataFrame) -> list[dict]:
+    """Zones HVL (volume élevé + delta net marqué) de la séance — footprint
+    simplifié, cf. gex/iceberg.py::hvl_levels pour la définition exacte et
+    les seuils (HVL_MIN_VOL_RATIO/HVL_MIN_DELTA_FRACTION). Seuils laissés TELS
+    QUELS : diagnostiqués trop stricts le 2026-10-03 (0/257 confirmations sur
+    3 jours, cf. mémoire du projet roadmap-scalp-v2), mais recalibrer cette
+    méthodologie est le chantier de l'utilisateur (piste 3, absorption), pas
+    le mien — affiche fidèlement ce que la fonction renvoie aujourd'hui,
+    même si ça reste souvent vide.
+
+    Construction du volume profile VECTORISÉE (groupby pandas), PAS une
+    boucle Python ligne à ligne sur des centaines de milliers de ticks —
+    c'est exactement le genre de travail CPU synchrone par cycle qui a
+    saturé le serveur 1-thread Werkzeug le 2026-10-01 (cf. passation)."""
+    if day_ticks.empty:
+        return []
+    from . import iceberg as ib
+    bucket = ib.bucket_price
+    keys = day_ticks["price"].map(lambda p: bucket(p, symbol))
+    g = day_ticks.groupby(keys).apply(lambda d: pd.Series({
+        "vol": d["volume"].sum(),
+        "ask_vol": d.loc[d["side"] == "BUY", "volume"].sum(),
+        "bid_vol": d.loc[d["side"] == "SELL", "volume"].sum(),
+    }), include_groups=False)
+    levels = {float(price): {"vol": float(row["vol"]), "ask_vol": float(row["ask_vol"]),
+                             "bid_vol": float(row["bid_vol"])}
+             for price, row in g.iterrows()}
+    return [{"price": h["price"], "vol": h["vol"], "side": h["side"]}
+            for h in ib.hvl_levels(levels)]
+
+
 def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float, lookback_min: int = 90) -> dict:
     """Bougies-volume + pivots swing + niveaux (GEX/HVL/Flip/murs) pour le
     graphique TradingView Lightweight Charts de `/scalp` v2 — remplace
@@ -1471,19 +1568,26 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float, lookback_min: int =
     graphique peut afficher les niveaux avant d'avoir des bougies."""
     levels = [{"name": r.name, "price": r.price, "color": C[_SC_KIND_COLOR[r.kind]]}
              for r in scalp.build_ladder(symbol, spot, ctx["zg"], ctx["hvl"], ctx["keys"], ctx["walls"])]
+    confluence = scalp_confluence_zones(symbol)
     from .tickcapture import _session_day
     day = _session_day(time.time())
-    ticks = store.load_ticks(symbol, day)
-    if ticks.empty:
-        return {"candles": [], "markers": [], "levels": levels}
-    ticks = ticks[ticks["side"].isin(("BUY", "SELL"))].sort_values("ts", kind="stable")
+    day_ticks = store.load_ticks(symbol, day)
+    if not day_ticks.empty:
+        day_ticks = day_ticks[day_ticks["side"].isin(("BUY", "SELL"))]
+    order_flow = scalp_order_flow_zones(symbol, day_ticks)
+    if day_ticks.empty:
+        return {"candles": [], "markers": [], "levels": levels, "confluence": confluence,
+                "order_flow": order_flow}
+    ticks = day_ticks.sort_values("ts", kind="stable")
     cutoff = time.time() - lookback_min * 60
     ticks = ticks[ticks["ts"] >= cutoff]
     if ticks.empty:
-        return {"candles": [], "markers": [], "levels": levels}
+        return {"candles": [], "markers": [], "levels": levels, "confluence": confluence,
+                "order_flow": order_flow}
     bars_df = volume_bars(ticks, bar_volume=60.0)
     if bars_df.empty:
-        return {"candles": [], "markers": [], "levels": levels}
+        return {"candles": [], "markers": [], "levels": levels, "confluence": confluence,
+                "order_flow": order_flow}
     candles = [{"time": int(r.ts_open), "open": r.open, "high": r.high,
                 "low": r.low, "close": r.close} for r in bars_df.itertuples()]
     markers = []
@@ -1492,7 +1596,8 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float, lookback_min: int =
         confirmed = swings[~swings["kind"].str.endswith("?")]
         markers = [{"time": int(r.ts), "price": r.price, "kind": r.kind}
                    for r in confirmed.itertuples()]
-    return {"candles": candles, "markers": markers, "levels": levels}
+    return {"candles": candles, "markers": markers, "levels": levels, "confluence": confluence,
+            "order_flow": order_flow}
 
 
 def flow_fig(symbol: str, lang: str, day: str | None = None) -> go.Figure:
@@ -2526,13 +2631,36 @@ def create_app() -> Dash:
             // d'en recréer — Lightweight Charts n'a pas de "setPriceLines"
             // qui remplace en bloc, seulement add/remove une par une.
             for (const pl of state.priceLines) { state.series.removePriceLine(pl); }
-            state.priceLines = (data.levels || []).map(function(lv) {
+            const simpleLines = (data.levels || []).map(function(lv) {
                 return state.series.createPriceLine({
                     price: lv.price, color: lv.color, lineWidth: 1,
                     lineStyle: LightweightCharts.LineStyle.Dashed,
                     axisLabelVisible: true, title: lv.name,
                 });
             });
+            // Confluence multi-familles (SPX/NDX/QQQ/NQ/ES transposés sur
+            // cette échelle, cf. scalp_confluence_zones) : ligne pleine DORÉE,
+            // plus épaisse que les niveaux simples — distincte visuellement,
+            // plusieurs mécanismes de couverture différents convergent ici.
+            const confluenceLines = (data.confluence || []).map(function(z) {
+                return state.series.createPriceLine({
+                    price: z.price, color: '#c98500', lineWidth: 2,
+                    lineStyle: LightweightCharts.LineStyle.Solid,
+                    axisLabelVisible: true, title: 'Confluence x' + z.n,
+                });
+            });
+            // Zones order flow (HVL volume profil, cf. scalp_order_flow_zones) :
+            // ligne pointillée cyan, étiquette volume+côté — distincte des
+            // niveaux GEX/HVL simples (tirets) et de la confluence (pleine dorée).
+            const flowLines = (data.order_flow || []).map(function(h) {
+                return state.series.createPriceLine({
+                    price: h.price, color: '#3987e5', lineWidth: 1,
+                    lineStyle: LightweightCharts.LineStyle.Dotted,
+                    axisLabelVisible: true,
+                    title: 'HVL ' + (h.side === 'BUY' ? '↑' : '↓') + ' ' + Math.round(h.vol),
+                });
+            });
+            state.priceLines = simpleLines.concat(confluenceLines, flowLines);
             return window.dash_clientside.no_update;
         }
         """,
