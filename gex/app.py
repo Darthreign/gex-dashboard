@@ -2217,8 +2217,47 @@ def create_app() -> Dash:
                 # grille. Toujours dans le DOM, masqué par CSS hors
                 # body.scalp-v2-page (même pattern que .scalp-link/.full-link) ;
                 # état persisté en localStorage côté client, aucun état serveur.
-                html.Button("↕ Disposition verticale", id="sc-layout-toggle",
-                           className="sc-layout-toggle", n_clicks=0),
+                html.Div([
+                    html.Button("↕ Disposition verticale", id="sc-layout-toggle",
+                               className="sc-layout-toggle", n_clicks=0),
+                    # Ergonomie/concentration (/scalp v2 seulement) — piste
+                    # d'origine : "masquage de graphiques/tape, mode mots-clés
+                    # uniquement, pour des utilisateurs ayant des soucis de
+                    # concentration". Chaque option toggle une classe body,
+                    # cf. style.css ; persisté en localStorage (gex-scalp-ergo),
+                    # même pattern que la disposition verticale juste au-dessus.
+                    dcc.Checklist(
+                        id="sc-ergo-options", className="sc-ergo-options", value=[],
+                        options=[
+                            {"label": "Masquer graphiques", "value": "hide_charts"},
+                            {"label": "Masquer tape", "value": "hide_tape"},
+                            {"label": "Mode mots-clés", "value": "keywords_only"},
+                        ],
+                    ),
+                    # Ordre d'affichage (/scalp v2, disposition verticale
+                    # uniquement) — demandé explicitement : "permet la
+                    # personnalisation des positions". Priorité 1-4 par bloc
+                    # plutôt qu'un vrai glisser-déposer : un drag-and-drop
+                    # déplacerait les noeuds DOM directement, hors du contrôle
+                    # de React/Dash, qui réconcilie sa propre copie virtuelle
+                    # du DOM — risque réel de désynchronisation sur un site
+                    # déjà fragile (cf. passation, incident du 1-thread
+                    # Werkzeug). CSS `order` pur : aucun noeud ne bouge,
+                    # seulement l'ordre visuel, zéro risque de ce genre.
+                    html.Div([
+                        html.Span("Ordre :", className="sc-order-label"),
+                        *[html.Div([
+                            html.Span(label, className="sc-order-item-label"),
+                            dcc.Dropdown(id=f"sc-order-{key}", className="sc-order-dd",
+                                        clearable=False, searchable=False,
+                                        options=[{"label": str(n), "value": n} for n in (1, 2, 3, 4)],
+                                        value=default),
+                        ], className="sc-order-item")
+                          for key, label, default in [
+                              ("ladder", "Niveaux", 2), ("chart", "Graphique", 1),
+                              ("hedge", "Couverture", 3), ("prints", "Prints", 4)]],
+                    ], className="sc-order-controls"),
+                ], className="sc-controls"),
                 html.Div([
                     html.Div(id="scalp-banner", className="sc-bannerbox"),
                     html.Div(id="scalp-head", className="sc-head"),
@@ -2341,6 +2380,8 @@ def create_app() -> Dash:
             dcc.Interval(id="rt-tick", interval=5000),
             dcc.Store(id="lang-boot", data=0),
             dcc.Store(id="sc-layout-boot", data=0),
+            dcc.Store(id="sc-ergo-boot", data=0),
+            dcc.Store(id="sc-order-boot", data=0),
             html.Div(id="footer", className="footer"),
         ], className="page"),
         dcc.Store(id="native-alt"),  # "NDX" ou "SPY" : cible du bouton OK
@@ -2547,6 +2588,77 @@ def create_app() -> Dash:
         Output("sc-layout-toggle", "title", allow_duplicate=True),
         Input("sc-layout-toggle", "n_clicks"),
         prevent_initial_call=True,
+    )
+
+    # Ergonomie/concentration /scalp v2 : restaure au chargement...
+    app.clientside_callback(
+        """
+        function(_) {
+            let saved = [];
+            try { saved = JSON.parse(window.localStorage.getItem('gex-scalp-ergo') || '[]'); }
+            catch (e) { saved = []; }
+            return saved;
+        }
+        """,
+        Output("sc-ergo-options", "value"),
+        Input("sc-ergo-boot", "data"),
+    )
+    # ...applique les classes body correspondantes + persiste à chaque
+    # changement (coché ou décoché) — une seule source de vérité (la valeur
+    # du Checklist), pas de divergence possible entre le DOM et le stockage.
+    app.clientside_callback(
+        """
+        function(values) {
+            values = values || [];
+            document.body.classList.toggle('sc-hide-charts', values.includes('hide_charts'));
+            document.body.classList.toggle('sc-hide-tape', values.includes('hide_tape'));
+            document.body.classList.toggle('sc-keywords-only', values.includes('keywords_only'));
+            window.localStorage.setItem('gex-scalp-ergo', JSON.stringify(values));
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("sc-ergo-options", "title"),
+        Input("sc-ergo-options", "value"),
+    )
+
+    # Ordre d'affichage /scalp v2 (CSS `order`, pas de drag-and-drop — cf.
+    # commentaire sur sc-order-controls dans le layout). Restaure au
+    # chargement...
+    app.clientside_callback(
+        """
+        function(_) {
+            let saved = {};
+            try { saved = JSON.parse(window.localStorage.getItem('gex-scalp-order') || '{}'); }
+            catch (e) { saved = {}; }
+            const d = {ladder: 2, chart: 1, hedge: 3, prints: 4};
+            return [saved.ladder || d.ladder, saved.chart || d.chart,
+                    saved.hedge || d.hedge, saved.prints || d.prints];
+        }
+        """,
+        [Output("sc-order-ladder", "value"), Output("sc-order-chart", "value"),
+         Output("sc-order-hedge", "value"), Output("sc-order-prints", "value")],
+        Input("sc-order-boot", "data"),
+    )
+    # ...applique `order` en style inline (ladder/hedge/prints : un seul
+    # élément ; chart : les DEUX cartes scalp-price-card/scalp-lw-card, seule
+    # celle visible compte puisque l'autre est display:none) + persiste.
+    app.clientside_callback(
+        """
+        function(ladder, chart, hedge, prints) {
+            const set = (sel, v) => document.querySelectorAll(sel).forEach(
+                el => { el.style.order = v; });
+            set('.sc-ladder', ladder);
+            set('#scalp-price-card, #scalp-lw-card', chart);
+            set('.sc-hedge', hedge);
+            set('.sc-prints', prints);
+            window.localStorage.setItem('gex-scalp-order',
+                JSON.stringify({ladder: ladder, chart: chart, hedge: hedge, prints: prints}));
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("sc-order-ladder", "title"),
+        [Input("sc-order-ladder", "value"), Input("sc-order-chart", "value"),
+         Input("sc-order-hedge", "value"), Input("sc-order-prints", "value")],
     )
 
     # Ticker de prix /scalp : REÇOIT, AFFICHE, rien d'autre ne se met à jour, et

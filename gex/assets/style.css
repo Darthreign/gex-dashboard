@@ -657,20 +657,68 @@ body {
    une deuxième, juste activable au choix sur grand écran. Préférence
    mémorisée dans localStorage (gex-scalp-layout), pas de serveur, pas
    d'identité nécessaire. */
+.sc-controls { display: none; align-items: center; gap: 14px; flex-wrap: wrap; margin: -4px 0 10px; }
+body.scalp-v2-page .sc-controls { display: flex; }
 .sc-layout-toggle {
-  display: none;    /* visible seulement sur /scalp v2 (body.scalp-v2-page ci-dessous) */
-  margin: -4px 0 10px; background: var(--surface); color: var(--ink2);
+  background: var(--surface); color: var(--ink2);
   border: 1px solid var(--line); border-radius: 7px; padding: 6px 13px;
   font-size: 12.5px; cursor: pointer; transition: all 0.12s ease;
 }
 .sc-layout-toggle:hover { background: var(--surface-2); color: var(--ink); border-color: #3a3a37; }
-body.scalp-v2-page .sc-layout-toggle { display: inline-flex; }
 body.scalp-v2-page.sc-layout-vertical .sc-layout-toggle { background: var(--surface-2); color: var(--ink); }
 
 body.scalp-v2-page.sc-layout-vertical .sc-grid {
   grid-template-columns: minmax(0, 1fr);
-  grid-template-areas: "banner" "head" "ladder" "price" "hedge" "prints";
+  /* `order` plutôt que grid-template-areas fixe : permet à sc-order-controls
+     (gex/app.py) de repositionner les 4 blocs ajustables (ladder/chart/
+     hedge/prints) individuellement, sans toucher banner/head (toujours en
+     tête, cf. order fixe ci-dessous). Mobile (@media plus bas) garde
+     l'ancienne règle à zones nommées : partagée avec /scalpv1, pas touchée. */
+  grid-template-areas: none;
 }
+/* grid-template-areas: none sur le PARENT ne suffit pas à annuler les
+   grid-area nommées déjà posées sur les enfants (.sc-hedge { grid-area:
+   hedge }, etc., toujours actives) — sans ce reset explicite, plusieurs
+   blocs atterrissent dans la même cellule et se superposent. Vérifié en
+   live le 2026-10-03 : chevauchement réel, pas une supposition. */
+body.scalp-v2-page.sc-layout-vertical .sc-grid > * { grid-area: auto; }
+body.scalp-v2-page.sc-layout-vertical .sc-bannerbox { order: -2; }
+body.scalp-v2-page.sc-layout-vertical .sc-head { order: -1; }
+/* Les 4 blocs ajustables reçoivent leur `order` (1-4) en style inline posé
+   par JS (cf. clientside_callback "sc-order-*" dans gex/app.py) — la valeur
+   vient des dcc.Dropdown, pas d'une règle CSS statique ici. */
+
+/* Ordre d'affichage (/scalp v2, disposition verticale) : cf. commentaire
+   gex/app.py sur pourquoi CSS `order` plutôt qu'un vrai glisser-déposer. */
+.sc-order-controls { display: none; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12.5px; color: var(--ink2); }
+body.scalp-v2-page.sc-layout-vertical .sc-order-controls { display: flex; }
+.sc-order-label { color: var(--muted); }
+.sc-order-item { display: flex; align-items: center; gap: 4px; }
+.sc-order-item-label { color: var(--ink2); }
+.sc-order-dd { width: 56px; }
+.sc-order-dd .Select-control, .sc-order-dd .dash-dropdown { min-height: 26px; font-size: 12px; }
+
+/* Ergonomie/concentration /scalp v2 (piste d'origine : "masquage de
+   graphiques/tape, mode mots-clés uniquement, pour des utilisateurs ayant
+   des soucis de concentration") — trois cases indépendantes, cf.
+   #sc-ergo-options dans gex/app.py, persistées en localStorage. */
+.sc-ergo-options { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12.5px; color: var(--ink2); }
+.sc-ergo-options label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
+
+body.sc-hide-charts #scalp-lw-card, body.sc-hide-charts #scalp-price-card,
+body.sc-hide-charts .sc-hedge { display: none !important; }
+body.sc-hide-tape .sc-prints { display: none !important; }
+
+/* Mode mots-clés : ne garde que le titre du bandeau (l'état en un coup
+   d'oeil), masque tout le reste — y compris, dans le bandeau lui-même, le
+   détail chiffré et le panneau d'absorption à droite, qui sont déjà plus
+   d'information que "un mot-clé". */
+body.sc-keywords-only .sc-head, body.sc-keywords-only .sc-ladder,
+body.sc-keywords-only #scalp-lw-card, body.sc-keywords-only #scalp-price-card,
+body.sc-keywords-only .sc-hedge, body.sc-keywords-only .sc-prints,
+body.sc-keywords-only .sc-banner-detail, body.sc-keywords-only .sc-lights,
+body.sc-keywords-only .sc-banner-side { display: none !important; }
+body.sc-keywords-only .sc-banner-title { font-size: 28px; }
 
 @media (max-width: 900px) {
   .sc-grid { grid-template-columns: minmax(0, 1fr); grid-template-areas: "banner" "head" "ladder" "price" "hedge" "prints"; }

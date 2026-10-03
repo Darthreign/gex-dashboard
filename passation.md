@@ -90,6 +90,16 @@ Le bandeau de `/scalp` utilise maintenant `scalp_inputs_swing` (mouvement swing-
 
 `scalp_v2_chart_data` renvoie maintenant aussi `levels` (en plus de `candles`/`markers`), dessinés en `priceLine` sur le graphique. `_scalp_live_spot` factorisée (le fix du bug 30040, un seul endroit). 573/573 verts, 3e redémarrage du dashboard ce soir, vérifié : 11 price lines créées côté `/scalp` (correspond à l'échelle affichée), invisibles seulement parce qu'il n'y a aucune bougie pour ancrer l'échelle un samedi — normal, pas un bug. `/scalpv1` revérifiée intacte.
 
+## Disposition verticale livrée (soir, 4e redémarrage)
+
+Bouton "↕ Disposition verticale" sur `/scalp` v2 — bascule la grille en pleine largeur empilée, persisté en localStorage, `/scalpv1` non affectée. Piège corrigé : un enfant sans zone dans `grid-template-areas` devient invisible (bouton sorti de `.sc-grid`). Commité et poussé. Détail dans roadmap-scalp-v2.md.
+
+**Pistes examinées et écartées ce soir** (pas un oubli, un choix) : "niveaux combinés multi-familles" bute sur `gex/confluence.py`, délibérément hors git (`.git/info/exclude`) — je n'ai pas fait dépendre `app.py` d'un fichier exclu exprès par l'utilisateur, ça casserait l'app pour quiconque clone le repo. "Zones order flow" (HVL multiples) bute sur les seuils HVL déjà diagnostiqués cassés ce soir (0/257 confirmations) — l'utilisateur a dit vouloir refaire l'absorption lui-même, pas à moi d'improviser de nouveaux seuils pour l'afficher quand même.
+
+## Ergonomie + personnalisation des positions (soir, après disposition verticale)
+
+Suite à deux demandes en direct de l'utilisateur : niveaux repassés SOUS le graphique en mode vertical, et personnalisation des positions (Niveaux/Graphique/Couverture/Prints, 4 dropdowns 1-4, CSS `order` — pas de vrai drag-and-drop, décision explicite pour éviter le risque de désync React/Dash). Plus masquage graphiques/tape + mode mots-clés (checklist 3 options). Bug de chevauchement trouvé et corrigé en route (`grid-area: auto` à forcer sur les enfants, `grid-template-areas: none` sur le parent ne suffit pas). Tout vérifié en live, `/scalpv1` intacte. Détail dans roadmap-scalp-v2.md.
+
 ## Pour reprendre si la session s'arrête ici
 
 1. `gex/bars.py` existe et fonctionne — ne pas le recréer, l'étendre.
