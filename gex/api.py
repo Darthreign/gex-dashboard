@@ -458,9 +458,21 @@ def register_api(app) -> None:
 
         def gen():
             last_sent = None
+            last_heartbeat = time.monotonic()
             # ~10 vérifications/s : la boucle est en mémoire (aucun réseau), le
             # coût est négligeable ; on n'ÉMET vers le navigateur que sur
             # changement, jamais à un rythme fixe (c'est ça, le "poussé").
+            #
+            # Heartbeat (2026-10-05) : sans lui, un symbole dont le prix ne
+            # bouge pas (marché fermé, séance calme) n'écrit RIEN sur la
+            # connexion pendant des heures — une connexion morte (onglet
+            # fermé sans fermeture TCP propre, wifi coupé côté client) ne se
+            # détecte alors JAMAIS (aucune écriture ne peut échouer si on
+            # n'écrit rien), et le thread waitress qui la sert reste occupé
+            # indéfiniment. Un commentaire SSE toutes les ~15s force une
+            # écriture régulière : une connexion morte échoue vite (le
+            # générateur s'arrête, le thread se libère), une connexion vivante
+            # ignore silencieusement la ligne (convention SSE standard).
             while True:
                 px = _futures_last_price(symbol)
                 if px is not None:
@@ -468,6 +480,11 @@ def register_api(app) -> None:
                     if rounded != last_sent:
                         last_sent = rounded
                         yield f"data: {rounded}\n\n"
+                        last_heartbeat = time.monotonic()
+                now = time.monotonic()
+                if now - last_heartbeat >= 15.0:
+                    yield ": keepalive\n\n"
+                    last_heartbeat = now
                 time.sleep(0.1)
 
         return Response(gen(), mimetype="text/event-stream",

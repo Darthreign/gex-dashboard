@@ -72,8 +72,40 @@ def main(host: str = "127.0.0.1", port: int = 8050) -> None:
     # en avoir plusieurs dizaines d'inactifs ne recrée PAS ce problème. Reste
     # un pool BORNÉ (jamais d'explosion illimitée), juste dimensionné pour
     # supporter une vraie poignée d'onglets ouverts en continu.
+    #
+    # 2e panne, 2026-10-04 (~22h49), causes CUMULÉES diagnostiquées en
+    # direct :
+    #  1. Un vrai bug : _scalp_indicators_stream (gex/app.py) avalait les
+    #     erreurs d'ÉCRITURE (client déconnecté) dans le même try/except que
+    #     les erreurs de CALCUL — un thread servant un onglet fermé/une
+    #     connexion morte ne se libérait donc JAMAIS. Corrigé (le yield est
+    #     sorti du try/except).
+    #  2. Aucun des deux flux SSE (_last_trade_stream, gex/api.py ;
+    #     _scalp_indicators_stream) n'émettait quoi que ce soit tant que rien
+    #     ne changeait — une connexion morte (onglet fermé sans fermeture TCP
+    #     propre, wifi coupé côté client) pouvait donc rester invisible des
+    #     heures : aucune écriture ne peut échouer si on n'écrit rien. Les
+    #     deux envoient maintenant un commentaire SSE ("keepalive") toutes les
+    #     ~15s d'inactivité — une connexion morte échoue vite, une connexion
+    #     vivante ignore juste la ligne (convention SSE standard).
+    #  3. Pas de filet de sécurité côté SERVEUR : même avec (1) et (2)
+    #     corrigés, une connexion franchement orpheline (TCP RST jamais reçu,
+    #     cas réseau rare) pouvait en théorie survivre indéfiniment.
+    #     `channel_timeout` ferme côté waitress tout canal sans AUCUN octet
+    #     envoyé/reçu depuis ce délai — réglé à 90s, au-dessus du heartbeat de
+    #     15s (large marge), donc aucune connexion active n'est jamais coupée
+    #     à tort.
+    # Seuil de threads remonté à 128 en complément (garde-fou temporaire,
+    # moins nécessaire une fois (1)/(2)/(3) en place, mais pas de raison de
+    # revenir en arrière) — migration propre vers un serveur asynchrone
+    # (gevent) prévue séparément, pas ce soir : testé en isolation, un patch
+    # gevent naïf (monkey.patch_all() par défaut) BLOQUE la vraie connexion
+    # wss:// vers dxFeed utilisée par rtquote.py/flowtape.py/tickcapture.py
+    # (confirmé en direct) — `patch_all(thread=False)` contourne le blocage
+    # mais laisse une friction résiduelle (exceptions LoopExit côté résolveur
+    # DNS de gevent) pas encore assez éprouvée pour la production.
     from waitress import serve
-    serve(create_app().server, host=host, port=port, threads=48)
+    serve(create_app().server, host=host, port=port, threads=128, channel_timeout=90)
 
 
 if __name__ == "__main__":

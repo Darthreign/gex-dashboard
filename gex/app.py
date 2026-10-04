@@ -4739,7 +4739,25 @@ def create_app() -> Dash:
 
         def gen():
             last_sig = None
+            last_heartbeat = time.monotonic()
+            # Bug corrigé (2026-10-05) : le yield était à l'intérieur du
+            # try/except ci-dessous — une erreur d'ÉCRITURE (client parti,
+            # connexion morte) était donc AVALÉE comme un simple échec de
+            # calcul, et la boucle continuait pour toujours. Le thread
+            # waitress qui sert cette connexion ne se libérait alors JAMAIS,
+            # même après la déconnexion réelle du client — cause probable des
+            # threads orphelins observés ce soir. Le calcul reste protégé
+            # (un cycle raté ne doit pas fermer le flux), mais le yield est
+            # maintenant HORS du try : une erreur d'écriture doit pouvoir
+            # arrêter le générateur et libérer le thread.
+            #
+            # Heartbeat toutes les ~15s si rien de neuf : même raison que
+            # _last_trade_stream (cf. gex/api.py) — force une écriture
+            # régulière pour détecter vite une connexion morte, et éviter que
+            # channel_timeout (waitress) coupe à tort une connexion vivante
+            # mais silencieuse (rien ne change sur l'indicateur).
             while True:
+                payload = None
                 try:
                     ctx = scalp_context(symbol)
                     if ctx is not None:
@@ -4752,9 +4770,16 @@ def create_app() -> Dash:
                             last_sig = sig
                             day_ticks = _scalp_day_ticks(symbol)
                             snap = _scalp_indicator_snapshot(symbol, ctx, spot, day_ticks)
-                            yield f"data: {json.dumps(snap)}\n\n"
-                except Exception:  # noqa: BLE001 — un cycle raté ne doit jamais fermer le flux
+                            payload = f"data: {json.dumps(snap)}\n\n"
+                except Exception:  # noqa: BLE001 — un cycle de CALCUL raté ne doit jamais fermer le flux
                     log.exception("Flux SSE indicateurs /scalp échoué (%s)", symbol)
+                now = time.monotonic()
+                if payload is not None:
+                    yield payload
+                    last_heartbeat = now
+                elif now - last_heartbeat >= 15.0:
+                    yield ": keepalive\n\n"
+                    last_heartbeat = now
                 time.sleep(1.0)
 
         return Response(gen(), mimetype="text/event-stream",
