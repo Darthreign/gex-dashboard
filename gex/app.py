@@ -1985,8 +1985,9 @@ def start_scalp_indicator_scheduler() -> None:
 # irrégulière, déroutant face à un graphique "1 min" classique) : un préfixe
 # "t" = minutes (bougies classiques, ré-échantillonnées depuis les bougies
 # 1 min déjà captées) ou "v" = volume (barres-volume, base du swing validé
-# le 2026-10-03, cf. gex/bars.py). "t" n'a PAS de pivots swing — la
-# détection n'a été validée que sur base volume, pas étendue sans preuve.
+# le 2026-10-03, cf. gex/bars.py). Pivots swing (zigzag) calculés sur les
+# DEUX familles depuis le 2026-10-05 (demande explicite) — même moteur,
+# même seuil (move_threshold*0.6), seul le découpage des barres change.
 CHART_TF_OPTIONS = [
     {"label": "1 min", "value": "t1"}, {"label": "5 min", "value": "t5"},
     {"label": "10 min", "value": "t10"}, {"label": "15 min", "value": "t15"},
@@ -2112,7 +2113,21 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
         candles = [{"time": int(e), "open": float(r.open), "high": float(r.high),
                     "low": float(r.low), "close": float(r.close)}
                   for e, r in zip(epoch, bars.itertuples())]
-        return {"candles": candles, "markers": [], "levels": levels,
+        # Swing H/L étendu aux bougies-temps (2026-10-05) — demande
+        # explicite : jusqu'ici réservé aux barres-volume ("pas étendu sans
+        # preuve"), mais c'est le MÊME moteur (gex/bars.py::zigzag), seul le
+        # découpage des barres change. Même seuil que partout ailleurs
+        # (move_threshold*0.6) pour rester cohérent avec le bandeau et les
+        # barres-volume — pas un nouveau réglage à calibrer.
+        markers = []
+        if len(bars) >= 5:
+            zz_bars = bars.reset_index(drop=True).copy()
+            zz_bars["ts_close"] = epoch.to_numpy()
+            swings = zigzag(zz_bars, min_move=scalp.move_threshold(symbol) * 0.6)
+            confirmed = swings[~swings["kind"].str.endswith("?")]
+            markers = [{"time": int(r.ts), "price": r.price, "kind": r.kind}
+                      for r in confirmed.itertuples()]
+        return {"candles": candles, "markers": markers, "levels": levels,
                 "confluence": confluence, "order_flow": order_flow,
                 "gex_profile": gex_profile, "orderflow_profile": orderflow_profile,
                 "symbol": symbol}

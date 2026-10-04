@@ -55,8 +55,42 @@ def test_defaut_temps_construit_des_bougies_1min(monkeypatch):
     assert len(out["candles"]) > 0
     c = out["candles"][0]
     assert set(c) == {"time", "open", "high", "low", "close"}
-    assert out["markers"] == []  # pas de pivots swing sur base temps
+    # Prix monotone (_price_bars, +1pt/barre) : un seul pivot "initial" est
+    # confirmé (le zigzag retient le point de départ comme un L dès que le
+    # prix s'en est écarté de move_threshold, même sans vrai retracement —
+    # comportement standard de l'algorithme, pas une limitation du TF temps,
+    # cf. test_tf_temps_calcule_des_pivots_swing pour un vrai aller-retour).
+    assert len(out["markers"]) == 1
+    assert out["markers"][0]["kind"] == "L"
     assert out["levels"] and set(out["levels"][0]) == {"name", "price", "color"}
+
+
+def _price_bars_with_swing(n: int, start_price: float = 30000.0) -> pd.DataFrame:
+    """Bougies 1 min formant un aller-retour net (monte puis redescend de
+    plus que move_threshold) — pour vérifier qu'un vrai pivot swing est
+    détecté sur base temps, pas seulement l'absence de faux positif."""
+    now = pd.Timestamp(datetime.now(ET).replace(tzinfo=None)).floor("min")
+    half = n // 2
+    prices = [start_price + i * 3.0 for i in range(half)] + \
+        [start_price + (half - 1) * 3.0 - i * 3.0 for i in range(n - half)]
+    rows = [{"timestamp": now - pd.Timedelta(minutes=(n - i)), "open": p,
+             "high": p + 1, "low": p - 1, "close": p} for i, p in enumerate(prices)]
+    return pd.DataFrame(rows)
+
+
+def test_tf_temps_calcule_des_pivots_swing(monkeypatch):
+    """Demande explicite (2026-10-05) : les pivots swing (zigzag) ne sont
+    plus réservés aux barres-volume — même moteur, mêmes seuils, appliqué
+    aux bougies-temps aussi."""
+    monkeypatch.setattr(store, "load_ticks", lambda s, d: pd.DataFrame())
+    monkeypatch.setattr(store, "load_prices", lambda s, d: _price_bars_with_swing(60))
+    monkeypatch.setattr(store, "tick_days", lambda s: [])
+    monkeypatch.setattr(tickcapture, "_session_day", lambda ts: "2026-10-03")
+    out = app.scalp_v2_chart_data("NQ", _CTX, 30040.0, tf="t1")
+    assert out["markers"], "un aller-retour net doit produire au moins un pivot confirmé"
+    m = out["markers"][0]
+    assert set(m) == {"time", "price", "kind"}
+    assert m["kind"] in ("H", "L")
 
 
 def test_tf_temps_reechantillonne(monkeypatch):
