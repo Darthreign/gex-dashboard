@@ -104,8 +104,18 @@ def main(host: str = "127.0.0.1", port: int = 8050) -> None:
     # (confirmé en direct) — `patch_all(thread=False)` contourne le blocage
     # mais laisse une friction résiduelle (exceptions LoopExit côté résolveur
     # DNS de gevent) pas encore assez éprouvée pour la production.
+    # 3e panne, 2026-10-04 (~23h27), MÊME SOIR : relevé threads=48->128 plus
+    # haut INSUFFISANT seul — "connection limit reached" est piloté par
+    # `connection_limit` (paramètre SÉPARÉ de `threads`, jamais touché,
+    # waitress le fixe à 100 par défaut), pas par le nombre de threads.
+    # Avec plusieurs flux SSE par onglet (prix + indicateurs) et le
+    # scheduler planifié, 100 connexions simultanées se saturent vite même
+    # sans trafic massif. Relevé à 300, large marge au-dessus de threads=128
+    # (une connexion en file d'attente ne consomme pas forcément un thread
+    # tout de suite, les deux compteurs ne sont pas le même budget).
     from waitress import serve
-    serve(create_app().server, host=host, port=port, threads=128, channel_timeout=90)
+    serve(create_app().server, host=host, port=port, threads=128,
+         channel_timeout=90, connection_limit=300)
 
 
 if __name__ == "__main__":
