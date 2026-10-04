@@ -4055,7 +4055,21 @@ def create_app() -> Dash:
                         // élément) — makeWidget() re-rattache l'élément
                         // déjà présent dans le DOM, exactement notre cas
                         // (bug vu en direct le 2026-10-04, warning console).
-                        if (shouldShow) grid.makeWidget(el); else grid.removeWidget(el, false);
+                        if (shouldShow) {
+                            grid.makeWidget(el);
+                            el.style.display = '';
+                        } else {
+                            grid.removeWidget(el, false);
+                            // removeWidget(el, false) détache le widget de
+                            // GridStack (ne gère plus sa position/taille)
+                            // mais NE LE CACHE PAS visuellement — l'élément
+                            // reste dans le DOM à sa dernière position tant
+                            // que rien ne lui met display:none (bug repéré
+                            // en direct le 2026-10-05 : les cases "Masquer…"
+                            // se cochaient, l'état interne changeait bien,
+                            // mais rien ne disparaissait à l'écran).
+                            el.style.display = 'none';
+                        }
                         window._gexGridVisible[id] = shouldShow;
                     }
                 });
@@ -4121,6 +4135,7 @@ def create_app() -> Dash:
                 const w = window._gexGridWidgets[id];
                 if (w && window._gexGridVisible[id]) {
                     grid.removeWidget(w, false);
+                    w.style.display = 'none';  // cf. commentaire sur le callback sc-ergo-options
                     window._gexGridVisible[id] = false;
                 }
             });
