@@ -9,3 +9,4 @@ apscheduler>=3.10
 mcp>=1.0
 pytest>=8.3
 websockets>=13.0
+waitress>=3.0

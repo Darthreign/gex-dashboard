@@ -41,16 +41,20 @@ def main(host: str = "127.0.0.1", port: int = 8050) -> None:
         TAPE.start()
         # capture tick-par-tick continue NQ/ES (24/5) : session dxLink dédiée
         CAPTURE.start()
-    # threaded=True essayé À NOUVEAU le 2026-10-03 (soir), re-retiré dans la
-    # même minute : l'utilisateur l'a observé en direct comme PIRE, confirme
-    # exactement la leçon du 2026-10-01 (cf. historique git) — un thread de
-    # plus ne règle pas un blocage derrière du travail CPU synchrone
-    # (scalp_confluence_zones/scalp_order_flow_zones ajoutés ce soir en
-    # font, cf. commit du jour), ça ajoute de la contention. NE PAS
-    # réessayer sans d'abord alléger ces calculs ou passer à un vrai
-    # serveur multi-worker (waitress — pas installé, cf. tentative du
-    # 2026-10-03) pour du vrai parallélisme hors-GIL.
-    create_app().run(host=host, port=port, debug=False)
+    # `threaded=True` sur le serveur de dev Werkzeug a été essayé le
+    # 2026-10-03 et retiré dans la minute (observé pire en direct). Diagnostic
+    # confirmé le 2026-10-04 par un test isolé (app Flask jouet, hors
+    # gex/app.py) : Werkzeug `threaded=True` lève bien le blocage HTTP de
+    # base, MAIS spawn un thread PAR CONNEXION, sans aucune limite — sous
+    # rafale (plusieurs onglets, callbacks ~1s chacun), ça peut lancer des
+    # dizaines de threads qui se contentent le GIL en même temps pendant du
+    # travail pandas synchrone (confluence/order_flow), d'où le ressenti
+    # "pire". waitress règle ce point précis : pool de threads BORNÉ (ici 8),
+    # jamais plus de 8 requêtes traitées en parallèle quelle que soit la
+    # rafale — testé le 2026-10-04 (même scénario jouet) : lève le blocage
+    # HTTP de base sans le risque d'explosion de threads de Werkzeug.
+    from waitress import serve
+    serve(create_app().server, host=host, port=port, threads=8)
 
 
 if __name__ == "__main__":

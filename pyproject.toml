@@ -38,6 +38,7 @@ dependencies = [
     # l'API mcp 2.x à traiter séparément.
     "mcp>=1.0,<2.0",
     "websockets>=13.0",
+    "waitress>=3.0",
 ]
 
 [project.optional-dependencies]
