@@ -1724,27 +1724,43 @@ def _volume_profile(leg_ticks: pd.DataFrame, symbol: str) -> dict | None:
            "buckets": buckets}
 
 
+def _scalp_swing_legs(day_ticks: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """Pivots swing CONFIRMÉS (cf. gex/bars.py::zigzag), même moteur que le
+    bandeau (bar_volume=60, min_move=`scalp.move_threshold * 0.6`) — factorisé
+    pour être appelé soit sur une fenêtre récente (jambes courantes, rapide),
+    soit sur la séance ENTIÈRE (recherche de zones non testées, plus lent,
+    cf. docstrings des deux appelants ci-dessous)."""
+    if day_ticks.empty:
+        return pd.DataFrame(columns=["ts", "price", "kind"])
+    bars = volume_bars(day_ticks, bar_volume=60.0)
+    if len(bars) < 5:
+        return pd.DataFrame(columns=["ts", "price", "kind"])
+    swings = zigzag(bars, min_move=scalp.move_threshold(symbol) * 0.6)
+    return swings[~swings["kind"].str.endswith("?")].reset_index(drop=True)
+
+
 def scalp_orderflow_profile(symbol: str, day_ticks: pd.DataFrame) -> dict:
-    """Profils de volume ancrés sur les jambes de swing (2026-10-04,
-    remplace/complète `scalp_order_flow_zones`) — demandé explicitement :
-    profil complet (volume/delta/POC/VAH/VAL) sur les DEUX dernières jambes
-    (la en cours ET la dernière confirmée, pas que celle qui se dessine —
-    sinon le contexte d'un retracement se perd), plus les zones HVN/LVN
-    (High/Low Volume Node — terminologie standard du volume profile, PAS le
-    "HVL" déjà utilisé ailleurs dans ce fichier pour l'absorption cumulée de
-    séance, gex/iceberg.py — deux concepts différents, noms distincts à
-    dessein) plus anciennes dont le prix n'a plus été retouché depuis
-    (persistent comme simples niveaux une fois leur jambe sortie des deux
-    gardées en entier).
+    """Profils de volume ancrés sur les DEUX dernières jambes de swing (la en
+    cours ET la dernière confirmée, pas que celle qui se dessine — sinon le
+    contexte d'un retracement se perd, précision explicite de l'utilisateur)
+    — remplace/complète `scalp_order_flow_zones`.
 
-    Swing calculé EXACTEMENT comme le bandeau (`scalp_inputs_swing` :
-    bar_volume=60, min_move=`scalp.move_threshold(symbol) * 0.6`) —
-    décorrélé du sélecteur de TF du graphique, qui ne change que
-    l'affichage, jamais le moteur (même principe que le bandeau swing).
+    Fenêtré à 90 min AVANT volume_bars (même convention que
+    `scalp_inputs_swing`) : les deux jambes gardées sont par construction
+    récentes, pas besoin de scanner toute la séance pour les trouver — et
+    volume_bars (qui itère les ticks un par un) prenait jusqu'à 6s pour ES
+    sur une séance entière (500k-1,4M ticks), bien trop lent pour un moteur
+    planifié toutes les 8s (mesuré en direct le 2026-10-04).
 
-    Mis en cache 10s (cf. _ORDERFLOW_PROFILE_CACHE) : construit des
-    barres-volume + un zigzag + plusieurs profils par palier à chaque appel,
-    pas gratuit à chaque cycle de 1s."""
+    `untested` (zones HVN/LVN non revisitées) vient d'une fonction SÉPARÉE
+    (`scalp_orderflow_untested`, plus bas) qui scanne la séance COMPLÈTE en
+    arrière-plan, pas limitée à 90 min — demande explicite de l'utilisateur
+    après avoir vu la fenêtre : "il peut tourner sur la plage complète en
+    arrière-plan mais afficher d'abord 90 min". Les deux parties ont des
+    coûts et des fraîcheurs différents, d'où deux fonctions et deux caches
+    plutôt qu'un seul calcul qui devrait choisir entre rapide et complet.
+
+    Mis en cache 10s (cf. _ORDERFLOW_PROFILE_CACHE)."""
     empty = {"legs": [], "untested": []}
     if day_ticks.empty:
         return empty
@@ -1752,79 +1768,99 @@ def scalp_orderflow_profile(symbol: str, day_ticks: pd.DataFrame) -> dict:
     hit = _ORDERFLOW_PROFILE_CACHE.get(symbol)
     if hit and now - hit[0] < SCALP_HEAVY_CACHE_S:
         return hit[1]
-    # Fenêtre 90 min AVANT volume_bars — même convention que
-    # scalp_inputs_swing, pour la même raison (volume_bars construit ses
-    # barres en itérant les ticks un par un ; sur la séance ENTIÈRE,
-    # 500k-1,4M ticks, ça prenait jusqu'à 6s pour ES à soi seul, mesuré en
-    # direct le 2026-10-04 — bien trop lent pour un moteur planifié toutes
-    # les 8s). Les jambes de swing qu'on garde sont de toute façon récentes
-    # par construction (la dernière confirmée + l'en-cours), 90 min est
-    # largement suffisant pour les couvrir plus quelques jambes plus
-    # anciennes pour les zones non testées.
-    last_ts = float(day_ticks["ts"].iloc[-1])
-    anchor = last_ts if last_ts < time.time() - 3600 else time.time()
-    day_ticks = day_ticks[day_ticks["ts"] >= anchor - 90 * 60]
-    if day_ticks.empty:
-        return empty
-    bars = volume_bars(day_ticks, bar_volume=60.0)
-    if len(bars) < 5:
-        return empty
-    swings = zigzag(bars, min_move=scalp.move_threshold(symbol) * 0.6)
-    confirmed = swings[~swings["kind"].str.endswith("?")].reset_index(drop=True)
-    if confirmed.empty:
-        return empty
-
-    last_ts = float(confirmed.iloc[-1]["ts"])
-    now_ts = float(day_ticks["ts"].iloc[-1])
-    # (t0, t1, en_cours) : la jambe en cours (dernier pivot confirmé -> maintenant)
-    # d'abord, puis l'avant-dernière -> dernière si elle existe.
-    bounds = [(last_ts, now_ts, True)]
-    if len(confirmed) >= 2:
-        bounds.append((float(confirmed.iloc[-2]["ts"]), last_ts, False))
-
+    last_ts_all = float(day_ticks["ts"].iloc[-1])
+    anchor = last_ts_all if last_ts_all < time.time() - 3600 else time.time()
+    recent_ticks = day_ticks[day_ticks["ts"] >= anchor - 90 * 60]
+    confirmed = _scalp_swing_legs(recent_ticks, symbol)
     legs = []
-    for t0, t1, is_current in bounds:
+    if not confirmed.empty:
+        last_ts = float(confirmed.iloc[-1]["ts"])
+        now_ts = float(recent_ticks["ts"].iloc[-1])
+        # (t0, t1, en_cours) : la jambe en cours (dernier pivot confirmé ->
+        # maintenant) d'abord, puis l'avant-dernière -> dernière si elle existe.
+        bounds = [(last_ts, now_ts, True)]
+        if len(confirmed) >= 2:
+            bounds.append((float(confirmed.iloc[-2]["ts"]), last_ts, False))
+        for t0, t1, is_current in bounds:
+            leg_ticks = recent_ticks[(recent_ticks["ts"] >= t0) & (recent_ticks["ts"] <= t1)]
+            prof = _volume_profile(leg_ticks, symbol)
+            if prof:
+                prof.update(t0=int(t0), t1=int(t1), current=is_current)
+                legs.append(prof)
+    out = {"legs": legs, "untested": scalp_orderflow_untested(symbol, day_ticks)}
+    _ORDERFLOW_PROFILE_CACHE[symbol] = (now, out)
+    return out
+
+
+_ORDERFLOW_UNTESTED_CACHE: dict[str, tuple[float, list[dict]]] = {}
+SCALP_FULLSCAN_CACHE_S = 60.0  # bien plus large que SCALP_HEAVY_CACHE_S (10s)
+SCALP_UNTESTED_MAX = 20  # zones HVN/LVN affichées, les plus récentes (cf. docstring)
+
+
+def scalp_orderflow_untested(symbol: str, day_ticks: pd.DataFrame) -> list[dict]:
+    """Zones HVN/LVN (High/Low Volume Node) non revisitées — scanne la
+    séance ENTIÈRE (pas une fenêtre de 90 min comme `scalp_orderflow_profile`
+    ci-dessus) : demande explicite de l'utilisateur après avoir vu la
+    fenêtre de 90 min, "il peut tourner sur la plage complète en arrière-
+    plan mais afficher d'abord 90 min" — ces zones anciennes n'ont aucune
+    raison d'être bornées aux deux dernières jambes, seul le coût de calcul
+    (volume_bars sur toute la séance, jusqu'à 6-8s pour ES) le justifiait.
+
+    Mis en cache SCALP_FULLSCAN_CACHE_S (60s, pas 10s) : appelé à chaque
+    cycle du moteur planifié (8s) comme tout le reste, mais ne recalcule
+    pour de vrai qu'une fois sur ~7-8 cycles — le reste du temps, simple
+    lecture de cache, exactement comme les autres indicateurs. Un TTL plus
+    large qu'un calcul plus lent, pas une exception à la règle."""
+    if day_ticks.empty:
+        return []
+    now = time.time()
+    hit = _ORDERFLOW_UNTESTED_CACHE.get(symbol)
+    if hit and now - hit[0] < SCALP_FULLSCAN_CACHE_S:
+        return hit[1]
+    confirmed = _scalp_swing_legs(day_ticks, symbol)
+    if len(confirmed) < 3:
+        out: list[dict] = []
+        _ORDERFLOW_UNTESTED_CACHE[symbol] = (now, out)
+        return out
+    last_ts = float(confirmed.iloc[-1]["ts"])
+    touched_since = day_ticks[day_ticks["ts"] >= last_ts]
+    lo_touched = float(touched_since["price"].min()) if not touched_since.empty else None
+    hi_touched = float(touched_since["price"].max()) if not touched_since.empty else None
+    # POC (= HVN) et palier le moins traité (= LVN) de CHAQUE jambe antérieure
+    # à la dernière confirmée — plus de plafond à 4 jambes maintenant que ce
+    # scan tourne à part, en arrière-plan, sur son propre cache 60s.
+    untested = []
+    for i in range(0, len(confirmed) - 2):
+        t0, t1 = float(confirmed.iloc[i]["ts"]), float(confirmed.iloc[i + 1]["ts"])
         leg_ticks = day_ticks[(day_ticks["ts"] >= t0) & (day_ticks["ts"] <= t1)]
         prof = _volume_profile(leg_ticks, symbol)
-        if prof:
-            prof.update(t0=int(t0), t1=int(t1), current=is_current)
-            legs.append(prof)
-
-    # HVN/LVN non revisités : parmi quelques jambes plus anciennes que les
-    # deux gardées en entier (bornées à 4, au-delà le coût de calcul n'en
-    # vaut plus la peine sur une vraie séance), le POC (= HVN : palier le
-    # plus traité) et le palier le moins traité (= LVN) de chaque jambe,
-    # gardés seulement si le prix n'est jamais revenu dans cette zone depuis
-    # la fin de cette jambe.
-    untested = []
-    if len(confirmed) >= 3:
-        touched_since = day_ticks[day_ticks["ts"] >= last_ts]
-        lo_touched = float(touched_since["price"].min()) if not touched_since.empty else None
-        hi_touched = float(touched_since["price"].max()) if not touched_since.empty else None
-        start_i = max(0, len(confirmed) - 6)
-        for i in range(start_i, len(confirmed) - 2):
-            t0, t1 = float(confirmed.iloc[i]["ts"]), float(confirmed.iloc[i + 1]["ts"])
-            leg_ticks = day_ticks[(day_ticks["ts"] >= t0) & (day_ticks["ts"] <= t1)]
-            prof = _volume_profile(leg_ticks, symbol)
-            if not prof or not prof["buckets"]:
-                continue
-            lvn_price = min(prof["buckets"], key=lambda b: b["vol"])["price"]
-            for price, kind in ((prof["poc"], "hvn"), (lvn_price, "lvn")):
-                revisited = (lo_touched is not None and lo_touched <= price <= hi_touched)
-                if not revisited:
-                    untested.append({"price": price, "kind": kind})
-
-    # Déduplique (prix, nature) : deux jambes voisines peuvent partager le
-    # même palier extrême, pas la peine d'afficher deux fois la même ligne.
+        if not prof or not prof["buckets"]:
+            continue
+        lvn_price = min(prof["buckets"], key=lambda b: b["vol"])["price"]
+        for price, kind in ((prof["poc"], "hvn"), (lvn_price, "lvn")):
+            revisited = (lo_touched is not None and lo_touched <= price <= hi_touched)
+            if not revisited:
+                untested.append({"price": price, "kind": kind})
+    # Déduplique (prix, nature) EN PARTANT DE LA FIN : deux jambes voisines
+    # peuvent partager le même palier extrême, pas la peine de l'afficher
+    # deux fois — et entre deux occurrences du même prix, on garde la plus
+    # RÉCENTE (construit en ordre chronologique, dédupliqué en sens inverse).
+    # Plafonné à SCALP_UNTESTED_MAX (20) : le scan lui-même porte sur la
+    # séance complète (pas de limite de jambes), mais 150+ lignes de prix
+    # rendraient le graphique illisible — seules les plus récentes (donc les
+    # plus proches de la structure actuelle) ont une vraie valeur de lecture
+    # pour un scalpeur. Demande explicite de l'utilisateur : scan complet en
+    # arrière-plan, affichage limité.
     seen = set()
-    untested_dedup = []
-    for u in untested:
+    out = []
+    for u in reversed(untested):
         key = (u["price"], u["kind"])
         if key not in seen:
             seen.add(key)
-            untested_dedup.append(u)
-    out = {"legs": legs, "untested": untested_dedup}
-    _ORDERFLOW_PROFILE_CACHE[symbol] = (now, out)
+            out.append(u)
+            if len(out) >= SCALP_UNTESTED_MAX:
+                break
+    _ORDERFLOW_UNTESTED_CACHE[symbol] = (now, out)
     return out
 
 
