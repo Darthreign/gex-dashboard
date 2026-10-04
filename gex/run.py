@@ -10,7 +10,7 @@ http://127.0.0.1:8050. Utilisable de trois façons équivalentes :
 from __future__ import annotations
 
 from gex import flowtape
-from gex.app import create_app
+from gex.app import create_app, start_scalp_indicator_scheduler
 from gex.capturebus import RemoteTape, remote_url
 from gex.flowtape import TAPE
 from gex.logsetup import setup_logging
@@ -41,6 +41,11 @@ def main(host: str = "127.0.0.1", port: int = 8050) -> None:
         TAPE.start()
         # capture tick-par-tick continue NQ/ES (24/5) : session dxLink dédiée
         CAPTURE.start()
+    # Moteur planifié des indicateurs /scalp (2026-10-04, cf. gex/app.py) —
+    # séparé de start_scheduler() ci-dessus à dessein, PAS appelé depuis
+    # create_app() : les tests construisent l'app en boucle sans jamais
+    # vouloir de vrai travail de fond planifié.
+    start_scalp_indicator_scheduler()
     # `threaded=True` sur le serveur de dev Werkzeug a été essayé le
     # 2026-10-03 et retiré dans la minute (observé pire en direct). Diagnostic
     # confirmé le 2026-10-04 par un test isolé (app Flask jouet, hors

@@ -6,6 +6,7 @@ Interface FR/EN (gex/i18n.py) ; termes de trading standards dans les deux.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import threading
@@ -1728,9 +1729,13 @@ def scalp_orderflow_profile(symbol: str, day_ticks: pd.DataFrame) -> dict:
     remplace/complète `scalp_order_flow_zones`) — demandé explicitement :
     profil complet (volume/delta/POC/VAH/VAL) sur les DEUX dernières jambes
     (la en cours ET la dernière confirmée, pas que celle qui se dessine —
-    sinon le contexte d'un retracement se perd), plus les zones HVL/LVL plus
-    anciennes dont le prix n'a plus été retouché depuis (persistent comme
-    simples niveaux une fois leur jambe sortie des deux gardées en entier).
+    sinon le contexte d'un retracement se perd), plus les zones HVN/LVN
+    (High/Low Volume Node — terminologie standard du volume profile, PAS le
+    "HVL" déjà utilisé ailleurs dans ce fichier pour l'absorption cumulée de
+    séance, gex/iceberg.py — deux concepts différents, noms distincts à
+    dessein) plus anciennes dont le prix n'a plus été retouché depuis
+    (persistent comme simples niveaux une fois leur jambe sortie des deux
+    gardées en entier).
 
     Swing calculé EXACTEMENT comme le bandeau (`scalp_inputs_swing` :
     bar_volume=60, min_move=`scalp.move_threshold(symbol) * 0.6`) —
@@ -1747,6 +1752,20 @@ def scalp_orderflow_profile(symbol: str, day_ticks: pd.DataFrame) -> dict:
     hit = _ORDERFLOW_PROFILE_CACHE.get(symbol)
     if hit and now - hit[0] < SCALP_HEAVY_CACHE_S:
         return hit[1]
+    # Fenêtre 90 min AVANT volume_bars — même convention que
+    # scalp_inputs_swing, pour la même raison (volume_bars construit ses
+    # barres en itérant les ticks un par un ; sur la séance ENTIÈRE,
+    # 500k-1,4M ticks, ça prenait jusqu'à 6s pour ES à soi seul, mesuré en
+    # direct le 2026-10-04 — bien trop lent pour un moteur planifié toutes
+    # les 8s). Les jambes de swing qu'on garde sont de toute façon récentes
+    # par construction (la dernière confirmée + l'en-cours), 90 min est
+    # largement suffisant pour les couvrir plus quelques jambes plus
+    # anciennes pour les zones non testées.
+    last_ts = float(day_ticks["ts"].iloc[-1])
+    anchor = last_ts if last_ts < time.time() - 3600 else time.time()
+    day_ticks = day_ticks[day_ticks["ts"] >= anchor - 90 * 60]
+    if day_ticks.empty:
+        return empty
     bars = volume_bars(day_ticks, bar_volume=60.0)
     if len(bars) < 5:
         return empty
@@ -1771,10 +1790,10 @@ def scalp_orderflow_profile(symbol: str, day_ticks: pd.DataFrame) -> dict:
             prof.update(t0=int(t0), t1=int(t1), current=is_current)
             legs.append(prof)
 
-    # HVL/LVL non revisités : parmi quelques jambes plus anciennes que les
+    # HVN/LVN non revisités : parmi quelques jambes plus anciennes que les
     # deux gardées en entier (bornées à 4, au-delà le coût de calcul n'en
-    # vaut plus la peine sur une vraie séance), le POC (= HVL : palier le
-    # plus traité) et le palier le moins traité (= LVL) de chaque jambe,
+    # vaut plus la peine sur une vraie séance), le POC (= HVN : palier le
+    # plus traité) et le palier le moins traité (= LVN) de chaque jambe,
     # gardés seulement si le prix n'est jamais revenu dans cette zone depuis
     # la fin de cette jambe.
     untested = []
@@ -1789,8 +1808,8 @@ def scalp_orderflow_profile(symbol: str, day_ticks: pd.DataFrame) -> dict:
             prof = _volume_profile(leg_ticks, symbol)
             if not prof or not prof["buckets"]:
                 continue
-            lvl_price = min(prof["buckets"], key=lambda b: b["vol"])["price"]
-            for price, kind in ((prof["poc"], "hvl"), (lvl_price, "lvl")):
+            lvn_price = min(prof["buckets"], key=lambda b: b["vol"])["price"]
+            for price, kind in ((prof["poc"], "hvn"), (lvn_price, "lvn")):
                 revisited = (lo_touched is not None and lo_touched <= price <= hi_touched)
                 if not revisited:
                     untested.append({"price": price, "kind": kind})
@@ -1807,6 +1826,81 @@ def scalp_orderflow_profile(symbol: str, day_ticks: pd.DataFrame) -> dict:
     out = {"legs": legs, "untested": untested_dedup}
     _ORDERFLOW_PROFILE_CACHE[symbol] = (now, out)
     return out
+
+
+# Moteur planifié des indicateurs /scalp (2026-10-04) — demande explicite de
+# l'utilisateur : "plutôt que les recalculer par graphique, un moteur qui les
+# calcule et remplit un fichier de données qui est ensuite envoyé à tous les
+# onglets qui le demande". Jusqu'ici, scalp_context/scalp_confluence_zones/
+# scalp_order_flow_zones/scalp_gex_profile/scalp_orderflow_profile étaient
+# tous mis en cache 10s mais calculés PARESSEUSEMENT — le premier onglet (de
+# potentiellement 15 traders sur le même symbole) à arriver après expiration
+# du cache payait le calcul. Ici, un calcul planifié en continu, qu'un onglet
+# soit ouvert ou non : les requêtes ne font plus jamais que LIRE un cache
+# déjà chaud.
+SCALP_SCHED_SYMBOLS = ("NQ", "ES")  # les deux seuls symboles de /scalp
+
+
+def _refresh_scalp_indicators() -> None:
+    """Rafraîchit en bloc les caches de /scalp v2 pour chaque symbole
+    scalpé. Chaque étape isolée dans son propre try/except : un calcul raté
+    pour un symbole/indicateur ne doit ni bloquer les autres ni faire
+    planter le scheduler lui-même (qui tournerait alors en silence, sans
+    qu'on s'en aperçoive avant longtemps — bien pire qu'une erreur visible
+    une fois dans les logs)."""
+    for symbol in SCALP_SCHED_SYMBOLS:
+        ctx = None
+        try:
+            ctx = scalp_context(symbol)
+        except Exception:  # noqa: BLE001
+            log.exception("Rafraîchissement planifié scalp_context échoué (%s)", symbol)
+        day_ticks = pd.DataFrame()
+        try:
+            day_ticks = _scalp_day_ticks(symbol)
+        except Exception:  # noqa: BLE001
+            log.exception("Rafraîchissement planifié ticks du jour échoué (%s)", symbol)
+        try:
+            scalp_order_flow_zones(symbol, day_ticks)
+            scalp_orderflow_profile(symbol, day_ticks)
+        except Exception:  # noqa: BLE001
+            log.exception("Rafraîchissement planifié order-flow échoué (%s)", symbol)
+        try:
+            scalp_confluence_zones(symbol)
+        except Exception:  # noqa: BLE001
+            log.exception("Rafraîchissement planifié confluence échoué (%s)", symbol)
+        if ctx is not None:
+            try:
+                spot = _scalp_live_spot(symbol, ctx)
+                scalp_gex_profile(symbol, spot)
+            except Exception:  # noqa: BLE001
+                log.exception("Rafraîchissement planifié profil gamma échoué (%s)", symbol)
+
+
+_SCALP_INDICATOR_SCHED = None
+
+
+def start_scalp_indicator_scheduler() -> None:
+    """Démarre le moteur ci-dessus — appelé UNE fois depuis `gex/run.py`
+    (jamais depuis `create_app()` : les tests construisent l'app à répétition
+    sans jamais vouloir de vrai travail de fond, exactement pourquoi
+    `gex/scheduler.py::start_scheduler` est déjà séparé de `create_app()`
+    aujourd'hui — même principe ici, pas une nouvelle règle).
+
+    Scheduler DÉDIÉ, distinct de celui de `gex/scheduler.py` (qui pilote
+    l'ingestion critique — chaînes d'options, flush des fichiers) : une
+    lenteur ou une erreur ici ne doit jamais retarder ces tâches-là, et
+    inversement. Intervalle (8s) sous le TTL des caches (10s, cf.
+    SCALP_CACHE_S/SCALP_HEAVY_CACHE_S) : jamais trouvé expiré par une
+    requête, toujours rafraîchi juste avant."""
+    global _SCALP_INDICATOR_SCHED
+    if _SCALP_INDICATOR_SCHED is not None:
+        return
+    from apscheduler.schedulers.background import BackgroundScheduler
+    sched = BackgroundScheduler(timezone="America/New_York")
+    sched.add_job(_refresh_scalp_indicators, "interval", seconds=8,
+                 max_instances=1, coalesce=True)
+    sched.start()
+    _SCALP_INDICATOR_SCHED = sched
 
 
 # Sélecteur de TF (/scalp v2, demandé explicitement le 2026-10-03 après
@@ -1839,6 +1933,58 @@ def _resample_price_bars(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
     return out
 
 
+def _scalp_day_ticks(symbol: str) -> pd.DataFrame:
+    """Ticks BUY/SELL de la séance en cours, repli sur le dernier jour
+    disponible si elle est encore vide (nuit, week-end) — factorisé le
+    2026-10-04 : utilisé par `scalp_v2_chart_data` ET par le moteur planifié
+    `_refresh_scalp_indicators` ci-dessous, jamais deux copies de cette
+    logique de repli qui pourraient diverger."""
+    from .tickcapture import _session_day
+    day = _session_day(time.time())
+    day_ticks = store.load_ticks(symbol, day)
+    if not day_ticks.empty:
+        day_ticks = day_ticks[day_ticks["side"].isin(("BUY", "SELL"))]
+    if day_ticks.empty:
+        # Repli : séance en cours encore vide — dernier jour avec des ticks,
+        # même principe que `scalp_price_fig` pour les bougies Plotly.
+        days = store.tick_days(symbol)
+        if days:
+            day_ticks = store.load_ticks(symbol, days[-1])
+            if not day_ticks.empty:
+                day_ticks = day_ticks[day_ticks["side"].isin(("BUY", "SELL"))]
+    return day_ticks
+
+
+def _scalp_indicator_snapshot(symbol: str, ctx: dict, spot: float,
+                              day_ticks: pd.DataFrame) -> dict:
+    """Niveaux/confluence/order-flow/profils — la partie de
+    `scalp_v2_chart_data` PARTAGÉE entre tous les onglets ouverts sur ce
+    symbole (contrairement aux bougies, qui dépendent du choix de TF
+    propre à chaque onglet). Factorisée le 2026-10-04 : utilisée par
+    `scalp_v2_chart_data` ET par le flux SSE
+    `/api/v1/<symbol>/scalp-indicators-stream` — un seul assemblage, jamais
+    deux copies qui pourraient diverger. `day_ticks` passé par l'appelant
+    (pas recalculé ici) : les deux appelants en ont de toute façon besoin
+    pour autre chose (bougies volume, boucle SSE), pas la peine de lire
+    `store.load_ticks` deux fois pour le même instant."""
+    levels = [{"name": r.name, "price": r.price, "color": C[_SC_KIND_COLOR[r.kind]]}
+             for r in scalp.build_ladder(symbol, spot, ctx["zg"], ctx["hvl"], ctx["keys"], ctx["walls"])]
+    confluence = scalp_confluence_zones(symbol)
+    try:
+        gex_profile = scalp_gex_profile(symbol, spot)
+    except Exception:  # noqa: BLE001 — un profil raté ne doit jamais casser le graphique
+        log.exception("Profil gamma /scalp v2 indisponible (%s)", symbol)
+        gex_profile = []
+    order_flow = scalp_order_flow_zones(symbol, day_ticks)
+    try:
+        orderflow_profile = scalp_orderflow_profile(symbol, day_ticks)
+    except Exception:  # noqa: BLE001 — un profil raté ne doit jamais casser le graphique
+        log.exception("Profil order-flow par jambe /scalp v2 indisponible (%s)", symbol)
+        orderflow_profile = {"legs": [], "untested": []}
+    return {"levels": levels, "confluence": confluence, "order_flow": order_flow,
+           "gex_profile": gex_profile, "orderflow_profile": orderflow_profile}
+
+
 def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
                         tf: str = CHART_TF_DEFAULT, lookback_min: int | None = None) -> dict:
     """Bougies (volume OU temps, cf. `tf`) + pivots swing (base volume
@@ -1852,36 +1998,13 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
     bougies (le graphique peut afficher les niveaux avant d'avoir des
     données), et restent calculés sur les ticks bruts quelle que soit `tf`
     (structure de séance, pas le choix d'affichage)."""
-    levels = [{"name": r.name, "price": r.price, "color": C[_SC_KIND_COLOR[r.kind]]}
-             for r in scalp.build_ladder(symbol, spot, ctx["zg"], ctx["hvl"], ctx["keys"], ctx["walls"])]
-    confluence = scalp_confluence_zones(symbol)
-    try:
-        gex_profile = scalp_gex_profile(symbol, spot)
-    except Exception:  # noqa: BLE001 — un profil raté ne doit jamais casser le graphique
-        log.exception("Profil gamma /scalp v2 indisponible (%s)", symbol)
-        gex_profile = []
     from .tickcapture import _session_day
     day = _session_day(time.time())
-    day_ticks = store.load_ticks(symbol, day)
-    if not day_ticks.empty:
-        day_ticks = day_ticks[day_ticks["side"].isin(("BUY", "SELL"))]
-    if day_ticks.empty:
-        # Repli : séance en cours encore vide (nuit, week-end) — dernier jour
-        # avec des ticks, même principe que `scalp_price_fig` pour les
-        # bougies Plotly. Mieux qu'un graphique vide : au moins l'historique
-        # le plus récent, demandé explicitement le 2026-10-03.
-        days = store.tick_days(symbol)
-        if days:
-            day = days[-1]
-            day_ticks = store.load_ticks(symbol, day)
-            if not day_ticks.empty:
-                day_ticks = day_ticks[day_ticks["side"].isin(("BUY", "SELL"))]
-    order_flow = scalp_order_flow_zones(symbol, day_ticks)
-    try:
-        orderflow_profile = scalp_orderflow_profile(symbol, day_ticks)
-    except Exception:  # noqa: BLE001 — un profil raté ne doit jamais casser le graphique
-        log.exception("Profil order-flow par jambe /scalp v2 indisponible (%s)", symbol)
-        orderflow_profile = {"legs": [], "untested": []}
+    day_ticks = _scalp_day_ticks(symbol)
+    snap = _scalp_indicator_snapshot(symbol, ctx, spot, day_ticks)
+    levels, confluence = snap["levels"], snap["confluence"]
+    order_flow, gex_profile = snap["order_flow"], snap["gex_profile"]
+    orderflow_profile = snap["orderflow_profile"]
     empty = {"candles": [], "markers": [], "levels": levels, "confluence": confluence,
             "order_flow": order_flow, "gex_profile": gex_profile,
             "orderflow_profile": orderflow_profile, "symbol": symbol}
@@ -2831,7 +2954,7 @@ def create_app() -> Dash:
                                             className="sc-draw-btn sc-ind-btn sc-draw-active",
                                             title="Afficher/masquer le profil de volume des 2 "
                                                   "dernières jambes de swing (POC/VAH/VAL + "
-                                                  "zones HVL/LVL non testées)"),
+                                                  "zones HVN/LVN non testées)"),
                             ], className="sc-ind-toolbar"),
                             html.Div(id="scalp-lw-chart", className="sc-lw-chart"),
                         ], id="scalp-lw-card", className="sc-card sc-underlying"),
@@ -3401,18 +3524,20 @@ def create_app() -> Dash:
                             title: 'HVL ' + (h.side === 'BUY' ? '↑' : '↓') + ' ' + Math.round(h.vol),
                         });
                     }) : [];
-                    // Zones HVL/LVL non revisitées (cf. scalp_orderflow_profile)
-                    // — jambes plus anciennes que les deux gardées en entier
-                    // dans le profil ; simple ligne fine, violette (distincte
-                    // de TOUTES les autres couleurs déjà utilisées), tant que
-                    // le prix n'est jamais repassé dans cette zone depuis.
+                    // Zones HVN/LVN non revisitées (High/Low Volume Node,
+                    // terminologie standard du volume profile — PAS le 'HVL'
+                    // ci-dessus, concept différent) — jambes plus anciennes
+                    // que les deux gardées en entier dans le profil ; simple
+                    // ligne fine, violette (distincte de toutes les autres
+                    // couleurs déjà utilisées), tant que le prix n'est
+                    // jamais repassé dans cette zone depuis.
                     const untestedLines = (ind.orderflow_profile
                             ? ((d.orderflow_profile || {}).untested || []) : []).map(function(u) {
                         return st.series.createPriceLine({
                             price: u.price, color: '#9c6ade', lineWidth: 1,
                             lineStyle: LightweightCharts.LineStyle.Dotted,
                             axisLabelVisible: true,
-                            title: (u.kind === 'hvl' ? 'HVL' : 'LVL') + ' non testé',
+                            title: (u.kind === 'hvn' ? 'HVN' : 'LVN') + ' non testé',
                         });
                     });
                     st.priceLines = simpleLines.concat(confluenceLines, flowLines, untestedLines);
@@ -3850,6 +3975,44 @@ def create_app() -> Dash:
         Output("scalp-stream-sink", "className"),
         Input("symbol", "value"),
         Input("url", "pathname"),
+    )
+
+    # Flux SSE des indicateurs /scalp v2 (2026-10-04) — demande explicite :
+    # "un moteur qui les calcule et remplit un fichier de données qui est
+    # ensuite envoyé à tous les onglets qui le demande". Même principe que
+    # le ticker de prix ci-dessus : une connexion EventSource, le serveur
+    # pousse dès que le moteur planifié (_refresh_scalp_indicators,
+    # gex/app.py) a rafraîchi le cache — plus jamais de polling ~1s par
+    # onglet pour niveaux/confluence/order-flow/profils (PARTAGÉS entre
+    # tous les traders sur ce symbole). Les bougies (par TF, propres à
+    # chaque onglet) restent sur le canal Dash existant, pas concernées ici.
+    # Scopé à /scalp EXACT (pas /scalpv1) : window._gexLwChart/
+    # applyIndicators n'existent que là.
+    app.clientside_callback(
+        """
+        function(symbol, path) {
+            if (window._scIndStream) { window._scIndStream.close(); window._scIndStream = null; }
+            const isScalpV2 = (path || '/') === '/scalp' || (path || '/').startsWith('/scalp/');
+            if (!isScalpV2 || !['NQ', 'ES'].includes(symbol)) {
+                return window.dash_clientside.no_update;
+            }
+            const es = new EventSource(`/api/v1/${symbol}/scalp-indicators-stream`);
+            es.onmessage = function(ev) {
+                const st = window._gexLwChart;
+                if (!st) return;  // graphique pas encore créé : le prochain cycle Dash suffira
+                let snap;
+                try { snap = JSON.parse(ev.data); } catch (e) { return; }
+                st.lastData = Object.assign({}, st.lastData, snap);
+                st.applyIndicators();
+            };
+            window._scIndStream = es;
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("scalp-stream-sink", "className", allow_duplicate=True),
+        Input("symbol", "value"),
+        Input("url", "pathname"),
+        prevent_initial_call="initial_duplicate",
     )
 
     @app.callback(
@@ -4404,5 +4567,46 @@ def create_app() -> Dash:
             log.exception("Écriture préférence /scalp échouée (%s, %s)", email, key)
             return jsonify({"ok": False, "reason": "write-failed"}), 200
         return jsonify({"ok": True})
+
+    # Flux SSE des indicateurs /scalp v2 (2026-10-04) — pousse
+    # levels/confluence/order_flow/gex_profile/orderflow_profile dès que le
+    # moteur planifié (_refresh_scalp_indicators) les a rafraîchis, plutôt
+    # que chaque onglet les redemande en boucle (demande explicite de
+    # l'utilisateur, cf. commentaire sur _refresh_scalp_indicators).
+    # N'APPELLE JAMAIS les calculs directement — ne fait que relire les
+    # fonctions, qui lisent elles-mêmes leur cache en premier (déjà chaud
+    # grâce au moteur planifié) : ce flux ne recalcule donc rien, il ne fait
+    # que repousser ce qui existe déjà vers le client, dès que ça change
+    # (signature = les horodatages des 4 caches lourds, pas le contenu —
+    # bien moins cher à comparer).
+    @app.server.route("/api/v1/<symbol>/scalp-indicators-stream")
+    def _scalp_indicators_stream(symbol):
+        from flask import Response
+        symbol = symbol.upper()
+        if symbol not in SCALP_SCHED_SYMBOLS:
+            return Response("symbole non couvert (NQ/ES seulement)", status=404)
+
+        def gen():
+            last_sig = None
+            while True:
+                try:
+                    ctx = scalp_context(symbol)
+                    if ctx is not None:
+                        spot = _scalp_live_spot(symbol, ctx)
+                        sig = (_CONFLUENCE_CACHE.get(symbol, (0.0,))[0],
+                              _ORDER_FLOW_CACHE.get(symbol, (0.0,))[0],
+                              _GEX_PROFILE_CACHE.get(symbol, (0.0,))[0],
+                              _ORDERFLOW_PROFILE_CACHE.get(symbol, (0.0,))[0])
+                        if sig != last_sig:
+                            last_sig = sig
+                            day_ticks = _scalp_day_ticks(symbol)
+                            snap = _scalp_indicator_snapshot(symbol, ctx, spot, day_ticks)
+                            yield f"data: {json.dumps(snap)}\n\n"
+                except Exception:  # noqa: BLE001 — un cycle raté ne doit jamais fermer le flux
+                    log.exception("Flux SSE indicateurs /scalp échoué (%s)", symbol)
+                time.sleep(1.0)
+
+        return Response(gen(), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     return app
