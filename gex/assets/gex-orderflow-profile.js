@@ -188,7 +188,7 @@
     constructor(source) { this._source = source; this._zones = []; }
     update() {
       const series = this._source._series, zones = this._source._untested,
-            bucket = this._source._bucketSize, visible = this._source._visible;
+            bucket = this._source._bucketSize, visible = this._source._untestedVisible;
       if (!series || !visible || !zones.length) { this._zones = []; return; }
       const spread = (bucket || 0) * UNTESTED_SPREAD;
       this._zones = zones.map((z) => ({
@@ -221,6 +221,7 @@
       this._untested = [];
       this._bucketSize = 0;
       this._visible = true;
+      this._untestedVisible = true;
       this._legsView = new OrderFlowProfilePaneView(this);
       this._untestedView = new UntestedZonePaneView(this);
       this._paneViews = [this._legsView, this._untestedView];
@@ -242,12 +243,17 @@
       this.requestUpdate();
     }
     setVisible(v) { this._visible = !!v; this.requestUpdate(); }
+    // Visibilité des zones HVN/LVN non testées, INDÉPENDANTE de setVisible()
+    // ci-dessus (demande explicite : "Ajoute la désactivation des HVN/LVN
+    // (différenciation du VP)" — pouvoir masquer les zones sans masquer le
+    // profil de volume par jambe, et inversement).
+    setUntestedVisible(v) { this._untestedVisible = !!v; this.requestUpdate(); }
     updateAllViews() {
       this._paneViews.forEach((v) => v.update());
       this._axisViews.forEach((v) => v.update());
     }
     paneViews() { return this._paneViews; }
-    priceAxisViews() { return this._visible ? this._axisViews : []; }
+    priceAxisViews() { return this._untestedVisible ? this._axisViews : []; }
   }
 
   window.OrderFlowProfilePrimitive = OrderFlowProfilePrimitive;

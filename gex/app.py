@@ -3023,8 +3023,12 @@ def create_app() -> Dash:
                                 html.Button("Profil volume", id="scalp-ind-ofprofile-toggle",
                                             className="sc-draw-btn sc-ind-btn sc-draw-active",
                                             title="Afficher/masquer le profil de volume des 2 "
-                                                  "dernières jambes de swing (POC/VAH/VAL + "
-                                                  "zones HVN/LVN non testées)"),
+                                                  "dernières jambes de swing (POC/VAH/VAL)"),
+                                html.Button("HVN/LVN", id="scalp-ind-untested-toggle",
+                                            className="sc-draw-btn sc-ind-btn sc-draw-active",
+                                            title="Afficher/masquer les zones HVN/LVN non "
+                                                  "testées (indépendant du profil de volume "
+                                                  "par jambe ci-dessus)"),
                             ], className="sc-ind-toolbar"),
                             html.Div(id="scalp-lw-chart", className="sc-lw-chart"),
                         ], id="scalp-lw-card", className="sc-card sc-underlying"),
@@ -3538,7 +3542,8 @@ def create_app() -> Dash:
                 // ci-dessous — appelée ici ET par les boutons de bascule
                 // (callbacks séparés plus bas), jamais dupliquée.
                 let indicators = { levels: true, confluence: true, order_flow: true,
-                                   gex_profile: true, markers: true, orderflow_profile: true };
+                                   gex_profile: true, markers: true, orderflow_profile: true,
+                                   orderflow_untested: true };
                 try {
                     const saved = JSON.parse(window.localStorage.getItem('gex-scalp-indicators') || 'null');
                     if (saved) indicators = Object.assign(indicators, saved);
@@ -3553,7 +3558,8 @@ def create_app() -> Dash:
                  ["scalp-ind-orderflow-toggle", "order_flow"],
                  ["scalp-gexprofile-toggle", "gex_profile"],
                  ["scalp-ind-markers-toggle", "markers"],
-                 ["scalp-ind-ofprofile-toggle", "orderflow_profile"]].forEach(function(pair) {
+                 ["scalp-ind-ofprofile-toggle", "orderflow_profile"],
+                 ["scalp-ind-untested-toggle", "orderflow_untested"]].forEach(function(pair) {
                     const btn = document.getElementById(pair[0]);
                     if (btn) btn.classList.toggle('sc-draw-active', indicators[pair[1]]);
                 });
@@ -3617,6 +3623,7 @@ def create_app() -> Dash:
                     }
                     if (st.ofProfile) {
                         st.ofProfile.setVisible(ind.orderflow_profile);
+                        st.ofProfile.setUntestedVisible(ind.orderflow_untested);
                         st.ofProfile.setData(((d.orderflow_profile || {}).legs) || []);
                         st.ofProfile.setUntested(((d.orderflow_profile || {}).untested) || [],
                                                  (d.orderflow_profile || {}).bucket_size);
@@ -3670,6 +3677,7 @@ def create_app() -> Dash:
         ("gex_profile", "scalp-gexprofile-toggle"),
         ("markers", "scalp-ind-markers-toggle"),
         ("orderflow_profile", "scalp-ind-ofprofile-toggle"),
+        ("orderflow_untested", "scalp-ind-untested-toggle"),
     ):
         app.clientside_callback(
             """
