@@ -8,12 +8,23 @@
  * Même pattern ISeriesPrimitive que gex-profile-overlay.js (profil de GEX
  * par strike) et le moteur de dessin OpenCharts — mais ancré sur la PLAGE
  * TEMPORELLE de chaque jambe (x0/x1 convertis via timeToCoordinate) plutôt
- * que sur tout le pane. Barres = volume par palier (couleur = delta
- * acheteur/vendeur), POC = ligne pleine dorée, VAH/VAL = pointillés dorés —
- * convention standard du volume profile, pas une invention maison.
+ * que sur tout le pane. POC = ligne pleine dorée, VAH/VAL = pointillés
+ * dorés — convention standard du volume profile, pas une invention maison.
+ *
+ * Rendu en profil SCINDÉ façon footprint (2026-10-04, demande explicite :
+ * "Dessine le axée sur la jambe et le volume complet à droite et le delta
+ * à gauche de l'axe") : un axe vertical fixe à x0 (l'ancrage de la jambe),
+ * volume TOTAL par palier en barre neutre à DROITE de l'axe, delta
+ * acheteur/vendeur (buy-sell, signé) en barre colorée à GAUCHE — au lieu
+ * d'une unique barre à droite colorée par le signe du delta (ancien rendu,
+ * mélangeait les deux informations). Chaque côté a sa propre échelle
+ * (maxVol / maxDelta de la jambe), largeur de barre plafonnée à un budget
+ * de pixels fixe indépendant de la durée de la jambe.
  */
 (function () {
   "use strict";
+
+  const PROFILE_MAX_BAR_PX = 70; // avant mise à l'échelle par horizontalPixelRatio
 
   class OrderFlowProfileRenderer {
     constructor(entries) { this._entries = entries; }
@@ -23,25 +34,42 @@
       target.useBitmapCoordinateSpace((scope) => {
         const ctx = scope.context;
         const hpr = scope.horizontalPixelRatio, vpr = scope.verticalPixelRatio;
+        const maxBarPx = PROFILE_MAX_BAR_PX * hpr;
         entries.forEach((leg) => {
           if (leg.x0 === null || leg.x1 === null) return;
-          const x0 = Math.min(leg.x0, leg.x1) * hpr, x1 = Math.max(leg.x0, leg.x1) * hpr;
-          const legWidthPx = Math.max(4 * hpr, x1 - x0);
+          const axisX = leg.x0 * hpr, x1 = leg.x1 * hpr;
           const barH = Math.max(1, 3 * vpr);
           const alpha = leg.current ? 0.50 : 0.30;
           for (const b of leg.buckets) {
-            if (b.y === null || !leg.maxVol) continue;
-            const wPx = Math.min(legWidthPx * 0.92, (b.vol / leg.maxVol) * legWidthPx * 0.92);
+            if (b.y === null) continue;
             const yPx = b.y * vpr;
+            // Volume total, à droite de l'axe, couleur neutre (le delta à
+            // gauche porte déjà l'info acheteur/vendeur).
+            const volPx = leg.maxVol ? Math.min(maxBarPx, (b.vol / leg.maxVol) * maxBarPx) : 0;
+            ctx.fillStyle = `rgba(148, 163, 184, ${alpha})`;
+            ctx.fillRect(axisX, yPx - barH / 2, volPx, barH);
+            // Delta (achats - ventes), à gauche de l'axe, signé.
             const delta = b.buy - b.sell;
+            const deltaPx = leg.maxDelta ? Math.min(maxBarPx, (Math.abs(delta) / leg.maxDelta) * maxBarPx) : 0;
             ctx.fillStyle = delta >= 0 ? `rgba(25, 158, 112, ${alpha})` : `rgba(230, 103, 103, ${alpha})`;
-            ctx.fillRect(x0, yPx - barH / 2, wPx, barH);
+            ctx.fillRect(axisX - deltaPx, yPx - barH / 2, deltaPx, barH);
+          }
+          // Axe de référence (volume à droite / delta à gauche), borné aux
+          // paliers réellement tracés (pas VAH/VAL, qui peuvent être null).
+          const ys = leg.buckets.map((b) => b.y).filter((y) => y !== null);
+          if (ys.length) {
+            ctx.strokeStyle = `rgba(226, 232, 240, ${leg.current ? 0.35 : 0.2})`;
+            ctx.lineWidth = Math.max(1, vpr);
+            ctx.beginPath();
+            ctx.moveTo(axisX, Math.min(...ys) * vpr - 4 * vpr);
+            ctx.lineTo(axisX, Math.max(...ys) * vpr + 4 * vpr);
+            ctx.stroke();
           }
           if (leg.pocY !== null) {
             ctx.strokeStyle = "#f0b90b";
             ctx.lineWidth = Math.max(1, 1.5 * vpr);
             ctx.beginPath();
-            ctx.moveTo(x0, leg.pocY * vpr);
+            ctx.moveTo(axisX - maxBarPx, leg.pocY * vpr);
             ctx.lineTo(x1, leg.pocY * vpr);
             ctx.stroke();
           }
@@ -51,7 +79,7 @@
           for (const y of [leg.vahY, leg.valY]) {
             if (y === null) continue;
             ctx.beginPath();
-            ctx.moveTo(x0, y * vpr);
+            ctx.moveTo(axisX - maxBarPx, y * vpr);
             ctx.lineTo(x1, y * vpr);
             ctx.stroke();
           }
@@ -92,11 +120,13 @@
       };
       this._entries = legs.map((leg) => {
         const maxVol = leg.buckets.reduce((m, b) => Math.max(m, b.vol), 0);
+        const maxDelta = leg.buckets.reduce((m, b) => Math.max(m, Math.abs(b.buy - b.sell)), 0);
         return {
           x0: ts.timeToCoordinate(nearestBarTime(leg.t0)),
           x1: ts.timeToCoordinate(nearestBarTime(leg.t1)),
           current: !!leg.current,
           maxVol: maxVol,
+          maxDelta: maxDelta,
           pocY: series.priceToCoordinate(leg.poc),
           vahY: series.priceToCoordinate(leg.vah),
           valY: series.priceToCoordinate(leg.val),
