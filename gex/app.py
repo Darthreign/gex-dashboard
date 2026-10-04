@@ -2989,8 +2989,23 @@ def create_app() -> Dash:
                     upColor: '#199e70', downColor: '#e66767', borderVisible: false,
                     wickUpColor: '#199e70', wickDownColor: '#e66767',
                 });
-                const onResize = () => chart.resize(container.clientWidth, container.clientHeight);
+                // ResizeObserver sur le CONTENEUR, pas juste window.resize —
+                // la taille du conteneur change aussi sans redimensionner la
+                // fenêtre : masquer un bloc voisin (cases "Masquer..."),
+                // changer l'ordre des blocs, ou basculer la disposition
+                // verticale, bougent tous la taille du conteneur sans
+                // déclencher d'évènement 'resize' sur window. Constaté en
+                // direct le 2026-10-04 : le graphique restait à sa taille
+                // de création dans ces cas. Garde 0×0 : un conteneur
+                // temporairement masqué (display:none) rapporte une taille
+                // nulle — un resize à 0 fige le canvas interne de la lib de
+                // façon permanente (piège déjà documenté pour createChart).
+                const onResize = () => {
+                    const w = container.clientWidth, h = container.clientHeight;
+                    if (w > 0 && h > 0) chart.resize(w, h);
+                };
                 window.addEventListener('resize', onResize);
+                new ResizeObserver(onResize).observe(container);
                 window._gexLwChart = { container: container, chart: chart, series: series,
                                        priceLines: [], fitted: false };
                 setupDrawingTools(chart, series, container);
@@ -3089,8 +3104,15 @@ def create_app() -> Dash:
                     grid: { vertLines: { color: '#1e222a' }, horzLines: { color: '#1e222a' } },
                     timeScale: { timeVisible: true, secondsVisible: true },
                 });
-                const onResize = () => chart.resize(container.clientWidth, container.clientHeight);
+                // Même correctif que le graphique de prix : ResizeObserver
+                // sur le conteneur, pas juste window.resize (cf. commentaire
+                // détaillé là-bas).
+                const onResize = () => {
+                    const w = container.clientWidth, h = container.clientHeight;
+                    if (w > 0 && h > 0) chart.resize(w, h);
+                };
                 window.addEventListener('resize', onResize);
+                new ResizeObserver(onResize).observe(container);
                 window._gexLwHedge = { container: container, chart: chart, series: {}, fitted: false };
             }
             const state = window._gexLwHedge;

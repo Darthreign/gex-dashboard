@@ -617,13 +617,24 @@ body {
 
 
 /* --- Page Scalp : un écran, deux mises en page ---------------------------- */
+/* Grille en flux (PAS de grid-template-areas nommées) : des zones fixes
+   réservent leur cellule même quand le bloc qu'elles contiennent est masqué
+   (case "Masquer niveaux" etc.) — un trou visible reste, rien ne remonte
+   pour le combler. Constaté en direct le 2026-10-04, hors disposition
+   verticale (qui, elle, utilise déjà `grid-area: auto` + flux naturel et
+   n'a jamais eu ce défaut). Avec l'auto-placement, un enfant en
+   `display:none` est entièrement retiré du flux, les suivants remontent.
+   banner/head forcés sur toute la largeur (grid-column), le reste
+   (ladder/graphique/prints/couverture) suit l'ordre du DOM — qui est déjà
+   le bon ordre visuel (ladder, graphique, prints, couverture) — et peut
+   être changé par les dcc.Dropdown "Ordre" (style `order` posé en JS),
+   qui agissent maintenant aussi hors disposition verticale. */
 .sc-grid { display: grid; gap: 12px; grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
-  grid-template-areas: "banner banner" "head head" "ladder price" "prints hedge"; align-items: start; }
-.sc-head { grid-area: head; }
-.sc-ladder { grid-area: ladder; }
-.sc-hedge { grid-area: hedge; min-width: 0; }
-.sc-underlying { grid-area: price; min-width: 0; }
-.sc-prints { grid-area: prints; min-width: 0; overflow-x: auto; max-height: 560px; overflow-y: auto; }
+  align-items: start; }
+.sc-bannerbox, .sc-head { grid-column: 1 / -1; }
+.sc-hedge { min-width: 0; }
+.sc-underlying { min-width: 0; }
+.sc-prints { min-width: 0; overflow-x: auto; max-height: 560px; overflow-y: auto; }
 .sc-card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
 .sc-title { font-size: 12px; color: var(--muted); letter-spacing: .02em; text-transform: uppercase; }
 .sc-cardhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
@@ -702,23 +713,21 @@ body.scalp-page.sc-layout-vertical .sc-grid {
    hedge }, etc., toujours actives) — sans ce reset explicite, plusieurs
    blocs atterrissent dans la même cellule et se superposent. Vérifié en
    live le 2026-10-03 : chevauchement réel, pas une supposition. */
-body.scalp-page.sc-layout-vertical .sc-grid > * { grid-area: auto; }
-body.scalp-page.sc-layout-vertical .sc-bannerbox { order: -2; }
-body.scalp-page.sc-layout-vertical .sc-head { order: -1; }
+/* banner/head toujours en tête, quelle que soit la disposition — la grille
+   horizontale n'a plus de zones nommées (cf. .sc-grid ci-dessus), `order`
+   y a donc maintenant le même effet qu'en disposition verticale. */
+.sc-bannerbox { order: -2; }
+.sc-head { order: -1; }
 /* Les 4 blocs ajustables reçoivent leur `order` (1-4) en style inline posé
    par JS (cf. clientside_callback "sc-order-*" dans gex/app.py) — la valeur
    vient des dcc.Dropdown, pas d'une règle CSS statique ici. */
 
-/* Ordre d'affichage (/scalp v2, disposition verticale) : cf. commentaire
-   gex/app.py sur pourquoi CSS `order` plutôt qu'un vrai glisser-déposer. */
-.sc-order-controls { display: none; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; color: var(--ink2); }
-body.scalp-page.sc-layout-vertical .sc-order-controls { display: flex; }
-/* Hors disposition verticale, l'ordre n'a pas d'effet visible (la grille
-   horizontale ne lit pas `order`) — plutôt que de cacher les contrôles
-   sans explication (ce qui a contribué à les rendre introuvables), un
-   indice prend leur place. */
-.sc-order-hint { display: inline; color: var(--muted); font-size: 13px; font-style: italic; }
-body.scalp-page.sc-layout-vertical .sc-order-hint { display: none; }
+/* Ordre d'affichage (/scalp v2) : cf. commentaire gex/app.py sur pourquoi
+   CSS `order` plutôt qu'un vrai glisser-déposer. Fonctionne maintenant
+   dans les deux dispositions (cf. .sc-grid ci-dessus, 2026-10-04) — plus
+   besoin de les cacher ni d'un indice hors disposition verticale. */
+.sc-order-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; color: var(--ink2); }
+.sc-order-hint { display: none; }
 .sc-order-label { color: var(--muted); font-weight: 600; }
 .sc-order-item { display: flex; align-items: center; gap: 5px; }
 .sc-order-item-label { color: var(--ink2); }
@@ -760,7 +769,7 @@ body.sc-keywords-only .sc-banner-side { display: none !important; }
 body.sc-keywords-only .sc-banner-title { font-size: 28px; }
 
 @media (max-width: 900px) {
-  .sc-grid { grid-template-columns: minmax(0, 1fr); grid-template-areas: "banner" "head" "ladder" "price" "hedge" "prints"; }
+  .sc-grid { grid-template-columns: minmax(0, 1fr); }
   .sc-spot { font-size: 30px; }
   .sc-prints { max-height: none; }
 }
@@ -814,8 +823,8 @@ body.scalp-v2-page #scalp-lw-hedge-card { display: block; }
 #scalp-lw-hedge { width: 100%; height: 340px; }
 
 
-/* Bandeau d'amplification : en tête de la page Scalp */
-.sc-bannerbox { grid-area: banner; }
+/* Bandeau d'amplification : en tête de la page Scalp — position/largeur
+   posées par .sc-bannerbox { grid-column: 1 / -1; order: -2; } plus haut. */
 .sc-banner {
   display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap;
   border: 1px solid var(--line); border-left-width: 6px; border-radius: 10px;
