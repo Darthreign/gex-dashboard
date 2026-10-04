@@ -49,12 +49,26 @@ def main(host: str = "127.0.0.1", port: int = 8050) -> None:
     # rafale (plusieurs onglets, callbacks ~1s chacun), ça peut lancer des
     # dizaines de threads qui se contentent le GIL en même temps pendant du
     # travail pandas synchrone (confluence/order_flow), d'où le ressenti
-    # "pire". waitress règle ce point précis : pool de threads BORNÉ (ici 8),
-    # jamais plus de 8 requêtes traitées en parallèle quelle que soit la
-    # rafale — testé le 2026-10-04 (même scénario jouet) : lève le blocage
-    # HTTP de base sans le risque d'explosion de threads de Werkzeug.
+    # "pire". waitress règle ce point précis avec un pool BORNÉ.
+    #
+    # Panne réelle le 2026-10-04 (même jour, ~10h03) avec `threads=8` :
+    # /api/v1/<symbol>/stream (ticker de prix /scalp, SSE) tient son thread
+    # OUVERT EN PERMANENCE tant que l'onglet reste ouvert (boucle
+    # `while True: ... time.sleep(0.1)`, cf. gex/api.py::_last_trade_stream).
+    # Chaque onglet /scalp ouvert consomme donc un thread du pool pour toute
+    # sa durée de vie — avec seulement 8, une poignée d'onglets simultanés
+    # (plusieurs onglets de test + un accès distant) suffit à épuiser le
+    # pool : plus aucun thread pour servir le reste, logs "Task queue depth"
+    # qui grimpe jusqu'à "connection limit reached", serveur injoignable
+    # (confirmé : `curl` timeout direct, pas juste le navigateur).
+    # Relevé à 48 en conséquence : ces threads SSE sont endormis l'essentiel
+    # du temps (I/O, pas CPU) — contrairement au risque du `threaded=True`
+    # de Werkzeug ci-dessus (threads CPU-bound qui se contentent le GIL),
+    # en avoir plusieurs dizaines d'inactifs ne recrée PAS ce problème. Reste
+    # un pool BORNÉ (jamais d'explosion illimitée), juste dimensionné pour
+    # supporter une vraie poignée d'onglets ouverts en continu.
     from waitress import serve
-    serve(create_app().server, host=host, port=port, threads=8)
+    serve(create_app().server, host=host, port=port, threads=48)
 
 
 if __name__ == "__main__":
