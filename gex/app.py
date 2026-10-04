@@ -1974,7 +1974,17 @@ def start_scalp_indicator_scheduler() -> None:
         return
     from apscheduler.schedulers.background import BackgroundScheduler
     sched = BackgroundScheduler(timezone="America/New_York")
-    sched.add_job(_refresh_scalp_indicators, "interval", seconds=8,
+    # Intervalle relevé 8s->20s (2026-10-05, nuit des 4 pannes) : mesuré en
+    # régime stable (caches chauds), un cycle NQ+ES prend 0,2-1,2s — large
+    # marge sous l'ancien budget de 8s. MAIS le tout premier cycle après
+    # chaque redémarrage (caches froids) prend 14-15s, et sous charge réelle
+    # (beaucoup de threads waitress actifs se contentant le GIL), ce même
+    # cycle peut ralentir bien au-delà de sa durée isolée — un budget trop
+    # serré (8s) transforme alors un ralentissement ponctuel en dépassements
+    # en cascade (job jamais fini avant le suivant, pression CPU qui
+    # s'auto-entretient). 20s laisse une vraie marge sans dégrader la
+    # fraîcheur perçue (les caches eux-mêmes restent à 10s/60s).
+    sched.add_job(_refresh_scalp_indicators, "interval", seconds=20,
                  max_instances=1, coalesce=True)
     sched.start()
     _SCALP_INDICATOR_SCHED = sched
@@ -2113,12 +2123,14 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
         candles = [{"time": int(e), "open": float(r.open), "high": float(r.high),
                     "low": float(r.low), "close": float(r.close)}
                   for e, r in zip(epoch, bars.itertuples())]
-        # Swing H/L étendu aux bougies-temps (2026-10-05) — demande
-        # explicite : jusqu'ici réservé aux barres-volume ("pas étendu sans
-        # preuve"), mais c'est le MÊME moteur (gex/bars.py::zigzag), seul le
-        # découpage des barres change. Même seuil que partout ailleurs
-        # (move_threshold*0.6) pour rester cohérent avec le bandeau et les
-        # barres-volume — pas un nouveau réglage à calibrer.
+        # Swing H/L étendu aux bougies-temps (2026-10-05) — même moteur
+        # (gex/bars.py::zigzag), même seuil (move_threshold*0.6) que les
+        # barres-volume. Brièvement reverté la même nuit après deux pannes
+        # serveur, puis restauré : la cause réelle identifiée est
+        # _refresh_scalp_indicators tournant sans marge sur un budget de 8s
+        # trop serré sous charge (cf. start_scalp_indicator_scheduler,
+        # intervalle relevé à 20s) — testé isolément sur t1/t5/t10/t15/t60/
+        # t240, aucun blocage, rien ici n'explique les pannes.
         markers = []
         if len(bars) >= 5:
             zz_bars = bars.reset_index(drop=True).copy()
