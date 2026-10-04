@@ -4180,7 +4180,13 @@ def create_app() -> Dash:
             png = None
         if png is None:
             return Response(f"graphique indisponible : {name}", status=404)
-        return Response(png, mimetype="image/png")
+        # Pas d'en-tête de cache avant ce correctif (2026-10-04) : un graphique
+        # qui change en continu avec le marché ne doit JAMAIS être mis en
+        # cache (navigateur ou intermédiaire) — sans quoi une requête
+        # ultérieure identique (mêmes lang/bucket/window/scale) rafraîchirait
+        # silencieusement une image périmée au lieu du graphique réel.
+        return Response(png, mimetype="image/png",
+                        headers={"Cache-Control": "no-store, max-age=0"})
 
     # Préférences /scalp par utilisateur (2026-10-04, piste 7 roadmap-scalp-v2)
     # — identité = l'en-tête Cloudflare Access (code à usage unique par
