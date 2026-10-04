@@ -1841,25 +1841,44 @@ def scalp_orderflow_untested(symbol: str, day_ticks: pd.DataFrame) -> list[dict]
             revisited = (lo_touched is not None and lo_touched <= price <= hi_touched)
             if not revisited:
                 untested.append({"price": price, "kind": kind})
-    # Déduplique (prix, nature) EN PARTANT DE LA FIN : deux jambes voisines
-    # peuvent partager le même palier extrême, pas la peine de l'afficher
-    # deux fois — et entre deux occurrences du même prix, on garde la plus
-    # RÉCENTE (construit en ordre chronologique, dédupliqué en sens inverse).
+    # Déduplique par PRIX SEUL (pas (prix, nature)) EN PARTANT DE LA FIN —
+    # bug vu en direct le 2026-10-04 : dédupliquer par (prix, nature)
+    # laissait passer "HVN non testé" ET "LVN non testé" EMPILÉS au même
+    # prix (le POC d'une jambe peut coïncider avec le palier le moins
+    # traité d'une jambe voisine) — contradictoire à l'affichage, le même
+    # prix ne peut pas être À LA FOIS le plus et le moins traité pour
+    # qui regarde le graphique. Entre deux occurrences du même prix, on
+    # garde la plus RÉCENTE (construit en ordre chronologique, dédupliqué
+    # en sens inverse).
+    #
+    # Espacement minimum (2 paliers) entre deux zones gardées : des jambes
+    # courtes/serrées (consolidation) produisent des extrêmes sur des
+    # paliers ADJACENTS d'une jambe à l'autre — sans ce filtre, l'affichage
+    # devient un escalier dense (ex. 31040/31035/31030 à la suite) plutôt
+    # que quelques niveaux significatifs.
+    #
     # Plafonné à SCALP_UNTESTED_MAX (20) : le scan lui-même porte sur la
     # séance complète (pas de limite de jambes), mais 150+ lignes de prix
-    # rendraient le graphique illisible — seules les plus récentes (donc les
-    # plus proches de la structure actuelle) ont une vraie valeur de lecture
-    # pour un scalpeur. Demande explicite de l'utilisateur : scan complet en
-    # arrière-plan, affichage limité.
-    seen = set()
+    # rendraient le graphique illisible — seules les plus récentes (donc
+    # les plus proches de la structure actuelle) ont une vraie valeur de
+    # lecture pour un scalpeur. Demande explicite de l'utilisateur : scan
+    # complet en arrière-plan, affichage limité.
+    from . import iceberg as ib
+    min_gap = ib._vp_bucket(symbol) * 2
+    seen_price: set[float] = set()
+    kept_prices: list[float] = []
     out = []
     for u in reversed(untested):
-        key = (u["price"], u["kind"])
-        if key not in seen:
-            seen.add(key)
-            out.append(u)
-            if len(out) >= SCALP_UNTESTED_MAX:
-                break
+        price = u["price"]
+        if price in seen_price:
+            continue
+        if any(abs(price - p) < min_gap for p in kept_prices):
+            continue
+        seen_price.add(price)
+        kept_prices.append(price)
+        out.append(u)
+        if len(out) >= SCALP_UNTESTED_MAX:
+            break
     _ORDERFLOW_UNTESTED_CACHE[symbol] = (now, out)
     return out
 
