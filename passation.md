@@ -53,6 +53,10 @@ Signalé par l'utilisateur via une vidéo (visible aussi en observant ensemble l
 
 Le graphique de PRIX (bougies) sur `/scalp` v2 reste sur Lightweight Charts, inchangé — seul le graphique de couverture est repassé sur Plotly. Si quelqu'un veut reprendre la migration Lightweight Charts de ce graphique precis un jour, repartir de zéro plutôt que de réappliquer les deux tentatives ci-dessus telles quelles.
 
+## Cases "Masquer..." (niveaux/graphique prix/couverture dealers/tape) qui ne masquaient plus rien
+
+Repéré par l'utilisateur en toute fin de soirée, pas lié aux chantiers ci-dessus : cocher une case "Masquer…" dans le panneau Personnalisation changeait bien l'état interne (`_gexGridVisible`) et le détachait de GridStack (`grid.removeWidget(el, false)`, compteur interne qui retombe à 0), mais l'élément restait **affiché à l'écran** — `removeWidget(..., false)` détache du moteur GridStack sans jamais appliquer `display:none`. Corrigé en ajoutant explicitement `el.style.display = 'none'`/`''` dans les deux chemins qui masquent/affichent un widget (callback des cases à cocher, restauration de l'état au chargement de la grille). Validé dans les deux sens (cocher/décocher) et sous rechargement complet. Cause probablement ancienne (pas liée aux changements de ce soir), juste jamais remarquée avant.
+
 ## Couleur LVN (profil de volume par jambe)
 
 Demande cosmétique : les zones LVN (creux de volume) étaient rendues dans la même teinte violette que les HVN (pics), seule l'opacité différait. LVN passe à un bleu distinct (`#3987e5`, même bleu que "Calls achetés" ailleurs dans le dashboard) — dégradé du canvas ET étiquette d'axe, dans `gex/assets/gex-orderflow-profile.js`.
