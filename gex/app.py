@@ -1579,9 +1579,16 @@ def scalp_confluence_zones(symbol: str) -> list[dict]:
     # de clustering du symbole : filtre d'AFFICHAGE seulement, ne touche pas
     # à cluster_levels ni à ses seuils (le chantier de l'utilisateur).
     max_width = _confluence.CLUSTER_POINTS[symbol] * 3
-    out = [{"price": (z.low + z.high) / 2, "width": z.width, "n": len(z),
-           "names": sorted(z.levels.keys())}
-          for z in zones if len(z) >= 2 and z.width <= max_width]
+    kept = [{"price": (z.low + z.high) / 2, "width": z.width, "n": len(z),
+            "names": sorted(z.levels.keys())}
+           for z in zones if len(z) >= 2 and z.width <= max_width]
+    # Classées CL1 (confluence la plus forte) à CL10 — demande explicite de
+    # l'utilisateur, remplace l'étiquette brute "Confluence x{n}" : un rang
+    # relatif (1 = plus de familles convergentes) se lit plus vite qu'un
+    # décompte, et plafonne l'affichage à 10 zones (les plus fortes) plutôt
+    # que toutes celles qui dépassent le seuil minimal de 2.
+    kept.sort(key=lambda z: -z["n"])
+    out = [dict(z, rank=i + 1) for i, z in enumerate(kept[:10])]
     _CONFLUENCE_CACHE[symbol] = (now, out)
     return out
 
@@ -3577,15 +3584,21 @@ def create_app() -> Dash:
                         });
                     }) : [];
                     // Confluence multi-familles (SPX/NDX/QQQ/NQ/ES transposés
-                    // sur cette échelle, cf. scalp_confluence_zones) : ligne
-                    // pleine DORÉE, plus épaisse que les niveaux simples —
-                    // distincte visuellement, plusieurs mécanismes de
-                    // couverture différents convergent ici.
+                    // sur cette échelle, cf. scalp_confluence_zones) —
+                    // classées CL1 (plus de familles convergentes) à CL10,
+                    // demande explicite : "On va les nommer CL1 à 10 (1
+                    // étant celui ayant le plus de confluence) avec des
+                    // lignes pas trop forte". Ligne fine (1px, pas 2) pour
+                    // toutes, opacité dégressive selon le rang (CL1 la plus
+                    // visible, CL10 la plus discrète) plutôt qu'un aplat
+                    // uniforme — la force relative se lit d'un coup d'œil
+                    // sans que rien ne crie sur le graphique.
                     const confluenceLines = ind.confluence ? (d.confluence || []).map(function(z) {
+                        const alpha = Math.max(0.3, 0.9 - (z.rank - 1) * (0.6 / 9));
                         return st.series.createPriceLine({
-                            price: z.price, color: '#c98500', lineWidth: 2,
+                            price: z.price, color: 'rgba(201, 133, 0, ' + alpha + ')', lineWidth: 1,
                             lineStyle: LightweightCharts.LineStyle.Solid,
-                            axisLabelVisible: true, title: 'Confluence x' + z.n,
+                            axisLabelVisible: true, title: 'CL' + z.rank,
                         });
                     }) : [];
                     // Zones order flow (HVL volume profil, cf.
