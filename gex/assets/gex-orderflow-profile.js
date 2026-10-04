@@ -86,12 +86,21 @@
   }
 
   // Zones HVN/LVN non testées (2026-10-04) — un palier de volume profile
-  // est une ZONE de prix (sa largeur de bucket), pas un tick exact : demande
-  // explicite de l'utilisateur ("en général c'est une zone pas un prix
-  // fixe"), remplace les price lines fines utilisées au premier jet. Bande
-  // semi-transparente sur toute la largeur du pane (pas la jambe) — ce sont
-  // des niveaux de référence durables, pas liés à une plage temporelle
-  // précise comme les jambes elles-mêmes.
+  // est une ZONE de prix, pas un tick exact (demande explicite : "en
+  // général c'est une zone pas un prix fixe"). Rendu en DÉGRADÉ plutôt
+  // qu'un aplat uni (deuxième retour, façon bookmap) : "un LVN c'est un
+  // creux de volume, le début du creux est clair, le fond est plus foncé,
+  // et en remontant de l'autre côté ça redevient clair" — clair aux bords,
+  // foncé exactement au prix du nœud, clair en s'en éloignant, qu'il
+  // s'agisse d'un creux (LVN) ou d'un pic (HVN) : l'intensité représente
+  // à quel point ce prix précis est significatif, pas juste du volume vs
+  // pas de volume. Dégradé vertical pur CSS canvas (createLinearGradient),
+  // pas besoin de renvoyer les paliers voisins depuis le serveur — le
+  // dégradé s'étend sur plusieurs largeurs de bucket de part et d'autre du
+  // centre, pas juste la largeur du palier lui-même (sinon imperceptible
+  // à l'écran pour un bucket fin).
+  const UNTESTED_SPREAD = 2.5; // en multiples de bucket_size, de chaque côté du centre
+
   class UntestedZoneRenderer {
     constructor(zones) { this._zones = zones; }
     draw(target) {
@@ -102,23 +111,22 @@
         const paneW = scope.bitmapSize.width;
         const vpr = scope.verticalPixelRatio;
         for (const z of zones) {
-          if (z.yTop === null || z.yBottom === null) continue;
+          if (z.yTop === null || z.yBottom === null || z.yCenter === null) continue;
           const yTop = Math.min(z.yTop, z.yBottom) * vpr;
           const yBottom = Math.max(z.yTop, z.yBottom) * vpr;
-          const h = Math.max(1, yBottom - yTop);
+          const yCenter = z.yCenter * vpr;
           const isHvn = z.kind === "hvn";
-          // HVN : violet plus dense (niveau "aimant", prix s'y arrête
-          // souvent). LVN : plus clair/fin (prix traverse vite d'habitude).
-          ctx.fillStyle = isHvn ? "rgba(156, 106, 222, 0.22)" : "rgba(156, 106, 222, 0.10)";
-          ctx.fillRect(0, yTop, paneW, h);
-          ctx.strokeStyle = isHvn ? "rgba(156, 106, 222, 0.75)" : "rgba(156, 106, 222, 0.45)";
-          ctx.lineWidth = Math.max(1, (isHvn ? 1.2 : 1) * vpr);
-          ctx.setLineDash(isHvn ? [] : [4 * vpr, 3 * vpr]);
-          ctx.beginPath();
-          ctx.moveTo(0, z.yCenter * vpr);
-          ctx.lineTo(paneW, z.yCenter * vpr);
-          ctx.stroke();
-          ctx.setLineDash([]);
+          // Pic d'intensité au centre (le prix du nœud), transparent aux
+          // deux bords — clair/foncé/clair, qu'on s'approche par le haut
+          // ou par le bas du creux/pic.
+          const peakAlpha = isHvn ? 0.42 : 0.26;
+          const grad = ctx.createLinearGradient(0, yTop, 0, yBottom);
+          grad.addColorStop(0, "rgba(156, 106, 222, 0)");
+          grad.addColorStop(Math.min(1, Math.max(0, (yCenter - yTop) / (yBottom - yTop))),
+                            `rgba(156, 106, 222, ${peakAlpha})`);
+          grad.addColorStop(1, "rgba(156, 106, 222, 0)");
+          ctx.fillStyle = grad;
+          ctx.fillRect(0, yTop, paneW, Math.max(1, yBottom - yTop));
         }
       });
     }
@@ -130,11 +138,11 @@
       const series = this._source._series, zones = this._source._untested,
             bucket = this._source._bucketSize, visible = this._source._visible;
       if (!series || !visible || !zones.length) { this._zones = []; return; }
-      const half = (bucket || 0) / 2;
+      const spread = (bucket || 0) * UNTESTED_SPREAD;
       this._zones = zones.map((z) => ({
         kind: z.kind,
-        yTop: series.priceToCoordinate(z.price + half),
-        yBottom: series.priceToCoordinate(z.price - half),
+        yTop: series.priceToCoordinate(z.price + spread),
+        yBottom: series.priceToCoordinate(z.price - spread),
         yCenter: series.priceToCoordinate(z.price),
       }));
     }
