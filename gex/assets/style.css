@@ -821,24 +821,17 @@ body.scalp-v2-page #scalp-lw-card { display: flex; flex-direction: column; }
 .sc-ind-toolbar { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 6px; }
 .sc-ind-btn { width: auto; padding: 0 10px; }
 
-/* Même bascule pour la couverture des dealers (demandé le 2026-10-03,
-   "tu ne passes pas par Lightweight Charts ?") — /scalpv1 garde
-   scalp-hedge (Plotly, LineSeries en marches). */
+/* Couverture des dealers : repassée sur Plotly (scalp-hedge) PARTOUT,
+   y compris /scalp v2, depuis le 2026-10-05 — la version Lightweight
+   Charts (scalp-lw-hedge-card) clignotait en mode Live (thread principal
+   du navigateur saturé), deux correctifs tentés ont chacun régressé
+   (intervalle dédié -> page figée ; flux SSE -> graphique vide),
+   abandonnés cette nuit-là. Plotly n'a jamais eu ce problème sur
+   /scalpv1 : plus simple de le réutiliser partout que de persister sur
+   la version qui ne marche pas encore. #scalp-lw-hedge-card reste donc
+   masquée inconditionnellement (plus de bascule par body.scalp-v2-page
+   ici) — à réactiver seulement si ce chantier est repris et corrigé. */
 #scalp-lw-hedge-card { display: none; }
-body.scalp-v2-page #scalp-hedge-card { display: none; }
-/* Même principe que #scalp-lw-card ci-dessus : flex column pour que
-   .sc-lw-chart (classe partagée avec le graphique prix) remplisse la
-   hauteur du widget GridStack plutôt qu'une hauteur fixe en px. Scopé à
-   .scalp-v2-page : /scalpv1 garde #scalp-hedge-card (Plotly) intact. */
-body.scalp-v2-page #scalp-lw-hedge-card {
-  display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0;
-}
-/* Rend la carte .sc-hedge elle-même flex column, pour que
-   #scalp-lw-hedge-card (flex:1 1 auto ci-dessus) se partage l'espace avec
-   le cardhead (titre + segment 5/15/30 min) au lieu de le pousser plus bas
-   sans jamais remplir la hauteur du widget. Scopé à .scalp-v2-page : ne
-   touche jamais la mise en page de la carte sur /scalpv1. */
-body.scalp-v2-page .sc-card.sc-hedge { display: flex; flex-direction: column; }
 
 
 /* Bandeau d'amplification : en tête de la page Scalp — position/largeur

@@ -172,11 +172,16 @@
           // deux bords — clair/foncé/clair, qu'on s'approche par le haut
           // ou par le bas du creux/pic.
           const peakAlpha = isHvn ? 0.42 : 0.26;
+          // HVN (violet, #9c6ade = 156,106,222) et LVN (bleu, #3987e5 =
+          // 57,135,229 — même bleu que "Calls achetés" ailleurs dans le
+          // dashboard, cf. hedge_fig) : deux teintes distinctes demandées
+          // le 2026-10-05, jusque-là identiques (seule l'opacité différait).
+          const rgb = isHvn ? "156, 106, 222" : "57, 135, 229";
           const grad = ctx.createLinearGradient(0, yTop, 0, yBottom);
-          grad.addColorStop(0, "rgba(156, 106, 222, 0)");
+          grad.addColorStop(0, `rgba(${rgb}, 0)`);
           grad.addColorStop(Math.min(1, Math.max(0, (yCenter - yTop) / (yBottom - yTop))),
-                            `rgba(156, 106, 222, ${peakAlpha})`);
-          grad.addColorStop(1, "rgba(156, 106, 222, 0)");
+                            `rgba(${rgb}, ${peakAlpha})`);
+          grad.addColorStop(1, `rgba(${rgb}, 0)`);
           ctx.fillStyle = grad;
           ctx.fillRect(0, yTop, paneW, Math.max(1, yBottom - yTop));
         }
@@ -209,7 +214,7 @@
     tickVisible() { return true; }
     text() { return (this._zone.kind === "hvn" ? "HVN" : "LVN") + " " + Math.round(this._zone.price); }
     textColor() { return "#ffffff"; }
-    backColor() { return this._zone.kind === "hvn" ? "#9c6ade" : "#6b5a8e"; }
+    backColor() { return this._zone.kind === "hvn" ? "#9c6ade" : "#3987e5"; }
   }
 
   class OrderFlowProfilePrimitive {

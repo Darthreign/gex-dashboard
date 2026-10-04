@@ -4666,23 +4666,27 @@ def create_app() -> Dash:
     def refresh_scalp(_, path, symbol, lang, window, min_size, banner_version):
         if not is_scalp_path(path) or symbol not in ("NQ", "ES"):
             raise PreventUpdate
-        # /scalp v2 affiche le graphique Lightweight Charts (scalp-lw-card) ;
-        # scalp-price/scalp-hedge (Plotly) restent dans le DOM mais CSS-hidden
-        # sur cette page (body.scalp-v2-page, style.css) — seul /scalpv1 les
-        # affiche encore. Les construire quand même (go.Figure + sérialisation
-        # JSON : pas gratuit) doublait le travail par cycle en pure perte,
-        # directement en concurrence avec le flux réellement affiché — repéré
-        # en direct le 2026-10-05 (bougie live figée plusieurs secondes sous
-        # contention, juste après le passage de tape-tick à 500 ms ; requêtes
-        # Dash annulées en rafale, cf. réseau). no_update sur ces deux Outputs
-        # quand /scalp v2 est actif : le client garde la dernière figure
-        # posée (jamais affichée de toute façon).
+        # /scalp v2 affiche le graphique de PRIX en Lightweight Charts
+        # (scalp-lw-card) ; scalp-price (Plotly) reste dans le DOM mais
+        # CSS-hidden sur cette page (body.scalp-v2-page, style.css) — seul
+        # /scalpv1 l'affiche encore. Le construire quand même (go.Figure +
+        # sérialisation JSON : pas gratuit) doublait le travail par cycle en
+        # pure perte — no_update sur cet Output quand /scalp v2 est actif.
+        #
+        # "Couverture des dealers" (scalp-hedge) : repassé sur Plotly pour
+        # /scalp v2 AUSSI le 2026-10-05 (donc plus de no_update ici) — la
+        # version Lightweight Charts (scalp-lw-hedge) clignotait en mode Live
+        # (thread principal du navigateur saturé par les mises à jour trop
+        # fréquentes), deux tentatives de correctif ont chacune régressé
+        # (intervalle dédié -> page figée ; flux SSE poussé -> graphique
+        # vide), abandonnées cette nuit-là. Plotly n'a jamais eu ce problème
+        # sur /scalpv1 — plus simple de réutiliser ce qui marche déjà que de
+        # continuer à risquer une régression. cf. style.css pour le bascule
+        # d'affichage (scalp-hedge-card visible, scalp-lw-hedge-card masquée,
+        # y compris sur /scalp v2 désormais).
         is_v2 = (path or "/") == "/scalp"
-        if is_v2:
-            hedge = no_update
-        else:
-            hedge = hedge_fig(symbol, lang, int(window if window is not None else -1))
-            hedge.update_layout(height=300, uirevision=f"scalp-{symbol}-{window}")
+        hedge = hedge_fig(symbol, lang, int(window if window is not None else -1))
+        hedge.update_layout(height=300, uirevision=f"scalp-{symbol}-{window}")
         prints = tape_table(symbol, lang, min_size=float(min_size or 0), include_combos=False)
         ctx = scalp_context(symbol)
         if ctx is None:
