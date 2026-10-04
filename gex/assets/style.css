@@ -617,24 +617,32 @@ body {
 
 
 /* --- Page Scalp : un écran, deux mises en page ---------------------------- */
-/* Grille en flux (PAS de grid-template-areas nommées) : des zones fixes
-   réservent leur cellule même quand le bloc qu'elles contiennent est masqué
-   (case "Masquer niveaux" etc.) — un trou visible reste, rien ne remonte
-   pour le combler. Constaté en direct le 2026-10-04, hors disposition
-   verticale (qui, elle, utilise déjà `grid-area: auto` + flux naturel et
-   n'a jamais eu ce défaut). Avec l'auto-placement, un enfant en
-   `display:none` est entièrement retiré du flux, les suivants remontent.
-   banner/head forcés sur toute la largeur (grid-column), le reste
-   (ladder/graphique/prints/couverture) suit l'ordre du DOM — qui est déjà
-   le bon ordre visuel (ladder, graphique, prints, couverture) — et peut
-   être changé par les dcc.Dropdown "Ordre" (style `order` posé en JS),
-   qui agissent maintenant aussi hors disposition verticale. */
-.sc-grid { display: grid; gap: 12px; grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
-  align-items: start; }
-.sc-bannerbox, .sc-head { grid-column: 1 / -1; }
+.sc-fixed-top { display: flex; flex-direction: column; gap: 12px; margin-bottom: 12px; }
+
+/* Widgets déplaçables/redimensionnables (2026-10-04, GridStack.js — cf.
+   gex/assets/gridstack-all.js + gridstack.min.css, chargés automatiquement
+   comme tout gex/assets/). GridStack gère lui-même la position/taille de
+   `.grid-stack-item` (attributs gs-x/y/w/h posés en Python, écrasés au
+   chargement par la disposition sauvegardée s'il y en a une) — on ne fixe
+   ici que l'apparence, jamais la position (c'est son job). */
+.sc-gridstack { margin-bottom: 0; }
+.grid-stack-item-content {
+  background: transparent; overflow: hidden; display: flex; flex-direction: column;
+}
+.sc-widget-handle {
+  flex: none; cursor: move; user-select: none;
+  padding: 4px 10px; margin-bottom: 4px; border-radius: 6px 6px 0 0;
+  background: var(--surface-2); color: var(--muted); font-size: 11px;
+  letter-spacing: .02em; text-transform: uppercase;
+}
+.sc-widget-handle:hover { color: var(--ink-2); }
+/* Les .sc-card existantes remplissent le reste du widget (sous la poignée)
+   et restent scrollables individuellement (prints notamment) plutôt que de
+   faire déborder tout le widget. */
+.grid-stack-item-content > .sc-card { flex: 1 1 auto; min-height: 0; overflow: auto; }
 .sc-hedge { min-width: 0; }
 .sc-underlying { min-width: 0; }
-.sc-prints { min-width: 0; overflow-x: auto; max-height: 560px; overflow-y: auto; }
+.sc-prints { min-width: 0; overflow-x: auto; }
 .sc-card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
 .sc-title { font-size: 12px; color: var(--muted); letter-spacing: .02em; text-transform: uppercase; }
 .sc-cardhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
@@ -699,40 +707,10 @@ body.scalp-page .sc-controls { display: flex; }
 .sc-layout-toggle:hover { border-color: #3a3a37; }
 body.scalp-page.sc-layout-vertical .sc-layout-toggle { background: var(--ink); color: var(--page); }
 
-body.scalp-page.sc-layout-vertical .sc-grid {
-  grid-template-columns: minmax(0, 1fr);
-  /* `order` plutôt que grid-template-areas fixe : permet à sc-order-controls
-     (gex/app.py) de repositionner les 4 blocs ajustables (ladder/chart/
-     hedge/prints) individuellement, sans toucher banner/head (toujours en
-     tête, cf. order fixe ci-dessous). Mobile (@media plus bas) garde
-     l'ancienne règle à zones nommées : partagée avec /scalpv1, pas touchée. */
-  grid-template-areas: none;
-}
-/* grid-template-areas: none sur le PARENT ne suffit pas à annuler les
-   grid-area nommées déjà posées sur les enfants (.sc-hedge { grid-area:
-   hedge }, etc., toujours actives) — sans ce reset explicite, plusieurs
-   blocs atterrissent dans la même cellule et se superposent. Vérifié en
-   live le 2026-10-03 : chevauchement réel, pas une supposition. */
-/* banner/head toujours en tête, quelle que soit la disposition — la grille
-   horizontale n'a plus de zones nommées (cf. .sc-grid ci-dessus), `order`
-   y a donc maintenant le même effet qu'en disposition verticale. */
-.sc-bannerbox { order: -2; }
-.sc-head { order: -1; }
-/* Les 4 blocs ajustables reçoivent leur `order` (1-4) en style inline posé
-   par JS (cf. clientside_callback "sc-order-*" dans gex/app.py) — la valeur
-   vient des dcc.Dropdown, pas d'une règle CSS statique ici. */
-
-/* Ordre d'affichage (/scalp v2) : cf. commentaire gex/app.py sur pourquoi
-   CSS `order` plutôt qu'un vrai glisser-déposer. Fonctionne maintenant
-   dans les deux dispositions (cf. .sc-grid ci-dessus, 2026-10-04) — plus
-   besoin de les cacher ni d'un indice hors disposition verticale. */
-.sc-order-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; color: var(--ink2); }
-.sc-order-hint { display: none; }
-.sc-order-label { color: var(--muted); font-weight: 600; }
-.sc-order-item { display: flex; align-items: center; gap: 5px; }
-.sc-order-item-label { color: var(--ink2); }
-.sc-order-dd { width: 60px; }
-.sc-order-dd .Select-control, .sc-order-dd .dash-dropdown { min-height: 28px; font-size: 13px; }
+/* Disposition verticale : bascule GridStack en 1 colonne (cf. grid.column(1)
+   dans le clientside_callback) plutôt qu'une règle CSS à part — GridStack
+   recalcule alors lui-même la position de chaque widget. */
+.sc-order-hint { color: var(--muted); font-size: 13px; font-style: italic; }
 
 /* Ergonomie/concentration /scalp v2 (piste d'origine : "masquage de
    graphiques/tape, mode mots-clés uniquement, pour des utilisateurs ayant
@@ -752,26 +730,21 @@ body.scalp-page.sc-layout-vertical .sc-grid {
   color: var(--ink2) !important;
 }
 
-body.sc-hide-ladder .sc-ladder { display: none !important; }
-body.sc-hide-price-chart #scalp-lw-card, body.sc-hide-price-chart #scalp-price-card { display: none !important; }
-body.sc-hide-hedge-chart .sc-hedge { display: none !important; }
-body.sc-hide-tape .sc-prints { display: none !important; }
-
-/* Mode mots-clés : ne garde que le titre du bandeau (l'état en un coup
-   d'oeil), masque tout le reste — y compris, dans le bandeau lui-même, le
-   détail chiffré et le panneau d'absorption à droite, qui sont déjà plus
-   d'information que "un mot-clé". */
-body.sc-keywords-only .sc-head, body.sc-keywords-only .sc-ladder,
-body.sc-keywords-only #scalp-lw-card, body.sc-keywords-only #scalp-price-card,
-body.sc-keywords-only .sc-hedge, body.sc-keywords-only .sc-prints,
+/* Masquage des 4 widgets (niveaux/graphique/couverture/prints) : géré en JS
+   via grid.removeWidget()/addWidget() (cf. clientside_callback ergo dans
+   gex/app.py), PAS en CSS display:none — un widget simplement caché au CSS
+   laisserait un trou dans la grille GridStack, exactement le bug de reflow
+   déjà corrigé une fois pour .sc-grid (2026-10-04). Ne reste en CSS que ce
+   qui n'est pas un widget de la grille (tête de page, détail du bandeau). */
+body.sc-keywords-only .sc-head,
 body.sc-keywords-only .sc-banner-detail, body.sc-keywords-only .sc-lights,
 body.sc-keywords-only .sc-banner-side { display: none !important; }
 body.sc-keywords-only .sc-banner-title { font-size: 28px; }
 
+/* Sous 900px : GridStack passe lui-même en 1 colonne (option
+   `oneColumnSize: 900` au clientside_callback d'init), pas une règle CSS. */
 @media (max-width: 900px) {
-  .sc-grid { grid-template-columns: minmax(0, 1fr); }
   .sc-spot { font-size: 30px; }
-  .sc-prints { max-height: none; }
 }
 
 /* Page /scalp : tout ce qui n'est pas le mode scalping est masqué, et seuls NQ et ES restent. */
@@ -793,8 +766,15 @@ a.scalp-link, a.full-link { text-decoration: none; }
    les deux pages), posée par le clientside_callback dans gex/app.py. */
 #scalp-lw-card { display: none; }
 body.scalp-v2-page #scalp-price-card { display: none; }
-body.scalp-v2-page #scalp-lw-card { display: block; }
-.sc-lw-chart { width: 100%; height: 360px; }
+/* flex column (pas block) : le widget est désormais redimensionnable
+   (GridStack) — .sc-lw-chart doit remplir la hauteur RESTANTE sous le
+   sélecteur de TF/la barre d'outils plutôt qu'une hauteur fixe en px, sinon
+   agrandir le widget laisse un vide et le rétrécir fait déborder le
+   graphique. Gardé spécifique à #scalp-lw-card (pas la classe partagée
+   .sc-underlying) : ne touche jamais le dimensionnement Plotly de
+   #scalp-price-card sur /scalpv1. */
+body.scalp-v2-page #scalp-lw-card { display: flex; flex-direction: column; }
+.sc-lw-chart { width: 100%; flex: 1 1 auto; min-height: 0; }
 /* Sélecteur de TF du graphique prix (/scalp v2) — demandé le 2026-10-03,
    "donner la possibilité de choisir sa TF". */
 .sc-tf-dd { width: 110px; margin-bottom: 6px; font-size: 12.5px; }
@@ -819,8 +799,19 @@ body.scalp-v2-page #scalp-lw-card { display: block; }
    scalp-hedge (Plotly, LineSeries en marches). */
 #scalp-lw-hedge-card { display: none; }
 body.scalp-v2-page #scalp-hedge-card { display: none; }
-body.scalp-v2-page #scalp-lw-hedge-card { display: block; }
-#scalp-lw-hedge { width: 100%; height: 340px; }
+/* Même principe que #scalp-lw-card ci-dessus : flex column pour que
+   .sc-lw-chart (classe partagée avec le graphique prix) remplisse la
+   hauteur du widget GridStack plutôt qu'une hauteur fixe en px. Scopé à
+   .scalp-v2-page : /scalpv1 garde #scalp-hedge-card (Plotly) intact. */
+body.scalp-v2-page #scalp-lw-hedge-card {
+  display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0;
+}
+/* Rend la carte .sc-hedge elle-même flex column, pour que
+   #scalp-lw-hedge-card (flex:1 1 auto ci-dessus) se partage l'espace avec
+   le cardhead (titre + segment 5/15/30 min) au lieu de le pousser plus bas
+   sans jamais remplir la hauteur du widget. Scopé à .scalp-v2-page : ne
+   touche jamais la mise en page de la carte sur /scalpv1. */
+body.scalp-v2-page .sc-card.sc-hedge { display: flex; flex-direction: column; }
 
 
 /* Bandeau d'amplification : en tête de la page Scalp — position/largeur

@@ -9,3 +9,4 @@ build/
 dist/
 discord_bot/.env
 node_modules/
+tools/gridstack-vendor/

@@ -2505,121 +2505,144 @@ def create_app() -> Dash:
                             ],
                         ),
                     ], className="sc-controls-row"),
-                    # Ordre d'affichage (disposition verticale uniquement —
-                    # demandé explicitement : "permet la personnalisation des
-                    # positions"). Priorité 1-4 par bloc plutôt qu'un vrai
-                    # glisser-déposer : un drag-and-drop déplacerait les
-                    # noeuds DOM directement, hors du contrôle de React/Dash,
-                    # qui réconcilie sa propre copie virtuelle du DOM — risque
-                    # réel de désynchronisation sur un site déjà fragile (cf.
-                    # passation, incident du 1-thread Werkzeug). CSS `order`
-                    # pur : aucun noeud ne bouge, seulement l'ordre visuel.
-                    html.Div([
-                        html.Span("Ordre :", className="sc-order-label"),
-                        *[html.Div([
-                            html.Span(label, className="sc-order-item-label"),
-                            dcc.Dropdown(id=f"sc-order-{key}", className="sc-order-dd",
-                                        clearable=False, searchable=False,
-                                        options=[{"label": str(n), "value": n} for n in (1, 2, 3, 4)],
-                                        value=default),
-                        ], className="sc-order-item")
-                          for key, label, default in [
-                              ("ladder", "Niveaux", 2), ("chart", "Graphique", 1),
-                              ("hedge", "Couverture", 3), ("prints", "Prints", 4)]],
-                    ], className="sc-order-controls"),
-                    html.Span("Ordre personnalisable en disposition verticale",
+                    # Widgets déplaçables/redimensionnables (2026-10-04) —
+                    # remplace les dropdowns "Ordre" 1-4 (CSS `order` pur) par
+                    # un vrai glisser-déposer. Rendu possible SANS le risque de
+                    # désync React/Dash qu'on redoutait en septembre (cf. git
+                    # blame) : GridStack.js (gex/assets/gridstack-all.js,
+                    # vendu comme Lightweight Charts) gère lui-même le
+                    # sous-arbre DOM de la grille APRÈS son init — exactement
+                    # le même principe que le chart LW, que Dash ne redessine
+                    # jamais après coup. Dash garde la main sur le CONTENU de
+                    # chaque widget (scalp-ladder, scalp-banner, etc. via
+                    # leurs Output habituels), jamais sur sa position/taille.
+                    html.Span("Glisser l'en-tête d'un bloc pour le déplacer, "
+                             "le coin pour le redimensionner.",
                              className="sc-order-hint"),
                 ], className="sc-controls"),
                 html.Div([
                     html.Div(id="scalp-banner", className="sc-bannerbox"),
                     html.Div(id="scalp-head", className="sc-head"),
-                    html.Div([html.Div("Niveaux · distance au spot (pts)", className="sc-title"),
-                              html.Div(id="scalp-ladder")], className="sc-card sc-ladder"),
-                    html.Div([dcc.Graph(config=GRAPH_CONFIG, id="scalp-price")],
-                             id="scalp-price-card", className="sc-card sc-underlying"),
-                    # Carte v2 (Lightweight Charts) : masquée par défaut (CSS),
-                    # affichée seulement sur /scalp EXACT (pas /scalpv1) — cf.
-                    # classe body.scalp-v2-page dans style.css, distincte de
-                    # body.scalp-page (partagée par les deux). /scalpv1 ne
-                    # charge jamais cette carte, garde scalp-price inchangée.
-                    html.Div([
-                        # Sélecteur de TF — demandé explicitement le
-                        # 2026-10-03 ("donner la possibilité de choisir sa
-                        # TF"). Change UNIQUEMENT l'affichage ; le bandeau
-                        # (scalp_inputs_swing) reste fixé à bar_volume=60 en
-                        # interne, quel que soit le choix ici.
-                        dcc.Dropdown(id="scalp-chart-tf", className="sc-tf-dd",
-                                    clearable=False, searchable=False,
-                                    options=CHART_TF_OPTIONS, value=CHART_TF_DEFAULT),
-                        # Outils de dessin — moteur extrait d'OpenCharts (MIT,
-                        # github.com/dylanpersonguy/OpenCharts) sous forme de
-                        # primitive Lightweight Charts, compilé en bundle vendu
-                        # dans gex/assets/gex-drawing-tools.js (cf.
-                        # tools/drawing-tools-src/). Tracés persistés en
-                        # localStorage par symbole, pas de dialogue de style
-                        # pour l'instant (couleur/épaisseur par défaut
-                        # seulement) — amélioration possible plus tard.
+                ], className="sc-fixed-top"),
+                # Widgets déplaçables/redimensionnables (GridStack.js, cf.
+                # commentaire plus haut sur sc-controls). `data-gs-id`
+                # seulement ici (Dash n'autorise en HTML que les attributs
+                # data-*/aria-*, pas gs-x/y/w/h bruts — GridStack, lui, ne
+                # lit QUE gs-x/y/w/h sans préfixe) : le clientside_callback
+                # d'init copie data-gs-id -> gs-id puis pose les positions
+                # par défaut via grid.load(), pas des attributs HTML.
+                html.Div([
+                    html.Div([html.Div([
+                        html.Span("⠿ Niveaux", className="sc-widget-handle"),
+                        html.Div([html.Div("Niveaux · distance au spot (pts)", className="sc-title"),
+                                  html.Div(id="scalp-ladder")], className="sc-card sc-ladder"),
+                    ], className="grid-stack-item-content"),
+                    ], className="grid-stack-item",
+                       **{"data-gs-id": "ladder"}),
+                    html.Div([html.Div([
+                        html.Span("⠿ Graphique", className="sc-widget-handle"),
+                        html.Div([dcc.Graph(config=GRAPH_CONFIG, id="scalp-price")],
+                                 id="scalp-price-card", className="sc-card sc-underlying"),
+                        # Carte v2 (Lightweight Charts) : masquée par défaut
+                        # (CSS), affichée seulement sur /scalp EXACT (pas
+                        # /scalpv1) — cf. classe body.scalp-v2-page dans
+                        # style.css, distincte de body.scalp-page (partagée
+                        # par les deux). /scalpv1 ne charge jamais cette
+                        # carte, garde scalp-price inchangée.
                         html.Div([
-                            html.Button("⬚", title="Sélection (Échap)", id="scalp-draw-tool-none",
-                                        className="sc-draw-btn sc-draw-active", **{"data-tool": "none"}),
-                            html.Button("／", title="Tendance (Alt+T)", className="sc-draw-btn",
-                                        **{"data-tool": "trendline"}),
-                            html.Button("—", title="Horizontale (Alt+H)", className="sc-draw-btn",
-                                        **{"data-tool": "horizontal"}),
-                            html.Button("¦", title="Verticale", className="sc-draw-btn",
-                                        **{"data-tool": "vertical"}),
-                            html.Button("↗", title="Rayon", className="sc-draw-btn",
-                                        **{"data-tool": "ray"}),
-                            html.Button("⇉", title="Canal parallèle", className="sc-draw-btn",
-                                        **{"data-tool": "channel"}),
-                            html.Button("▭", title="Rectangle (Alt+R)", className="sc-draw-btn",
-                                        **{"data-tool": "rectangle"}),
-                            html.Button("◯", title="Ellipse", className="sc-draw-btn",
-                                        **{"data-tool": "ellipse"}),
-                            html.Button("Fib", title="Fibonacci (Alt+F)", className="sc-draw-btn",
-                                        **{"data-tool": "fibonacci"}),
-                            html.Button("T", title="Texte", className="sc-draw-btn",
-                                        **{"data-tool": "text"}),
-                            html.Button("🧲", title="Aimant (accroche OHLC)", id="scalp-draw-magnet",
-                                        className="sc-draw-btn"),
-                            html.Button("↶", title="Annuler (Ctrl+Z)", id="scalp-draw-undo",
-                                        className="sc-draw-btn"),
-                            html.Button("↷", title="Rétablir (Ctrl+Y)", id="scalp-draw-redo",
-                                        className="sc-draw-btn"),
-                            html.Button("🗑", title="Tout effacer", id="scalp-draw-clear",
-                                        className="sc-draw-btn"),
-                        ], id="scalp-draw-toolbar", className="sc-draw-toolbar"),
-                        html.Div(id="scalp-lw-chart", className="sc-lw-chart"),
-                    ], id="scalp-lw-card", className="sc-card sc-underlying"),
-                    dcc.Store(id="scalp-lw-data"),
-                    html.Div([
-                        html.Div([html.Span("Gros prints", className="sc-title"),
-                                  dcc.RadioItems(id="scalp-min", className="seg", inline=True,
-                                                 value=5,
-                                                 options=[{"label": "Tout", "value": 0},
-                                                          {"label": "≥ 5", "value": 5},
-                                                          {"label": "≥ 20", "value": 20}])],
-                                 className="sc-cardhead"),
-                        html.Div(id="scalp-prints"),
-                    ], className="sc-card sc-prints"),
-                    html.Div([
-                        html.Div([html.Span("Couverture des dealers", className="sc-title"),
-                                  dcc.RadioItems(id="scalp-window", className="seg", inline=True,
-                                                 value=-1,
-                                                 options=[{"label": "● Live 5 min", "value": -1},
-                                                          {"label": "15 min", "value": 15},
-                                                          {"label": "30 min", "value": 30}])],
-                                 className="sc-cardhead"),
-                        html.Div([dcc.Graph(config=GRAPH_CONFIG, id="scalp-hedge")],
-                                 id="scalp-hedge-card"),
-                        # Carte v2 (Lightweight Charts, LineSeries) : même
-                        # bascule Plotly/LW que scalp-price/scalp-lw-card —
-                        # /scalpv1 garde scalp-hedge (Plotly) inchangée.
-                        html.Div([html.Div(id="scalp-lw-hedge", className="sc-lw-chart")],
-                                 id="scalp-lw-hedge-card"),
-                        dcc.Store(id="scalp-lw-hedge-data"),
-                    ], className="sc-card sc-hedge"),
-                ], className="sc-grid"),
+                            # Sélecteur de TF — demandé explicitement le
+                            # 2026-10-03 ("donner la possibilité de choisir sa
+                            # TF"). Change UNIQUEMENT l'affichage ; le bandeau
+                            # (scalp_inputs_swing) reste fixé à bar_volume=60
+                            # en interne, quel que soit le choix ici.
+                            dcc.Dropdown(id="scalp-chart-tf", className="sc-tf-dd",
+                                        clearable=False, searchable=False,
+                                        options=CHART_TF_OPTIONS, value=CHART_TF_DEFAULT),
+                            # Outils de dessin — moteur extrait d'OpenCharts
+                            # (MIT, github.com/dylanpersonguy/OpenCharts) sous
+                            # forme de primitive Lightweight Charts, compilé
+                            # en bundle vendu dans
+                            # gex/assets/gex-drawing-tools.js (cf.
+                            # tools/drawing-tools-src/). Tracés persistés en
+                            # localStorage par symbole, pas de dialogue de
+                            # style pour l'instant (couleur/épaisseur par
+                            # défaut seulement) — amélioration possible plus
+                            # tard.
+                            html.Div([
+                                html.Button("⬚", title="Sélection (Échap)", id="scalp-draw-tool-none",
+                                            className="sc-draw-btn sc-draw-active", **{"data-tool": "none"}),
+                                html.Button("／", title="Tendance (Alt+T)", className="sc-draw-btn",
+                                            **{"data-tool": "trendline"}),
+                                html.Button("—", title="Horizontale (Alt+H)", className="sc-draw-btn",
+                                            **{"data-tool": "horizontal"}),
+                                html.Button("¦", title="Verticale", className="sc-draw-btn",
+                                            **{"data-tool": "vertical"}),
+                                html.Button("↗", title="Rayon", className="sc-draw-btn",
+                                            **{"data-tool": "ray"}),
+                                html.Button("⇉", title="Canal parallèle", className="sc-draw-btn",
+                                            **{"data-tool": "channel"}),
+                                html.Button("▭", title="Rectangle (Alt+R)", className="sc-draw-btn",
+                                            **{"data-tool": "rectangle"}),
+                                html.Button("◯", title="Ellipse", className="sc-draw-btn",
+                                            **{"data-tool": "ellipse"}),
+                                html.Button("Fib", title="Fibonacci (Alt+F)", className="sc-draw-btn",
+                                            **{"data-tool": "fibonacci"}),
+                                html.Button("T", title="Texte", className="sc-draw-btn",
+                                            **{"data-tool": "text"}),
+                                html.Button("🧲", title="Aimant (accroche OHLC)", id="scalp-draw-magnet",
+                                            className="sc-draw-btn"),
+                                html.Button("↶", title="Annuler (Ctrl+Z)", id="scalp-draw-undo",
+                                            className="sc-draw-btn"),
+                                html.Button("↷", title="Rétablir (Ctrl+Y)", id="scalp-draw-redo",
+                                            className="sc-draw-btn"),
+                                html.Button("🗑", title="Tout effacer", id="scalp-draw-clear",
+                                            className="sc-draw-btn"),
+                            ], id="scalp-draw-toolbar", className="sc-draw-toolbar"),
+                            html.Div(id="scalp-lw-chart", className="sc-lw-chart"),
+                        ], id="scalp-lw-card", className="sc-card sc-underlying"),
+                        dcc.Store(id="scalp-lw-data"),
+                    ], className="grid-stack-item-content"),
+                    ], className="grid-stack-item",
+                       **{"data-gs-id": "chart"}),
+                    html.Div([html.Div([
+                        html.Span("⠿ Gros prints", className="sc-widget-handle"),
+                        html.Div([
+                            html.Div([html.Span("Gros prints", className="sc-title"),
+                                      dcc.RadioItems(id="scalp-min", className="seg", inline=True,
+                                                     value=5,
+                                                     options=[{"label": "Tout", "value": 0},
+                                                              {"label": "≥ 5", "value": 5},
+                                                              {"label": "≥ 20", "value": 20}])],
+                                     className="sc-cardhead"),
+                            html.Div(id="scalp-prints"),
+                        ], className="sc-card sc-prints"),
+                    ], className="grid-stack-item-content"),
+                    ], className="grid-stack-item",
+                       **{"data-gs-id": "prints"}),
+                    html.Div([html.Div([
+                        html.Span("⠿ Couverture des dealers", className="sc-widget-handle"),
+                        html.Div([
+                            html.Div([html.Span("Couverture des dealers", className="sc-title"),
+                                      dcc.RadioItems(id="scalp-window", className="seg", inline=True,
+                                                     value=-1,
+                                                     options=[{"label": "● Live 5 min", "value": -1},
+                                                              {"label": "15 min", "value": 15},
+                                                              {"label": "30 min", "value": 30}])],
+                                     className="sc-cardhead"),
+                            html.Div([dcc.Graph(config=GRAPH_CONFIG, id="scalp-hedge")],
+                                     id="scalp-hedge-card"),
+                            # Carte v2 (Lightweight Charts, LineSeries) :
+                            # même bascule Plotly/LW que
+                            # scalp-price/scalp-lw-card — /scalpv1 garde
+                            # scalp-hedge (Plotly) inchangée.
+                            html.Div([html.Div(id="scalp-lw-hedge", className="sc-lw-chart")],
+                                     id="scalp-lw-hedge-card"),
+                            dcc.Store(id="scalp-lw-hedge-data"),
+                        ], className="sc-card sc-hedge"),
+                    ], className="grid-stack-item-content"),
+                    ], className="grid-stack-item",
+                       **{"data-gs-id": "hedge"}),
+                ], className="sc-gridstack grid-stack"),
             ]),
 
             html.Div(id="pane-profile", children=[
@@ -2707,7 +2730,7 @@ def create_app() -> Dash:
             dcc.Store(id="lang-boot", data=0),
             dcc.Store(id="sc-layout-boot", data=0),
             dcc.Store(id="sc-ergo-boot", data=0),
-            dcc.Store(id="sc-order-boot", data=0),
+            dcc.Store(id="sc-grid-boot", data=0),
             html.Div(id="footer", className="footer"),
         ], className="page"),
         dcc.Store(id="native-alt"),  # "NDX" ou "SPY" : cible du bouton OK
@@ -3229,7 +3252,10 @@ def create_app() -> Dash:
     )
     # Bascule au clic + persiste (localStorage TOUJOURS, serveur SI identifié)
     # — lit l'état actuel sur <body> plutôt que de suivre n_clicks
-    # (pair/impair), robuste à un rechargement entre-temps.
+    # (pair/impair), robuste à un rechargement entre-temps. Répercute aussi
+    # sur GridStack (colonne unique) si la grille existe déjà — sinon
+    # grid-init la lira elle-même sur <body> à sa propre création (ordre des
+    # deux callbacks non garanti au chargement, cf. commentaire plus bas).
     app.clientside_callback(
         """
         function(n_clicks) {
@@ -3237,6 +3263,7 @@ def create_app() -> Dash:
             const vertical = document.body.classList.toggle('sc-layout-vertical');
             const value = vertical ? 'vertical' : 'horizontal';
             window.localStorage.setItem('gex-scalp-layout', value);
+            if (window._gexGrid) window._gexGrid.column(vertical ? 1 : 12);
             if (window._gexUserEmail) {
                 fetch('/api/v1/prefs', { method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -3274,18 +3301,47 @@ def create_app() -> Dash:
         Output("sc-ergo-options", "value"),
         Input("sc-ergo-boot", "data"),
     )
-    # ...applique les classes body correspondantes + persiste à chaque
-    # changement (coché ou décoché) — une seule source de vérité (la valeur
-    # du Checklist), pas de divergence possible entre le DOM et le stockage.
+    # ...applique les classes body + masque/affiche les 4 WIDGETS GridStack
+    # concernés via grid.removeWidget()/addWidget() (jamais display:none sur
+    # un .grid-stack-item — ça laisserait un trou dans la grille, cf.
+    # commentaire sur .sc-gridstack dans style.css) + persiste à chaque
+    # changement. `window._gexGridVisible`/`window._gexHiddenWidgets` :
+    # état partagé avec grid-init (plus bas) pour les deux ordres de
+    # chargement possibles (grille créée avant ou après ce callback).
     app.clientside_callback(
         """
         function(values) {
             values = values || [];
-            document.body.classList.toggle('sc-hide-ladder', values.includes('hide_ladder'));
-            document.body.classList.toggle('sc-hide-price-chart', values.includes('hide_price_chart'));
-            document.body.classList.toggle('sc-hide-hedge-chart', values.includes('hide_hedge_chart'));
-            document.body.classList.toggle('sc-hide-tape', values.includes('hide_tape'));
-            document.body.classList.toggle('sc-keywords-only', values.includes('keywords_only'));
+            const hideFlag = {
+                ladder: values.includes('hide_ladder'),
+                chart: values.includes('hide_price_chart'),
+                hedge: values.includes('hide_hedge_chart'),
+                prints: values.includes('hide_tape'),
+            };
+            const keywordsOnly = values.includes('keywords_only');
+            document.body.classList.toggle('sc-keywords-only', keywordsOnly);
+            const hiddenIds = Object.keys(hideFlag).filter(
+                id => hideFlag[id] || keywordsOnly);
+            window._gexHiddenWidgets = hiddenIds;
+            const grid = window._gexGrid;
+            if (grid) {
+                window._gexGridVisible = window._gexGridVisible
+                    || { ladder: true, chart: true, hedge: true, prints: true };
+                Object.keys(hideFlag).forEach(function(id) {
+                    const el = window._gexGridWidgets && window._gexGridWidgets[id];
+                    if (!el) return;
+                    const shouldShow = !(hideFlag[id] || keywordsOnly);
+                    if (shouldShow !== window._gexGridVisible[id]) {
+                        // GridStack v11+ : addWidget() ne prend plus un
+                        // HTMLElement déjà existant (il crée un NOUVEL
+                        // élément) — makeWidget() re-rattache l'élément
+                        // déjà présent dans le DOM, exactement notre cas
+                        // (bug vu en direct le 2026-10-04, warning console).
+                        if (shouldShow) grid.makeWidget(el); else grid.removeWidget(el, false);
+                        window._gexGridVisible[id] = shouldShow;
+                    }
+                });
+            }
             window.localStorage.setItem('gex-scalp-ergo', JSON.stringify(values));
             if (window._gexUserEmail) {
                 fetch('/api/v1/prefs', { method: 'POST',
@@ -3299,59 +3355,86 @@ def create_app() -> Dash:
         Input("sc-ergo-options", "value"),
     )
 
-    # Ordre d'affichage /scalp v2 (CSS `order`, pas de drag-and-drop — cf.
-    # commentaire sur sc-order-controls dans le layout). Restaure au
-    # chargement (serveur si identifié, sinon localStorage)...
+    # Widgets déplaçables/redimensionnables (GridStack.js, 2026-10-04) —
+    # remplace les anciens dropdowns "Ordre" 1-4. Crée la grille UNE fois
+    # (window._gexGrid, persiste entre les cycles comme window._gexLwChart),
+    # applique la disposition sauvegardée (serveur si identifié, sinon
+    # localStorage), puis persiste à chaque glisser/redimensionner
+    # (évènement 'change' de GridStack, pas en continu pendant le geste).
     app.clientside_callback(
         """
         async function(_) {
+            if (!window.GridStack) return window.dash_clientside.no_update;
+            const el = document.querySelector('.sc-gridstack');
+            if (!el || window._gexGrid) return window.dash_clientside.no_update;
+            // GridStack lit gs-x/y/w/h SANS préfixe sur chaque
+            // .grid-stack-item au moment de l'init — Dash, côté Python,
+            // n'autorise que data-gs-id (data-* seulement) sur ces
+            // conteneurs, d'où la traduction ici + la position par défaut
+            // (première visite, avant toute disposition sauvegardée).
+            const DEFAULTS = {
+                ladder: { x: 0, y: 0, w: 4, h: 6 }, chart: { x: 4, y: 0, w: 8, h: 6 },
+                prints: { x: 0, y: 6, w: 4, h: 5 }, hedge: { x: 4, y: 6, w: 8, h: 5 },
+            };
+            el.querySelectorAll('.grid-stack-item').forEach(function(item) {
+                const id = item.getAttribute('data-gs-id');
+                item.setAttribute('gs-id', id);
+                const d = DEFAULTS[id];
+                if (d) {
+                    item.setAttribute('gs-x', d.x); item.setAttribute('gs-y', d.y);
+                    item.setAttribute('gs-w', d.w); item.setAttribute('gs-h', d.h);
+                }
+            });
+            const vertical = document.body.classList.contains('sc-layout-vertical');
+            const grid = GridStack.init({
+                cellHeight: 70, margin: 8, float: true,
+                handle: '.sc-widget-handle', oneColumnSize: 900,
+                column: vertical ? 1 : 12,
+            }, el);
+            window._gexGrid = grid;
+            window._gexGridWidgets = {};
+            el.querySelectorAll('.grid-stack-item').forEach(function(item) {
+                window._gexGridWidgets[item.getAttribute('gs-id')] = item;
+            });
+            // Masquage déjà demandé (cases à cocher) avant que la grille existe ?
+            window._gexGridVisible = window._gexGridVisible
+                || { ladder: true, chart: true, hedge: true, prints: true };
+            (window._gexHiddenWidgets || []).forEach(function(id) {
+                const w = window._gexGridWidgets[id];
+                if (w && window._gexGridVisible[id]) {
+                    grid.removeWidget(w, false);
+                    window._gexGridVisible[id] = false;
+                }
+            });
+            // Disposition sauvegardée (positions/tailles des 4 widgets).
             window._gexPrefsReady = window._gexPrefsReady || fetch('/api/v1/prefs')
                 .then(r => r.json())
                 .then(d => { window._gexUserEmail = d.email; return d; })
                 .catch(() => ({ email: null, prefs: {} }));
             const data = await window._gexPrefsReady;
-            let saved = data.prefs['scalp-order'];
-            if (saved == null) {
-                try { saved = JSON.parse(window.localStorage.getItem('gex-scalp-order') || '{}'); }
-                catch (e) { saved = {}; }
+            let layout = data.prefs['scalp-grid'];
+            if (layout == null) {
+                try { layout = JSON.parse(window.localStorage.getItem('gex-scalp-grid') || 'null'); }
+                catch (e) { layout = null; }
             } else {
-                window.localStorage.setItem('gex-scalp-order', JSON.stringify(saved));
+                window.localStorage.setItem('gex-scalp-grid', JSON.stringify(layout));
             }
-            const d = {ladder: 2, chart: 1, hedge: 3, prints: 4};
-            return [saved.ladder || d.ladder, saved.chart || d.chart,
-                    saved.hedge || d.hedge, saved.prints || d.prints];
-        }
-        """,
-        [Output("sc-order-ladder", "value"), Output("sc-order-chart", "value"),
-         Output("sc-order-hedge", "value"), Output("sc-order-prints", "value")],
-        Input("sc-order-boot", "data"),
-    )
-    # ...applique `order` en style inline (ladder/hedge/prints : un seul
-    # élément ; chart : les DEUX cartes scalp-price-card/scalp-lw-card, seule
-    # celle visible compte puisque l'autre est display:none) + persiste
-    # (localStorage TOUJOURS, serveur SI identifié).
-    app.clientside_callback(
-        """
-        function(ladder, chart, hedge, prints) {
-            const set = (sel, v) => document.querySelectorAll(sel).forEach(
-                el => { el.style.order = v; });
-            set('.sc-ladder', ladder);
-            set('#scalp-price-card, #scalp-lw-card', chart);
-            set('.sc-hedge', hedge);
-            set('.sc-prints', prints);
-            const value = {ladder: ladder, chart: chart, hedge: hedge, prints: prints};
-            window.localStorage.setItem('gex-scalp-order', JSON.stringify(value));
-            if (window._gexUserEmail) {
-                fetch('/api/v1/prefs', { method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ key: 'scalp-order', value: value }) }).catch(() => {});
-            }
+            if (layout) grid.load(layout);
+            grid.on('change', function() {
+                const saved = grid.save(false);
+                window.localStorage.setItem('gex-scalp-grid', JSON.stringify(saved));
+                if (window._gexUserEmail) {
+                    fetch('/api/v1/prefs', { method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ key: 'scalp-grid', value: saved }) }).catch(function() {});
+                }
+            });
             return window.dash_clientside.no_update;
         }
         """,
-        Output("sc-order-ladder", "title"),
-        [Input("sc-order-ladder", "value"), Input("sc-order-chart", "value"),
-         Input("sc-order-hedge", "value"), Input("sc-order-prints", "value")],
+        Output("sc-layout-toggle", "title", allow_duplicate=True),
+        Input("sc-grid-boot", "data"),
+        prevent_initial_call="initial_duplicate",
     )
 
     # Ticker de prix /scalp : REÇOIT, AFFICHE, rien d'autre ne se met à jour, et
