@@ -95,6 +95,21 @@ def to_local(ts: pd.Series) -> pd.Series:
     )
 
 
+# Diviseur pour convertir un Series datetime64 tz-aware en epoch SECONDES via
+# `.astype("int64")` — la résolution native (ns/us/ms/s) dépend de la version
+# de pandas (ex. pandas 3.x choisit souvent "us", pas "ns"), donc un `// 10**9`
+# en dur suppose à tort des nanosecondes et divise l'epoch par 1000 en trop
+# dès que la résolution réelle est "us" (bug vérifié le 2026-10-04 : bougies
+# datées 21/01/1970 sur /scalp v2, cf. audit-bug-epoch-microsecondes mémoire).
+_EPOCH_DIVISOR = {"s": 1, "ms": 10**3, "us": 10**6, "ns": 10**9}
+
+
+def _epoch_seconds(ts: pd.Series) -> pd.Series:
+    """Series datetime64 tz-aware (ou naïve) -> epoch UTC entier en secondes,
+    quelle que soit la résolution native de la Series."""
+    return ts.astype("int64") // _EPOCH_DIVISOR[ts.dt.unit]
+
+
 # --- Titres cliquables vers le guide -------------------------------------
 # Chaque titre de graphique renvoie à l'ancre correspondante du guide sur
 # GitHub. Plotly rend un sous-ensemble de HTML dans les titres, dont <a> :
@@ -983,7 +998,7 @@ def scalp_v2_hedge_data(symbol: str, window_min: int, day: str) -> dict:
     # _hedge_series) — reconverti en epoch UTC pour Lightweight Charts, qui
     # affiche déjà dans le fuseau du NAVIGATEUR (même logique que les
     # bougies de scalp_v2_chart_data).
-    epoch = (pd.Series(ts).dt.tz_localize(LOCAL_TZ).astype("int64") // 10**9).to_numpy()
+    epoch = _epoch_seconds(pd.Series(ts).dt.tz_localize(LOCAL_TZ)).to_numpy()
     spec = (("Calls achetés", "#3987e5"), ("Puts vendus", "#8dbbf0"),
             ("Puts achetés", "#e66767"), ("Calls vendus", "#f0a3a3"))
     series = [{"name": name, "color": color,
@@ -1707,8 +1722,7 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
         bars = bars.tail(max(n_bars, 1))
         if bars.empty:
             return empty
-        epoch = (pd.Series(to_local(bars["timestamp"])).dt.tz_localize(LOCAL_TZ)
-                .astype("int64") // 10**9)
+        epoch = _epoch_seconds(pd.Series(to_local(bars["timestamp"])).dt.tz_localize(LOCAL_TZ))
         candles = [{"time": int(e), "open": float(r.open), "high": float(r.high),
                     "low": float(r.low), "close": float(r.close)}
                   for e, r in zip(epoch, bars.itertuples())]
