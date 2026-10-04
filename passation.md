@@ -1,63 +1,54 @@
-# Passation — 2026-10-04 soir → 2026-10-05 nuit, avant compactage
+# Passation — 2026-10-05 nuit (suite directe de la session 2026-10-04→05)
 
-**État au moment de l'écriture : dashboard UP mais fragile.** Plusieurs correctifs appliqués ce soir, mais **une fuite de connexions/threads reste active** — confirmée déclenchée par un usage normal de l'utilisateur (pas seulement mes propres tests). **Un audit de code est nécessaire en priorité à la reprise**, avant tout nouveau chantier fonctionnel.
-
-Marché fermé (week-end) pendant toute la session — rien de ce qui suit n'a été revu en séance réelle.
+**État au moment de l'écriture : dashboard UP, fuite de connexions auditée et un vrai correctif trouvé + testé sous stress (pas seulement théorique).** Marché encore calme (dimanche soir/nuit, futures NQ/ES en séance continue mais faible volume) — **rien de ce qui suit n'a été revu sous charge réelle de séance US active**. Tout commité et poussé (`7a8a56a`).
 
 ## À lire en premier
 
-1. **Ce fichier** (vue d'orientation de cette session, très longue et dense).
-2. `C:\Users\sk8bo\.claude\projects\D--Gex\memory\roadmap-scalp-v2.md` pour le contexte de fond (sessions précédentes).
-3. Section "Fuite de threads — PAS RÉSOLUE" ci-dessous avant de toucher au serveur.
+1. **Ce fichier.**
+2. `C:\Users\sk8bo\.claude\projects\D--Gex\memory\roadmap-scalp-v2.md` pour le contexte de fond.
+3. La passation précédente (2026-10-04→05, dans l'historique git si besoin) pour le détail des 5 pannes serveur de la veille et des correctifs qui avaient déjà été posés (yield hors try/except, heartbeat SSE, channel_timeout, threads/connection_limit waitress) — tous toujours en place, pas reconduits ici en détail.
 
-## ⚠️ Priorité absolue à la reprise : fuite de connexions/threads non résolue
+## Fuite de connexions : cause supplémentaire trouvée, corrigée, testée sous stress
 
-**5 pannes serveur ce soir**, malgré plusieurs correctifs. La dernière est survenue sur un **rechargement de page normal par l'utilisateur** (pas mes tests) — preuve qu'il reste une vraie fuite active, pas juste "trop de trafic de test".
+En reprenant l'audit là où la veille s'était arrêtée (grep `while True`, vérif `gex/scheduler.py`, gestion JS des `EventSource`), tout était déjà correct SAUF un point jamais couvert par les correctifs de la veille :
 
-**Correctifs déjà appliqués** (tous commités, tous utiles mais **insuffisants seuls**) :
-- `gex/api.py::_last_trade_stream` et `gex/app.py::_scalp_indicators_stream` : un **vrai bug** trouvé et corrigé — le `yield` (écriture) était à l'intérieur du `try/except` qui protège le calcul, donc une erreur d'écriture (client déconnecté) était avalée silencieusement et la boucle `while True` ne s'arrêtait **jamais**. Corrigé : le yield est sorti du try/except.
-- Heartbeat SSE toutes les ~15s sur les deux flux (force une écriture régulière, détecte les connexions mortes plus vite).
-- `channel_timeout=90` ajouté à waitress (ferme un canal sans octet échangé depuis ce délai).
-- `threads` waitress 48→128.
-- `connection_limit` waitress 100→300 (paramètre **séparé** de `threads`, jamais touché avant ce soir — c'est lui qui donnait "connection limit reached").
-- Intervalle du moteur planifié `_refresh_scalp_indicators` (gex/app.py) 8s→20s — mesuré en régime stable à 0,2-1,2s/cycle (large marge), mais le premier cycle après chaque redémarrage prend 14-15s (caches froids), et sous charge réelle (contention GIL) ce cycle peut déborder bien au-delà, provoquant des dépassements en cascade (confirmé dans les logs : `apscheduler ... skipped: maximum number of running instances reached` en boucle).
+**Aucun des deux flux `EventSource`** (`_last_trade_stream` côté ticker de prix, `_scalp_indicators_stream` côté indicateurs) **n'avait de `onerror`**. Par spec, un `EventSource` dont la connexion se ferme pour n'importe quelle raison (timeout, erreur réseau, contention serveur) **se reconnecte automatiquement côté navigateur, sans aucune limite de tentatives**, sauf si le JS appelle `.close()` lui-même. Hypothèse retenue comme cause plausible de la fuite résiduelle de la veille (88 ESTABLISHED + 48 CloseWait pour un usage léger) : une coupure sous contention → reconnexion automatique non bornée → nouvelle contention → nouvelle coupure, boucle qui s'auto-entretient.
 
-**Ce qui N'EST PAS expliqué/résolu** : la dernière panne (après tous ces correctifs) montrait 88 connexions ESTABLISHED + 48 CloseWait pour un usage très léger (l'utilisateur + moi). **Il reste une source de fuite non identifiée.** Pistes à auditer en priorité :
-- Tout autre endpoint avec un pattern `while True` / générateur long-lived (grep `while True` dans gex/*.py) — vérifier CHAQUE écriture est bien hors d'un try/except trop large, comme le bug déjà trouvé.
-- Les callbacks Dash avec `dcc.Interval` très fréquents (`tape-tick`) — combien de requêtes par seconde par onglet réellement, est-ce que `_dash-update-component` lui-même peut rester bloqué/non libéré dans certains cas (le fameux `IndexError: list index out of range` dans `dash._prepare_grouping`, vu en boucle ce soir — artefact documenté comme transitoire, mais **jamais vérifié si ce n'est PAS aussi une source de thread qui ne se libère pas**).
-- Les 2 flux SSE par onglet (ticker + indicateurs) × plusieurs symboles/onglets réels : combien un utilisateur normal en ouvre-t-il en pratique (changement de symbole NQ/ES = nouvel EventSource sans fermer l'ancien côté client ?) — vérifier le JS qui gère `EventSource` (recherché `new EventSource` dans gex/app.py) ferme proprement l'ancien avant d'en ouvrir un nouveau.
-- `gex/scheduler.py` (le scheduler CRITIQUE, séparé de celui des indicateurs scalp) — jamais audité ce soir, pourrait avoir son propre pattern à risque.
+**Corrigé** (`gex/app.py`, les deux `clientside_callback` d'ouverture de flux, ~ligne 4126 et 4165) : `onerror` ferme désormais explicitement le flux et reconnecte à **délai croissant borné (3s → 30s max)**, avec un token qui invalide la reconnexion si le flux a été remplacé entre-temps (changement de symbole/page).
 
-**Migration gevent** (la vraie solution long-terme, cf. plus bas) reste la correction structurelle recommandée, mais un blocage réel a été trouvé (`gevent.monkey.patch_all()` par défaut bloque la vraie connexion `wss://` vers dxFeed) — `patch_all(thread=False)` contourne le blocage mais laisse une friction résiduelle (exceptions `LoopExit` du résolveur DNS gevent) pas assez éprouvée pour la prod. **Ne pas migrer sans une session dédiée avec plus de marge de test.**
+**Testé sous stress réel par l'utilisateur** : une trentaine de rechargements de page consécutifs sans aucune panne. C'est la première fois cette nuit-là qu'un vrai test de stress (pas juste une mesure statique) passe sans incident. Reste à confirmer sur une durée plus longue et sous charge de séance US active — un test de 30 reloads en quelques minutes ne couvre pas plusieurs heures d'usage réel.
 
-**Ne pas committer de nouveau correctif serveur sans d'abord auditer** — on a déjà patché 5 symptômes différents ce soir (threads, connection_limit, channel_timeout, heartbeat, intervalle scheduler) sans trouver la cause racine complète.
+## tape-tick : 1000ms → 500ms (250ms essayé et écarté)
 
-## Autre bug repéré, PAS corrigé
+Demande explicite de l'utilisateur : rendre le graphique /scalp plus réactif. `tape-tick` (`dcc.Interval` qui pilote la quasi-totalité des rafraîchissements de /scalp) avait déjà été testé et écarté à 250ms le 2026-10-01, mais pour deux raisons précises, **toutes deux couvertes par des caches ajoutés depuis** (`_load_prices_cached` 2s, `SCALP_CACHE_S`/`SCALP_HEAVY_CACHE_S` 10s) et par la migration vers waitress multi-thread (le blocage d'origine était spécifique au serveur de dev Werkzeug, mono-thread).
 
-**Chevauchement de texte dans le panneau "Niveaux" en vue mobile** (`/scalp`, viewport ≤375px) — le texte des niveaux (ex. "30,500" et "+0.5 Bn") se superpose verticalement. Repéré en toute fin de session, pas encore investigué. Probablement un problème de `line-height`/hauteur de ligne fixe trop petite pour le texte qui wrap sur plusieurs lignes à cette largeur.
+- **250ms réessayé** : latence par requête individuelle bonne (11-37ms), **mais CPU mesuré à ~194% d'un cœur en continu pour un usage léger** — le coût fixe par requête (routage Flask, regroupement Dash, sérialisation JSON) × 6 Outputs partagés sur `tape-tick` × 4Hz s'additionne même quand chaque calcul individuel est un cache-hit.
+- **Retombé à 500ms** : ~80% CPU moyen mesuré juste après redémarrage (à prendre avec prudence, les toutes premières secondes d'un process sont dominées par les tâches de démarrage, donc pas une mesure stabilisée).
+- Ne pas redescendre à 250ms sans alléger le coût fixe par cycle d'abord (piste proposée mais pas creusée : fusionner les callbacks qui partagent déjà `tape-tick` en un seul, pour ne payer qu'une seule fois le routage/regroupement Dash par cycle au lieu de 5).
 
-## Recherche Hedge Pressure (toute la soirée, chantier de fond)
+## Bug du graphique /scalp v2 : bougie figée — trouvé et corrigé (en 2 temps)
 
-Exploration longue, méthodique, sur 5 jours de données disponibles (28/09→02/10, limite dure : les prints OPRA bruts ne sont persistés que depuis le 27/09). **Verdict global : rien d'exploitable comme signal directionnel/de fading**, sauf UN signal gardé :
+Après le passage à 500ms, l'utilisateur a signalé que la bougie en cours restait figée plusieurs secondes, "comme si ça attendait la clôture pour la dessiner". Deux bugs distincts, corrigés dans l'ordre :
 
-- **`gex/expansion_regime.py`** (module de recherche isolé, **non branché**, testé 15/15) : `EXPANSION_REGIME = |price_z_30s|>2 ET |flow_z_0dte_30s|>2` (z-scores strictement causaux, lookback 60 fenêtres). Validé comme **détecteur de régime d'expansion/volatilité** (29,7% vs 23,4% baseline de retracement ≥10pts à 30s, IC qui ne se chevauchent pas, cohérent sur 4/5 jours) — mais **PAS un prédicteur directionnel** (testé explicitement : aligné vs divergent ne discrimine rien).
-- Tout le reste testé et **invalidé** : signe/magnitude du gamma, niveau/pente du notionnel (5 résolutions), skew (niveau semblait prometteur puis s'est effondré au test prédictif en avant), réaccélération après repli, absence de retracement ≥3pts (dégénéré, 99,5% d'occurrence).
-- **`gex/hedge_pressure.py`** (module antérieur, lui aussi non branché, testé) : formules Γ·dS+Vanna·dσ+Charm·dt, convention de signe vérifiée par tests — reste disponible pour un futur backtest, pas de piste trouvée dessus cette nuit au-delà du signal A.
-- Détail complet des méthodologies, pièges évités (hindsight via `leg_len`, confusion continuation/retracement, biais de sélection par jour) dans l'historique de conversation — trop long pour ce fichier, redemander si besoin de le reconstruire.
+1. **Bougie live jamais injectée** : `scalp_v2_chart_data` (graphique Lightweight Charts, branche bougies-temps) ne lisait que les bougies déjà clôturées et écrites sur disque — contrairement à l'ancien graphique Plotly (`scalp_price_fig`, /scalpv1) qui complète avec `_update_live_bar` (bougie reconstruite à partir du spot vu par CE process). Porté le même mécanisme, + passage de `store.load_prices` brut à `_load_prices_cached` (nécessaire à 500ms pour éviter la collision disque avec l'écriture atomique du process capture, déjà documentée le 2026-10-01).
+2. **Bug introduit par le correctif n°1, trouvé et corrigé dans la foulée** : la condition qui décidait d'injecter la bougie live comparait `_session_day()` (convention séance CME, décalage +6h) à la date utilisée pour charger les bougies — alors que `store.append_prices`/`load_prices` range les fichiers par **date calendaire ET simple**. Entre 18h et minuit ET (donc pile l'heure à laquelle ça a été testé), `_session_day()` pointe déjà sur la date calendaire de DEMAIN → la condition était systématiquement fausse → bougie live jamais injectée, malgré le correctif n°1. Remplacé par une comparaison à la date calendaire ET directe (`datetime.now(ET).strftime("%Y-%m-%d")`), même convention que `scalp_price_fig`.
 
-**Prochaine étape suggérée par l'utilisateur, pas commencée** : chercher quelles infos disponibles à l'instant t prédisent qu'un retracement significatif NE va PAS apparaître — tenté sur une définition dégénérée (≥3pts), à refaire avec une vraie définition si repris.
+**Confirmé fonctionnel par l'utilisateur après le 2e correctif** ("Graphique en direct maintenant bien jouer").
 
-## Fonctionnalités livrées ce soir
+## Nettoyage au passage
 
-- **Bouton V1/V2 du bandeau** (`scalp-banner-version-toggle`) : bascule entre le calcul V1 (fenêtre fixe 5 min) et V2 (swing H/L 60V) du bandeau d'amplification. **Défaut changé à V1** ce soir (retour des testeurs : "V1 était la plus juste en live") — V2 reste dispo en opt-in.
-- **Swing H/L étendu à tous les TF du graphique** (pas seulement 60 vol) — même moteur `gex/bars.py::zigzag`, même seuil partout. Brièvement reverté puis restauré après avoir déterminé que la vraie cause des pannes était l'intervalle du scheduler, pas cette fonctionnalité (testée isolément sur les 6 TF temps, aucun blocage reproduit).
-- **Profil gamma par strike plafonné à la largeur d'un strike** (`gex/assets/gex-profile-overlay.js`) : la hauteur de zone est maintenant recalculée à chaque zoom/pan, plafonnée à l'écart réel (en pixels, au zoom courant) entre deux strikes voisins — fini le chevauchement au dézoom.
+`refresh_scalp` (callback qui alimente entre autres `scalp-price`/`scalp-hedge`, les figures Plotly) calculait ces deux figures sur **toutes** les pages, y compris `/scalp` v2 où elles sont masquées en CSS (remplacées par le graphique Lightweight Charts) — travail dupliqué pour rien à chaque cycle de `tape-tick`. `no_update` renvoyé pour ces deux Outputs quand `/scalp` v2 est actif. Effet mesuré ambigu sur le moment (le vrai problème était le bug de convention de date ci-dessus, pas la contention), mais le changement reste correct et sans régression — à garder.
+
+## Pas touché / pas résolu ce soir
+
+- **Chevauchement de texte mobile** (panneau "Niveaux", /scalp ≤375px) — toujours pas corrigé, signalé la veille.
+- **Migration gevent** — toujours en attente d'une session dédiée (cf. passation précédente pour le détail du blocage wss/dxFeed déjà identifié).
+- **Recherche Hedge Pressure** — rien repris ce soir, cf. passation précédente pour l'état complet (`gex/expansion_regime.py` validé comme détecteur de régime, pas de signal directionnel trouvé).
+- **`IndexError: list index out of range` dans `dash._prepare_grouping`** (`/_dash-update-component`) — toujours présente dans les logs, récurrente sur les rechargements de page. Confirmé cette nuit qu'elle n'est PAS amplifiée par `tape-tick` à 500ms (fréquence comparable à 1000ms) — semble liée aux rechargements/navigation, pas à la cadence. Toujours non investiguée en profondeur, toujours documentée comme transitoire/sans impact connu.
 
 ## Pour reprendre proprement
 
-1. **Auditer la fuite de connexions AVANT tout nouveau chantier** (cf. section dédiée ci-dessus) — c'est la priorité n°1, le site n'est pas fiable pour plusieurs utilisateurs tant que ce n'est pas trouvé.
-2. **Corriger le chevauchement de texte mobile** (panneau Niveaux) — mineur, mais rapide.
-3. **Procédure de redémarrage inchangée** : `Stop-ScheduledTask "GEX dashboard"` → tuer les PID `pythonw run.py` restants → `Start-ScheduledTask "GEX dashboard"` → attendre 20-25s → vérifier **un seul** listener sur le port 8050. Onglet FRAIS (jamais réutilisé à travers un redémarrage) pour vérifier la console — un onglet réutilisé accumule des `ERR_CONNECTION_RESET/REFUSED` résiduels qui ne sont PAS de vrais bugs (reconfirmé plusieurs fois ce soir).
-4. **`plotly.min.js` (4,7 Mo) est lent au premier accès après chaque redémarrage** (5-9s, cache disque froid) — explique un chargement qui semble figé juste après un restart ; devient rapide (<1s) une fois le cache OS chaud. Pas un bug à corriger, juste à savoir.
-5. **Migration gevent** : piste validée en partie (`patch_all(thread=False)` contourne le blocage wss/asyncio trouvé), mais pas assez testée — prévoir une session dédiée avec marge, pas un correctif de dernière minute.
-6. **`/scalpv1` n'a jamais régressé** à aucune étape de cette session — revérifié après chaque redémarrage, toujours intact.
+1. **Valider la fuite de connexions sur une vraie séance US active**, pas juste un test de 30 reloads en quelques minutes — le correctif `onerror` + reconnexion bornée est solide en théorie et a passé son premier test de stress, mais la nuit dernière aussi semblait calme avant de craquer sous usage normal.
+2. **Procédure de redémarrage inchangée** : `Stop-ScheduledTask "GEX dashboard"` → tuer les PID `pythonw run.py` restants (le process a un parent + un enfant, les deux nommés `run.py` — normal, pas un doublon de serveur) → `Start-ScheduledTask "GEX dashboard"` → attendre 20-25s → vérifier **un seul** listener sur le port 8050 (`Get-NetTCPConnection -LocalPort 8050 -State Listen` ; les entrées sur les IP Tailscale appartiennent à `tailscaled.exe`, pas au dashboard — ignorer).
+3. Si le graphique redevient lent après un changement futur : vérifier d'abord le CPU moyen du process (`Get-Process` + `StartTime`) avant de soupçonner une fuite de connexions — ce soir, deux symptômes qui se ressemblaient ("c'est lent") avaient deux causes totalement différentes (charge CPU réelle à 250ms vs bug fonctionnel de date à 500ms).
+4. `/scalpv1` non retouché ce soir, toujours sur l'ancien pipeline Plotly inchangé.
