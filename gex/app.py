@@ -2347,21 +2347,6 @@ def create_app() -> Dash:
     # dans le sous-arbre RENVOYÉ par refresh_scalp — absent de app.layout au
     # démarrage. Sans ceci, Dash refuse l'enregistrement du callback.
     app.config.suppress_callback_exceptions = True
-
-    # Diagnostic TEMPORAIRE (2026-10-04) : confirmer que Cloudflare Access
-    # (connexion par code à usage unique envoyé par email) injecte bien
-    # l'en-tête d'identité sur les requêtes qui passent par lui — piste 7 de
-    # la roadmap /scalp v2 (préférences par utilisateur). Ne loggue QUE si
-    # l'en-tête est présent (silencieux sur l'accès local direct, qui ne
-    # passe jamais par Cloudflare) — à retirer une fois confirmé/exploité,
-    # ou si jamais rien n'apparaît après un accès réel via le domaine public.
-    @app.server.before_request
-    def _log_cf_access_identity():
-        from flask import request
-        email = request.headers.get("Cf-Access-Authenticated-User-Email")
-        if email:
-            log.info("Cloudflare Access : identité reçue sur %s -> %s", request.path, email)
-
     enabled = targets()
 
     def ctl(label_id, control):
