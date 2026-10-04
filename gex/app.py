@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from dash import Dash, ctx, dcc, html
+from dash import Dash, ctx, dcc, html, no_update
 from dash.dependencies import Input, Output, State
 from dash.exceptions import PreventUpdate
 
@@ -2106,13 +2106,48 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
         # — ne doit JAMAIS dépendre de la présence de ticks bruts du jour.
         # Bug vérifié le 2026-10-03 : la version précédente retournait vide
         # dès que day_ticks était vide, même avec des bougies disponibles.
-        bars = store.load_prices(symbol, day)
+        # `_load_prices_cached` (pas `store.load_prices` brut) : à la cadence
+        # de tape-tick (500 ms), lire le disque sans cache collisionne avec
+        # l'écriture atomique du process capture (cf. commentaire sur
+        # `_load_prices_cached`).
+        #
+        # ⚠️ `store.append_prices`/`load_prices` range les bougies par DATE
+        # CALENDAIRE ET simple (`f"{ts:%Y-%m-%d}"`, cf. gex/store.py) — PAS la
+        # convention séance CME (+6h) de `day` (`_session_day`, utilisée plus
+        # bas pour les ticks). Entre 18h et minuit ET, `day` pointe déjà sur
+        # la date calendaire de DEMAIN, alors que les bougies du jour sont
+        # encore sous la date d'AUJOURD'HUI — comparer `used_day == day`
+        # échouait donc TOUJOURS sur cette plage horaire, désactivant la
+        # bougie live en permanence (bug introduit le 2026-10-05, repéré en
+        # direct quelques minutes après : "ça attend la clôture de bougie").
+        # `today_cal` (date calendaire ET directe, même convention que
+        # `scalp_price_fig`/le stockage) est la bonne référence ici.
+        today_cal = datetime.now(ET).strftime("%Y-%m-%d")
+        used_day = today_cal
+        bars = _load_prices_cached(symbol, today_cal)
         if bars.empty:
             days = store.price_days(symbol)
             if days:
-                bars = store.load_prices(symbol, days[-1])
+                used_day = days[-1]
+                bars = _load_prices_cached(symbol, used_day)
         if bars.empty:
             return empty
+        # Bougie(s) en cours (2026-10-05) : sans ça, ce graphique n'affiche
+        # jamais rien de moins de 1-2 min (le temps que flush_prices écrive la
+        # minute achevée) — repéré en direct ("on dirait qu'il attend la
+        # clôture de bougie pour la dessiner"). Même mécanisme que
+        # `scalp_price_fig` (Plotly, /scalpv1) : `_update_live_bar` tient à
+        # jour les quelques dernières minutes à partir du spot vu par CE
+        # process, on ne complète que ce qui manque après le dernier point du
+        # disque. Seulement si on affiche la séance EN COURS — un repli sur un
+        # jour passé (`used_day != today_cal`) n'a pas de bougie "live" à ajouter.
+        if used_day == today_cal:
+            live_bars = _update_live_bar(symbol, spot, datetime.now(ET))
+            last_ts = bars["timestamp"].iloc[-1] if not bars.empty else None
+            manquantes = sorted(m for m in live_bars if last_ts is None or m > last_ts)
+            if manquantes:
+                bars = pd.concat([bars, pd.DataFrame([
+                    {"timestamp": m, **live_bars[m]} for m in manquantes])], ignore_index=True)
         if size > 1:
             bars = _resample_price_bars(bars, size)
         n_bars = lookback_min // size if lookback_min else 150
@@ -3200,16 +3235,22 @@ def create_app() -> Dash:
 
             dcc.Interval(id="tick", interval=SETTINGS.flow_interval_s * 1000),
             # le Tape doit défiler vivant, pas au rythme des pulls (60 s).
-            # ⚠️ 250 ms MESURÉ et ÉCARTÉ le 2026-10-01, cette fois sans aucun
-            # confondu (pas de process orphelin, pas de threaded=True) : même
-            # isolé, 250 ms suffit à saturer le serveur de dev Werkzeug, qui
-            # est MONO-THREAD — curl direct sur /api/v1/NQ/last (lecture
-            # triviale en mémoire) à 2-6 s au lieu de <0.3 s. 1000 ms est la
-            # valeur qui tient. Ne pas redescendre sans un vrai serveur
-            # multi-worker (gunicorn/waitress), pas juste threaded=True (cf.
-            # commit qui l'a retiré — le GIL rend ça contre-productif pour du
-            # travail CPU comme la reconstruction des figures Plotly).
-            dcc.Interval(id="tape-tick", interval=1000),
+            # 250 ms MESURÉ et ÉCARTÉ le 2026-10-01 : à l'époque le serveur de
+            # dev Werkzeug (MONO-THREAD) saturait à ce rythme — curl direct sur
+            # /api/v1/NQ/last (lecture triviale en mémoire) à 2-6 s au lieu de
+            # <0.3 s. Essayé à 250 ms à nouveau le 2026-10-05 (serveur devenu
+            # waitress multi-thread depuis, caches `_load_prices_cached`/
+            # `SCALP_CACHE_S`/`SCALP_HEAVY_CACHE_S` absorbant les deux causes
+            # de 2026-10-01) : latence par requête restée bonne (11-37 ms),
+            # MAIS CPU mesuré à ~194% d'un cœur en continu pour un usage léger
+            # — le coût fixe par requête (routage Flask, regroupement Dash,
+            # sérialisation JSON, lookup des caches eux-mêmes) × 6 Outputs ×
+            # 4 Hz s'additionne même quand chaque cache est un hit. Retombé à
+            # 500 ms, compromis mesuré entre réactivité et charge. Ne pas
+            # redescendre à 250 ms sans alléger le coût fixe par cycle
+            # d'abord (ex. fusionner les Outputs qui partagent déjà `tape-tick`
+            # en un seul callback).
+            dcc.Interval(id="tape-tick", interval=500),
             # Ticker de prix /scalp : vrai flux poussé (EventSource, cf.
             # clientside_callback plus bas), aucun sondage — donc pas de dcc.Interval
             # ici. Cible inerte requise par Dash pour un callback JS sans Output
@@ -4127,22 +4168,46 @@ def create_app() -> Dash:
         """
         function(symbol, path) {
             if (window._scStream) { window._scStream.close(); window._scStream = null; }
+            if (window._scStreamTimer) { clearTimeout(window._scStreamTimer); window._scStreamTimer = null; }
             if (!(path || '/').startsWith('/scalp') || !['NQ', 'ES'].includes(symbol)) {
                 return window.dash_clientside.no_update;
             }
-            const es = new EventSource(`/api/v1/${symbol}/stream`);
-            es.onmessage = function(ev) {
-                const el = document.getElementById('sc-live-price');
-                if (!el) return;
-                const px = parseFloat(ev.data);
-                if (isNaN(px)) return;
-                // même format que le rendu Python (f"{spot:,.2f}") : virgule des
-                // milliers, point décimal — sinon le format alterne visuellement
-                // entre les deux sources (JS vs Python), un clignotement de plus.
-                el.textContent = px.toLocaleString('en-US',
-                    {minimumFractionDigits: 2, maximumFractionDigits: 2});
+            // Le navigateur reconnecte un EventSource tout seul par défaut (spec
+            // SSE), sans limite de tentatives, dès que le flux se ferme pour
+            // n'importe quelle raison (channel_timeout waitress atteint sous
+            // contention, erreur réseau passagère...). Sous charge serveur, ça
+            // peut amplifier une coupure ponctuelle en rafale de connexions qui
+            // aggrave la contention à l'origine de la coupure (cf. passation
+            // fuite de threads 2026-10-05). On reprend la main : fermeture
+            // explicite + reconnexion à délai croissant borné (3s -> 30s max),
+            // annulée si ce flux a été remplacé entre-temps (changement de
+            // symbole/page, qui invalide `token`).
+            const token = {};
+            window._scStreamToken = token;
+            const state = {delay: 3000};
+            const connect = function() {
+                const es = new EventSource(`/api/v1/${symbol}/stream`);
+                window._scStream = es;
+                es.onmessage = function(ev) {
+                    state.delay = 3000;  // flux à nouveau sain : on revient au délai de base
+                    const el = document.getElementById('sc-live-price');
+                    if (!el) return;
+                    const px = parseFloat(ev.data);
+                    if (isNaN(px)) return;
+                    // même format que le rendu Python (f"{spot:,.2f}") : virgule des
+                    // milliers, point décimal — sinon le format alterne visuellement
+                    // entre les deux sources (JS vs Python), un clignotement de plus.
+                    el.textContent = px.toLocaleString('en-US',
+                        {minimumFractionDigits: 2, maximumFractionDigits: 2});
+                };
+                es.onerror = function() {
+                    es.close();
+                    if (window._scStreamToken !== token) return;  // remplacé depuis
+                    window._scStreamTimer = setTimeout(connect, state.delay);
+                    state.delay = Math.min(state.delay * 2, 30000);
+                };
             };
-            window._scStream = es;
+            connect();
             return window.dash_clientside.no_update;
         }
         """,
@@ -4166,20 +4231,37 @@ def create_app() -> Dash:
         """
         function(symbol, path) {
             if (window._scIndStream) { window._scIndStream.close(); window._scIndStream = null; }
+            if (window._scIndStreamTimer) { clearTimeout(window._scIndStreamTimer); window._scIndStreamTimer = null; }
             const isScalpV2 = (path || '/') === '/scalp' || (path || '/').startsWith('/scalp/');
             if (!isScalpV2 || !['NQ', 'ES'].includes(symbol)) {
                 return window.dash_clientside.no_update;
             }
-            const es = new EventSource(`/api/v1/${symbol}/scalp-indicators-stream`);
-            es.onmessage = function(ev) {
-                const st = window._gexLwChart;
-                if (!st) return;  // graphique pas encore créé : le prochain cycle Dash suffira
-                let snap;
-                try { snap = JSON.parse(ev.data); } catch (e) { return; }
-                st.lastData = Object.assign({}, st.lastData, snap);
-                st.applyIndicators();
+            // Même garde-fou que le ticker de prix ci-dessus : reconnexion à
+            // délai croissant borné plutôt que la reconnexion native illimitée
+            // du navigateur, pour ne pas amplifier une coupure sous contention.
+            const token = {};
+            window._scIndStreamToken = token;
+            const state = {delay: 3000};
+            const connect = function() {
+                const es = new EventSource(`/api/v1/${symbol}/scalp-indicators-stream`);
+                window._scIndStream = es;
+                es.onmessage = function(ev) {
+                    state.delay = 3000;
+                    const st = window._gexLwChart;
+                    if (!st) return;  // graphique pas encore créé : le prochain cycle Dash suffira
+                    let snap;
+                    try { snap = JSON.parse(ev.data); } catch (e) { return; }
+                    st.lastData = Object.assign({}, st.lastData, snap);
+                    st.applyIndicators();
+                };
+                es.onerror = function() {
+                    es.close();
+                    if (window._scIndStreamToken !== token) return;
+                    window._scIndStreamTimer = setTimeout(connect, state.delay);
+                    state.delay = Math.min(state.delay * 2, 30000);
+                };
             };
-            window._scIndStream = es;
+            connect();
             return window.dash_clientside.no_update;
         }
         """,
@@ -4584,17 +4666,36 @@ def create_app() -> Dash:
     def refresh_scalp(_, path, symbol, lang, window, min_size, banner_version):
         if not is_scalp_path(path) or symbol not in ("NQ", "ES"):
             raise PreventUpdate
-        hedge = hedge_fig(symbol, lang, int(window if window is not None else -1))
-        hedge.update_layout(height=300, uirevision=f"scalp-{symbol}-{window}")
+        # /scalp v2 affiche le graphique Lightweight Charts (scalp-lw-card) ;
+        # scalp-price/scalp-hedge (Plotly) restent dans le DOM mais CSS-hidden
+        # sur cette page (body.scalp-v2-page, style.css) — seul /scalpv1 les
+        # affiche encore. Les construire quand même (go.Figure + sérialisation
+        # JSON : pas gratuit) doublait le travail par cycle en pure perte,
+        # directement en concurrence avec le flux réellement affiché — repéré
+        # en direct le 2026-10-05 (bougie live figée plusieurs secondes sous
+        # contention, juste après le passage de tape-tick à 500 ms ; requêtes
+        # Dash annulées en rafale, cf. réseau). no_update sur ces deux Outputs
+        # quand /scalp v2 est actif : le client garde la dernière figure
+        # posée (jamais affichée de toute façon).
+        is_v2 = (path or "/") == "/scalp"
+        if is_v2:
+            hedge = no_update
+        else:
+            hedge = hedge_fig(symbol, lang, int(window if window is not None else -1))
+            hedge.update_layout(height=300, uirevision=f"scalp-{symbol}-{window}")
         prints = tape_table(symbol, lang, min_size=float(min_size or 0), include_combos=False)
         ctx = scalp_context(symbol)
         if ctx is None:
             wait = html.Div(t(lang, "waiting_native" if symbol in ("NQ", "ES")
                               else "waiting_first_pull"), className="hint")
-            return wait, wait, wait, hedge, prints, empty_fig(t(lang, "sc_waiting_levels"), symbol)
+            price = no_update if is_v2 else empty_fig(t(lang, "sc_waiting_levels"), symbol)
+            return wait, wait, wait, hedge, prints, price
         spot = _scalp_live_spot(symbol, ctx)
-        price = scalp_price_fig(symbol, ctx, spot)
-        price.update_layout(uirevision=f"scalp-price-{symbol}")
+        if is_v2:
+            price = no_update
+        else:
+            price = scalp_price_fig(symbol, ctx, spot)
+            price.update_layout(uirevision=f"scalp-price-{symbol}")
         absorb = scalp_absorption(symbol)
         # swing=True SEULEMENT sur /scalp exact — même garde que scalp-lw-card/
         # refresh_scalp_lw, /scalpv1 ne doit jamais recevoir swing=True quoi
