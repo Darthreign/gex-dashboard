@@ -2983,7 +2983,29 @@ def create_app() -> Dash:
                     width: container.clientWidth, height: container.clientHeight,
                     layout: { background: { color: 'transparent' }, textColor: '#cfd3da' },
                     grid: { vertLines: { color: '#1e222a' }, horzLines: { color: '#1e222a' } },
-                    timeScale: { timeVisible: true, secondsVisible: true },
+                    // Lightweight Charts n'utilise PAS le fuseau du navigateur
+                    // par défaut malgré ce que laissait croire sa doc — il
+                    // formate les UTCTimestamp en UTC pur sauf formateur
+                    // explicite. Bug réel vérifié en direct le 2026-10-04
+                    // (axe/étiquettes affichés en UTC, pas en heure locale).
+                    // `new Date(t*1000).toLocaleTimeString()` sans option
+                    // `timeZone` explicite utilise le fuseau LOCAL du
+                    // navigateur — cohérent avec le reste du dashboard
+                    // (to_local() côté Python) sans dépendre d'un fuseau
+                    // serveur codé en dur (Europe/Paris), utile si un
+                    // scalpeur ouvre la page depuis un autre fuseau.
+                    timeScale: {
+                        timeVisible: true, secondsVisible: true,
+                        tickMarkFormatter: (t, type) => {
+                            const d = new Date(t * 1000);
+                            return type <= 2
+                                ? d.toLocaleDateString([], { day: '2-digit', month: '2-digit' })
+                                : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                        },
+                    },
+                    localization: {
+                        timeFormatter: (t) => new Date(t * 1000).toLocaleTimeString(),
+                    },
                 });
                 const series = chart.addCandlestickSeries({
                     upColor: '#199e70', downColor: '#e66767', borderVisible: false,
@@ -3102,7 +3124,29 @@ def create_app() -> Dash:
                     width: container.clientWidth, height: container.clientHeight,
                     layout: { background: { color: 'transparent' }, textColor: '#cfd3da' },
                     grid: { vertLines: { color: '#1e222a' }, horzLines: { color: '#1e222a' } },
-                    timeScale: { timeVisible: true, secondsVisible: true },
+                    // Lightweight Charts n'utilise PAS le fuseau du navigateur
+                    // par défaut malgré ce que laissait croire sa doc — il
+                    // formate les UTCTimestamp en UTC pur sauf formateur
+                    // explicite. Bug réel vérifié en direct le 2026-10-04
+                    // (axe/étiquettes affichés en UTC, pas en heure locale).
+                    // `new Date(t*1000).toLocaleTimeString()` sans option
+                    // `timeZone` explicite utilise le fuseau LOCAL du
+                    // navigateur — cohérent avec le reste du dashboard
+                    // (to_local() côté Python) sans dépendre d'un fuseau
+                    // serveur codé en dur (Europe/Paris), utile si un
+                    // scalpeur ouvre la page depuis un autre fuseau.
+                    timeScale: {
+                        timeVisible: true, secondsVisible: true,
+                        tickMarkFormatter: (t, type) => {
+                            const d = new Date(t * 1000);
+                            return type <= 2
+                                ? d.toLocaleDateString([], { day: '2-digit', month: '2-digit' })
+                                : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                        },
+                    },
+                    localization: {
+                        timeFormatter: (t) => new Date(t * 1000).toLocaleTimeString(),
+                    },
                 });
                 // Même correctif que le graphique de prix : ResizeObserver
                 // sur le conteneur, pas juste window.resize (cf. commentaire
