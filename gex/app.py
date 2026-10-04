@@ -2937,11 +2937,16 @@ def create_app() -> Dash:
                         # client-side). Uniquement sur /scalp : /scalpv1
                         # garde swing=False forcé quoi que vaille ce store,
                         # cf. garde dans refresh_scalp.
-                        dcc.Store(id="scalp-banner-version", storage_type="local", data="v2"),
-                        html.Button("V2", id="scalp-banner-version-toggle",
-                                    className="sc-draw-btn sc-ind-btn sc-draw-active sc-banner-version-btn",
-                                    title="Bandeau : V2 (swing H/L 60V) — cliquer pour basculer en V1 "
-                                          "(fenêtre fixe 5 min, comme /scalpv1)"),
+                        #
+                        # Défaut V1 (2026-10-05, retour utilisateur après
+                        # retours de testeurs en live : "V1 était la plus
+                        # juste") — V2 reste disponible, mais seulement pour
+                        # qui l'active explicitement via ce bouton.
+                        dcc.Store(id="scalp-banner-version", storage_type="local", data="v1"),
+                        html.Button("V1", id="scalp-banner-version-toggle",
+                                    className="sc-draw-btn sc-ind-btn sc-banner-version-btn",
+                                    title="Bandeau : V1 (fenêtre fixe 5 min, comme /scalpv1) — cliquer pour "
+                                          "basculer en V2 (swing H/L 60V)"),
                     ], className="sc-bannerbox-wrap"),
                     html.Div(id="scalp-head", className="sc-head"),
                 ], className="sc-fixed-top"),
