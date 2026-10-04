@@ -1787,7 +1787,12 @@ def scalp_orderflow_profile(symbol: str, day_ticks: pd.DataFrame) -> dict:
             if prof:
                 prof.update(t0=int(t0), t1=int(t1), current=is_current)
                 legs.append(prof)
-    out = {"legs": legs, "untested": scalp_orderflow_untested(symbol, day_ticks)}
+    from . import iceberg as ib
+    out = {"legs": legs, "untested": scalp_orderflow_untested(symbol, day_ticks),
+          # Largeur du palier : un HVN/LVN est une ZONE (ce palier de prix),
+          # pas un tick exact — demande explicite de l'utilisateur, affichée
+          # côté client comme une bande plutôt qu'une ligne fine.
+          "bucket_size": ib._vp_bucket(symbol)}
     _ORDERFLOW_PROFILE_CACHE[symbol] = (now, out)
     return out
 
@@ -3581,21 +3586,12 @@ def create_app() -> Dash:
                     }) : [];
                     // Zones HVN/LVN non revisitées (High/Low Volume Node,
                     // terminologie standard du volume profile — PAS le 'HVL'
-                    // ci-dessus, concept différent) — jambes plus anciennes
-                    // que les deux gardées en entier dans le profil ; simple
-                    // ligne fine, violette (distincte de toutes les autres
-                    // couleurs déjà utilisées), tant que le prix n'est
-                    // jamais repassé dans cette zone depuis.
-                    const untestedLines = (ind.orderflow_profile
-                            ? ((d.orderflow_profile || {}).untested || []) : []).map(function(u) {
-                        return st.series.createPriceLine({
-                            price: u.price, color: '#9c6ade', lineWidth: 1,
-                            lineStyle: LightweightCharts.LineStyle.Dotted,
-                            axisLabelVisible: true,
-                            title: (u.kind === 'hvn' ? 'HVN' : 'LVN') + ' non testé',
-                        });
-                    });
-                    st.priceLines = simpleLines.concat(confluenceLines, flowLines, untestedLines);
+                    // ci-dessus, concept différent) : rendues par
+                    // ofProfile.setUntested() plus bas (bande semi-
+                    // transparente sur la largeur du palier, PAS une ligne
+                    // fine — demande explicite de l'utilisateur, "en général
+                    // c'est une zone pas un prix fixe").
+                    st.priceLines = simpleLines.concat(confluenceLines, flowLines);
                     st.series.setMarkers(ind.markers ? (d.markers || []).map(function(m) {
                         const isHigh = m.kind.startsWith('H');
                         return {
@@ -3612,6 +3608,8 @@ def create_app() -> Dash:
                     if (st.ofProfile) {
                         st.ofProfile.setVisible(ind.orderflow_profile);
                         st.ofProfile.setData(((d.orderflow_profile || {}).legs) || []);
+                        st.ofProfile.setUntested(((d.orderflow_profile || {}).untested) || [],
+                                                 (d.orderflow_profile || {}).bucket_size);
                     }
                 };
                 setupDrawingTools(chart, series, container);

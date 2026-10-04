@@ -85,14 +85,86 @@
     renderer() { return new OrderFlowProfileRenderer(this._entries); }
   }
 
+  // Zones HVN/LVN non testées (2026-10-04) — un palier de volume profile
+  // est une ZONE de prix (sa largeur de bucket), pas un tick exact : demande
+  // explicite de l'utilisateur ("en général c'est une zone pas un prix
+  // fixe"), remplace les price lines fines utilisées au premier jet. Bande
+  // semi-transparente sur toute la largeur du pane (pas la jambe) — ce sont
+  // des niveaux de référence durables, pas liés à une plage temporelle
+  // précise comme les jambes elles-mêmes.
+  class UntestedZoneRenderer {
+    constructor(zones) { this._zones = zones; }
+    draw(target) {
+      const zones = this._zones;
+      if (!zones || !zones.length) return;
+      target.useBitmapCoordinateSpace((scope) => {
+        const ctx = scope.context;
+        const paneW = scope.bitmapSize.width;
+        const vpr = scope.verticalPixelRatio;
+        for (const z of zones) {
+          if (z.yTop === null || z.yBottom === null) continue;
+          const yTop = Math.min(z.yTop, z.yBottom) * vpr;
+          const yBottom = Math.max(z.yTop, z.yBottom) * vpr;
+          const h = Math.max(1, yBottom - yTop);
+          const isHvn = z.kind === "hvn";
+          // HVN : violet plus dense (niveau "aimant", prix s'y arrête
+          // souvent). LVN : plus clair/fin (prix traverse vite d'habitude).
+          ctx.fillStyle = isHvn ? "rgba(156, 106, 222, 0.22)" : "rgba(156, 106, 222, 0.10)";
+          ctx.fillRect(0, yTop, paneW, h);
+          ctx.strokeStyle = isHvn ? "rgba(156, 106, 222, 0.75)" : "rgba(156, 106, 222, 0.45)";
+          ctx.lineWidth = Math.max(1, (isHvn ? 1.2 : 1) * vpr);
+          ctx.setLineDash(isHvn ? [] : [4 * vpr, 3 * vpr]);
+          ctx.beginPath();
+          ctx.moveTo(0, z.yCenter * vpr);
+          ctx.lineTo(paneW, z.yCenter * vpr);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      });
+    }
+  }
+
+  class UntestedZonePaneView {
+    constructor(source) { this._source = source; this._zones = []; }
+    update() {
+      const series = this._source._series, zones = this._source._untested,
+            bucket = this._source._bucketSize, visible = this._source._visible;
+      if (!series || !visible || !zones.length) { this._zones = []; return; }
+      const half = (bucket || 0) / 2;
+      this._zones = zones.map((z) => ({
+        kind: z.kind,
+        yTop: series.priceToCoordinate(z.price + half),
+        yBottom: series.priceToCoordinate(z.price - half),
+        yCenter: series.priceToCoordinate(z.price),
+      }));
+    }
+    renderer() { return new UntestedZoneRenderer(this._zones); }
+  }
+
+  class UntestedZoneAxisView {
+    constructor(source, zone) { this._source = source; this._zone = zone; this._y = null; }
+    update() { this._y = this._source._series ? this._source._series.priceToCoordinate(this._zone.price) : null; }
+    coordinate() { return this._y ?? -1; }
+    visible() { return this._y !== null; }
+    tickVisible() { return true; }
+    text() { return (this._zone.kind === "hvn" ? "HVN" : "LVN") + " " + Math.round(this._zone.price); }
+    textColor() { return "#ffffff"; }
+    backColor() { return this._zone.kind === "hvn" ? "#9c6ade" : "#6b5a8e"; }
+  }
+
   class OrderFlowProfilePrimitive {
     constructor() {
       this._chart = null;
       this._series = null;
       this._requestUpdate = null;
       this._legs = [];
+      this._untested = [];
+      this._bucketSize = 0;
       this._visible = true;
-      this._paneViews = [new OrderFlowProfilePaneView(this)];
+      this._legsView = new OrderFlowProfilePaneView(this);
+      this._untestedView = new UntestedZonePaneView(this);
+      this._paneViews = [this._legsView, this._untestedView];
+      this._axisViews = [];
     }
     attached(param) {
       this._chart = param.chart;
@@ -103,10 +175,19 @@
     detached() { this._chart = null; this._series = null; this._requestUpdate = null; }
     requestUpdate() { if (this._requestUpdate) this._requestUpdate(); }
     setData(legs) { this._legs = legs || []; this.requestUpdate(); }
+    setUntested(zones, bucketSize) {
+      this._untested = zones || [];
+      this._bucketSize = bucketSize || 0;
+      this._axisViews = this._untested.map((z) => new UntestedZoneAxisView(this, z));
+      this.requestUpdate();
+    }
     setVisible(v) { this._visible = !!v; this.requestUpdate(); }
-    updateAllViews() { this._paneViews.forEach((v) => v.update()); }
+    updateAllViews() {
+      this._paneViews.forEach((v) => v.update());
+      this._axisViews.forEach((v) => v.update());
+    }
     paneViews() { return this._paneViews; }
-    priceAxisViews() { return []; }
+    priceAxisViews() { return this._visible ? this._axisViews : []; }
   }
 
   window.OrderFlowProfilePrimitive = OrderFlowProfilePrimitive;
