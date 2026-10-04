@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -160,6 +161,22 @@ CREATE TABLE IF NOT EXISTS research_log (
     text        TEXT NOT NULL,
     status      TEXT NOT NULL DEFAULT 'pending',   -- pending | confirmed | refuted (surtout pour hypothesis)
     note        TEXT
+);
+
+-- Préférences /scalp par utilisateur (2026-10-04, piste 7 roadmap-scalp-v2) :
+-- identité = l'e-mail renvoyé par Cloudflare Access (en-tête
+-- Cf-Access-Authenticated-User-Email, authentification par code à usage
+-- unique — confirmé en production). Un JSON par utilisateur plutôt qu'une
+-- colonne par préférence : évite une migration de schéma à chaque nouveau
+-- réglage, cohérent avec les clés déjà utilisées côté localStorage
+-- (gex-scalp-layout/ergo/order) qu'il remplace pour qui est identifié.
+-- Accès SANS Cloudflare (dev local, 127.0.0.1) : pas d'e-mail dans l'en-tête
+-- -> pas de synchronisation serveur, repli silencieux sur le localStorage
+-- seul, comportement inchangé.
+CREATE TABLE IF NOT EXISTS user_prefs (
+    email      TEXT PRIMARY KEY,
+    prefs_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 """
 
@@ -583,6 +600,33 @@ def record_absorption(conn: sqlite3.Connection, *, date: str, ts: str, symbol: s
          hvl_price, hvl_delta, hvl_side),
     )
     conn.commit()
+
+
+# --------------------------------------------------------------------------
+# Préférences /scalp par utilisateur (cf. user_prefs dans _SCHEMA)
+# --------------------------------------------------------------------------
+
+def get_user_prefs(conn: sqlite3.Connection, email: str) -> dict:
+    """Préférences de `email`, {} si jamais enregistrées."""
+    row = conn.execute("SELECT prefs_json FROM user_prefs WHERE email = ?", (email,)).fetchone()
+    return _loads(row["prefs_json"]) or {} if row else {}
+
+
+def set_user_pref(conn: sqlite3.Connection, email: str, key: str, value: Any) -> dict:
+    """Fusionne `{key: value}` dans les préférences de `email` (upsert) et
+    renvoie l'objet complet résultant — un seul réglage à la fois, jamais tout
+    remplacer d'un coup (deux onglets du même utilisateur ne doivent pas
+    s'écraser mutuellement les autres réglages)."""
+    prefs = get_user_prefs(conn, email)
+    prefs[key] = value
+    conn.execute(
+        """INSERT INTO user_prefs (email, prefs_json, updated_at) VALUES (?,?,?)
+           ON CONFLICT(email) DO UPDATE SET prefs_json=excluded.prefs_json,
+                                             updated_at=excluded.updated_at""",
+        (email, _dumps(prefs), datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    return prefs
 
 
 # --------------------------------------------------------------------------

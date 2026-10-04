@@ -3202,27 +3202,46 @@ def create_app() -> Dash:
     )
 
     # Disposition verticale /scalp v2 (cf. .sc-layout-toggle, style.css) :
-    # restaure la préférence au chargement (localStorage, pas de serveur).
+    # restaure la préférence au chargement — serveur si identifié (Cloudflare
+    # Access, cf. /api/v1/prefs), sinon localStorage (2026-10-04, piste 7
+    # roadmap-scalp-v2). `window._gexPrefsReady` : UNE SEULE requête serveur
+    # par page, partagée par les 3 préférences ci-dessous (idempotent —
+    # `||=` ne relance pas le fetch si une autre de ces callbacks l'a déjà
+    # déclenché, peu importe l'ordre d'exécution des callbacks Dash).
     app.clientside_callback(
         """
-        function(_) {
-            if (window.localStorage.getItem('gex-scalp-layout') === 'vertical') {
-                document.body.classList.add('sc-layout-vertical');
-            }
+        async function(_) {
+            window._gexPrefsReady = window._gexPrefsReady || fetch('/api/v1/prefs')
+                .then(r => r.json())
+                .then(d => { window._gexUserEmail = d.email; return d; })
+                .catch(() => ({ email: null, prefs: {} }));
+            const data = await window._gexPrefsReady;
+            const fromServer = data.prefs['scalp-layout'];
+            const vertical = fromServer != null ? fromServer === 'vertical'
+                : window.localStorage.getItem('gex-scalp-layout') === 'vertical';
+            if (vertical) document.body.classList.add('sc-layout-vertical');
+            if (fromServer != null) window.localStorage.setItem('gex-scalp-layout', fromServer);
             return window.dash_clientside.no_update;
         }
         """,
         Output("sc-layout-toggle", "title"),
         Input("sc-layout-boot", "data"),
     )
-    # Bascule au clic + persiste — lit l'état actuel sur <body> plutôt que de
-    # suivre n_clicks (pair/impair), robuste à un rechargement entre-temps.
+    # Bascule au clic + persiste (localStorage TOUJOURS, serveur SI identifié)
+    # — lit l'état actuel sur <body> plutôt que de suivre n_clicks
+    # (pair/impair), robuste à un rechargement entre-temps.
     app.clientside_callback(
         """
         function(n_clicks) {
             if (!n_clicks) { return window.dash_clientside.no_update; }
             const vertical = document.body.classList.toggle('sc-layout-vertical');
-            window.localStorage.setItem('gex-scalp-layout', vertical ? 'vertical' : 'horizontal');
+            const value = vertical ? 'vertical' : 'horizontal';
+            window.localStorage.setItem('gex-scalp-layout', value);
+            if (window._gexUserEmail) {
+                fetch('/api/v1/prefs', { method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ key: 'scalp-layout', value: value }) }).catch(() => {});
+            }
             return window.dash_clientside.no_update;
         }
         """,
@@ -3231,13 +3250,24 @@ def create_app() -> Dash:
         prevent_initial_call=True,
     )
 
-    # Ergonomie/concentration /scalp v2 : restaure au chargement...
+    # Ergonomie/concentration /scalp v2 : restaure au chargement (serveur si
+    # identifié, sinon localStorage — même principe que la disposition
+    # verticale ci-dessus)...
     app.clientside_callback(
         """
-        function(_) {
-            let saved = [];
-            try { saved = JSON.parse(window.localStorage.getItem('gex-scalp-ergo') || '[]'); }
-            catch (e) { saved = []; }
+        async function(_) {
+            window._gexPrefsReady = window._gexPrefsReady || fetch('/api/v1/prefs')
+                .then(r => r.json())
+                .then(d => { window._gexUserEmail = d.email; return d; })
+                .catch(() => ({ email: null, prefs: {} }));
+            const data = await window._gexPrefsReady;
+            let saved = data.prefs['scalp-ergo'];
+            if (saved == null) {
+                try { saved = JSON.parse(window.localStorage.getItem('gex-scalp-ergo') || '[]'); }
+                catch (e) { saved = []; }
+            } else {
+                window.localStorage.setItem('gex-scalp-ergo', JSON.stringify(saved));
+            }
             return saved;
         }
         """,
@@ -3257,6 +3287,11 @@ def create_app() -> Dash:
             document.body.classList.toggle('sc-hide-tape', values.includes('hide_tape'));
             document.body.classList.toggle('sc-keywords-only', values.includes('keywords_only'));
             window.localStorage.setItem('gex-scalp-ergo', JSON.stringify(values));
+            if (window._gexUserEmail) {
+                fetch('/api/v1/prefs', { method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ key: 'scalp-ergo', value: values }) }).catch(() => {});
+            }
             return window.dash_clientside.no_update;
         }
         """,
@@ -3266,13 +3301,22 @@ def create_app() -> Dash:
 
     # Ordre d'affichage /scalp v2 (CSS `order`, pas de drag-and-drop — cf.
     # commentaire sur sc-order-controls dans le layout). Restaure au
-    # chargement...
+    # chargement (serveur si identifié, sinon localStorage)...
     app.clientside_callback(
         """
-        function(_) {
-            let saved = {};
-            try { saved = JSON.parse(window.localStorage.getItem('gex-scalp-order') || '{}'); }
-            catch (e) { saved = {}; }
+        async function(_) {
+            window._gexPrefsReady = window._gexPrefsReady || fetch('/api/v1/prefs')
+                .then(r => r.json())
+                .then(d => { window._gexUserEmail = d.email; return d; })
+                .catch(() => ({ email: null, prefs: {} }));
+            const data = await window._gexPrefsReady;
+            let saved = data.prefs['scalp-order'];
+            if (saved == null) {
+                try { saved = JSON.parse(window.localStorage.getItem('gex-scalp-order') || '{}'); }
+                catch (e) { saved = {}; }
+            } else {
+                window.localStorage.setItem('gex-scalp-order', JSON.stringify(saved));
+            }
             const d = {ladder: 2, chart: 1, hedge: 3, prints: 4};
             return [saved.ladder || d.ladder, saved.chart || d.chart,
                     saved.hedge || d.hedge, saved.prints || d.prints];
@@ -3284,7 +3328,8 @@ def create_app() -> Dash:
     )
     # ...applique `order` en style inline (ladder/hedge/prints : un seul
     # élément ; chart : les DEUX cartes scalp-price-card/scalp-lw-card, seule
-    # celle visible compte puisque l'autre est display:none) + persiste.
+    # celle visible compte puisque l'autre est display:none) + persiste
+    # (localStorage TOUJOURS, serveur SI identifié).
     app.clientside_callback(
         """
         function(ladder, chart, hedge, prints) {
@@ -3294,8 +3339,13 @@ def create_app() -> Dash:
             set('#scalp-price-card, #scalp-lw-card', chart);
             set('.sc-hedge', hedge);
             set('.sc-prints', prints);
-            window.localStorage.setItem('gex-scalp-order',
-                JSON.stringify({ladder: ladder, chart: chart, hedge: hedge, prints: prints}));
+            const value = {ladder: ladder, chart: chart, hedge: hedge, prints: prints};
+            window.localStorage.setItem('gex-scalp-order', JSON.stringify(value));
+            if (window._gexUserEmail) {
+                fetch('/api/v1/prefs', { method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ key: 'scalp-order', value: value }) }).catch(() => {});
+            }
             return window.dash_clientside.no_update;
         }
         """,
@@ -3845,5 +3895,47 @@ def create_app() -> Dash:
         if png is None:
             return Response(f"graphique indisponible : {name}", status=404)
         return Response(png, mimetype="image/png")
+
+    # Préférences /scalp par utilisateur (2026-10-04, piste 7 roadmap-scalp-v2)
+    # — identité = l'en-tête Cloudflare Access (code à usage unique par
+    # e-mail, confirmé en production le même jour). Sans cet en-tête (accès
+    # local direct, hors Cloudflare), les deux routes répondent "pas
+    # d'identité" sans erreur — le client retombe silencieusement sur le
+    # localStorage seul, comportement inchangé pour qui n'est pas identifié.
+    @app.server.route("/api/v1/prefs", methods=["GET"])
+    def _prefs_get():
+        from flask import jsonify, request
+        email = request.headers.get("Cf-Access-Authenticated-User-Email")
+        if not email:
+            return jsonify({"email": None, "prefs": {}})
+        conn = _journal()
+        if conn is None:
+            return jsonify({"email": email, "prefs": {}})
+        with _JOURNAL_LOCK:
+            import journal
+            prefs = journal.get_user_prefs(conn, email)
+        return jsonify({"email": email, "prefs": prefs})
+
+    @app.server.route("/api/v1/prefs", methods=["POST"])
+    def _prefs_set():
+        from flask import jsonify, request
+        email = request.headers.get("Cf-Access-Authenticated-User-Email")
+        if not email:
+            return jsonify({"ok": False, "reason": "no-identity"}), 200
+        body = request.get_json(silent=True) or {}
+        key, value = body.get("key"), body.get("value")
+        if not key:
+            return jsonify({"ok": False, "reason": "missing-key"}), 400
+        conn = _journal()
+        if conn is None:
+            return jsonify({"ok": False, "reason": "journal-unavailable"}), 200
+        try:
+            with _JOURNAL_LOCK:
+                import journal
+                journal.set_user_pref(conn, email, key, value)
+        except Exception:  # noqa: BLE001 — une préférence ratée ne doit jamais 500
+            log.exception("Écriture préférence /scalp échouée (%s, %s)", email, key)
+            return jsonify({"ok": False, "reason": "write-failed"}), 200
+        return jsonify({"ok": True})
 
     return app
