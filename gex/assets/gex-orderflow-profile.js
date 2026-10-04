@@ -68,11 +68,33 @@
             legs = this._source._legs, visible = this._source._visible;
       if (!chart || !series || !visible || !legs.length) { this._entries = []; return; }
       const ts = chart.timeScale();
+      // leg.t0/t1 sont des timestamps de TICK (pivots de swing), pas alignés
+      // sur les bornes de bougie — or timeToCoordinate() de Lightweight
+      // Charts exige un temps qui correspond exactement à une bougie
+      // existante, sinon il renvoie null et toute la jambe disparaît
+      // silencieusement (observé : la jambe en cours allait jusqu'à
+      // "maintenant", au-delà même de la dernière bougie close). On
+      // remplace chaque t0/t1 par le temps de la bougie la plus proche
+      // (recherche dichotomique sur les bougies déjà chargées).
+      const bars = series.data ? series.data() : [];
+      const nearestBarTime = (t) => {
+        if (!bars.length || t === null || t === undefined) return t;
+        if (t <= bars[0].time) return bars[0].time;
+        if (t >= bars[bars.length - 1].time) return bars[bars.length - 1].time;
+        let lo = 0, hi = bars.length - 1;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (bars[mid].time < t) lo = mid + 1; else hi = mid;
+        }
+        const after = bars[lo].time;
+        const before = lo > 0 ? bars[lo - 1].time : after;
+        return (t - before <= after - t) ? before : after;
+      };
       this._entries = legs.map((leg) => {
         const maxVol = leg.buckets.reduce((m, b) => Math.max(m, b.vol), 0);
         return {
-          x0: ts.timeToCoordinate(leg.t0),
-          x1: ts.timeToCoordinate(leg.t1),
+          x0: ts.timeToCoordinate(nearestBarTime(leg.t0)),
+          x1: ts.timeToCoordinate(nearestBarTime(leg.t1)),
           current: !!leg.current,
           maxVol: maxVol,
           pocY: series.priceToCoordinate(leg.poc),
