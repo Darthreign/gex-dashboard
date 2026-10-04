@@ -37,7 +37,25 @@ Après le passage à 500ms, l'utilisateur a signalé que la bougie en cours rest
 
 ## Nettoyage au passage
 
-`refresh_scalp` (callback qui alimente entre autres `scalp-price`/`scalp-hedge`, les figures Plotly) calculait ces deux figures sur **toutes** les pages, y compris `/scalp` v2 où elles sont masquées en CSS (remplacées par le graphique Lightweight Charts) — travail dupliqué pour rien à chaque cycle de `tape-tick`. `no_update` renvoyé pour ces deux Outputs quand `/scalp` v2 est actif. Effet mesuré ambigu sur le moment (le vrai problème était le bug de convention de date ci-dessus, pas la contention), mais le changement reste correct et sans régression — à garder.
+`refresh_scalp` (callback qui alimente entre autres `scalp-price`/`scalp-hedge`, les figures Plotly) calculait ces deux figures sur **toutes** les pages, y compris `/scalp` v2 où elles étaient masquées en CSS (remplacées par les graphiques Lightweight Charts) — travail dupliqué pour rien à chaque cycle de `tape-tick`. `no_update` renvoyé pour `scalp-price` quand `/scalp` v2 est actif (ça, ça reste vrai). **`scalp-hedge` ne suit PLUS cette règle** depuis la fin de soirée (cf. section suivante) — il est recalculé et affiché sur `/scalp` v2 aussi maintenant.
+
+## Clignotement de "Couverture des dealers" (/scalp v2) : cause identifiée, corrigé en revenant sur Plotly
+
+Signalé par l'utilisateur via une vidéo (visible aussi en observant ensemble le même onglet) : le graphique "Couverture des dealers" en Lightweight Charts clignotait **au rythme exact de `tape-tick`** (confirmé par l'utilisateur).
+
+**Diagnostic** (double instrumentation JS en direct, deux sessions de 10-30s chacune) : aucune anomalie de LOGIQUE trouvée — `setData()` jamais appelé avec un tableau vide, conteneur jamais recréé (`MutationObserver` muet), `chart.resize()` jamais appelé pendant le clignotement observé. Conclusion retenue : le thread principal du navigateur n'a pas le temps de repeindre le canvas entre deux cycles de redessin trop rapprochés (5 callbacks Dash distincts déclenchent leurs mises à jour quasi simultanément à chaque `tape-tick`) — un problème de **rendu/performance**, pas de code JS cassé.
+
+**Deux correctifs tentés cette nuit-là, TOUS DEUX ONT RÉGRESSÉ et ont été annulés (`git checkout`) :**
+1. Intervalle `dcc.Interval` dédié (1000ms, détaché de `tape-tick`) → a provoqué une **page entièrement figée** côté navigateur (lien de cause à effet pas formellement prouvé, mais la régression est apparue immédiatement après ce changement, et un hard-reload a résolu le gel — donc probablement un état JS corrompu plutôt qu'un vrai deadlock serveur).
+2. Flux SSE poussé (nouvelle route `/api/v1/<symbol>/hedge-live-stream`, même principe que le ticker de prix) → le graphique s'est retrouvé **sans aucune courbe** (juste les étiquettes de prix affichées, aucune ligne tracée) — cause exacte non investiguée, abandonné après ce constat.
+
+**Solution finale retenue** (suggestion de l'utilisateur, "il fonctionnait dessus avant") : **repasser ce graphique sur Plotly** (`hedge_fig`/`scalp-hedge`) sur `/scalp` v2 aussi, au lieu de la version Lightweight Charts (`scalp-lw-hedge-card`, désormais masquée inconditionnellement par CSS — plus de bascule par page). Plotly n'a jamais eu ce problème de clignotement sur `/scalpv1`. **Confirmé fonctionnel par l'utilisateur** ("parfait").
+
+Le graphique de PRIX (bougies) sur `/scalp` v2 reste sur Lightweight Charts, inchangé — seul le graphique de couverture est repassé sur Plotly. Si quelqu'un veut reprendre la migration Lightweight Charts de ce graphique precis un jour, repartir de zéro plutôt que de réappliquer les deux tentatives ci-dessus telles quelles.
+
+## Couleur LVN (profil de volume par jambe)
+
+Demande cosmétique : les zones LVN (creux de volume) étaient rendues dans la même teinte violette que les HVN (pics), seule l'opacité différait. LVN passe à un bleu distinct (`#3987e5`, même bleu que "Calls achetés" ailleurs dans le dashboard) — dégradé du canvas ET étiquette d'axe, dans `gex/assets/gex-orderflow-profile.js`.
 
 ## Pas touché / pas résolu ce soir
 
@@ -45,6 +63,7 @@ Après le passage à 500ms, l'utilisateur a signalé que la bougie en cours rest
 - **Migration gevent** — toujours en attente d'une session dédiée (cf. passation précédente pour le détail du blocage wss/dxFeed déjà identifié).
 - **Recherche Hedge Pressure** — rien repris ce soir, cf. passation précédente pour l'état complet (`gex/expansion_regime.py` validé comme détecteur de régime, pas de signal directionnel trouvé).
 - **`IndexError: list index out of range` dans `dash._prepare_grouping`** (`/_dash-update-component`) — toujours présente dans les logs, récurrente sur les rechargements de page. Confirmé cette nuit qu'elle n'est PAS amplifiée par `tape-tick` à 500ms (fréquence comparable à 1000ms) — semble liée aux rechargements/navigation, pas à la cadence. Toujours non investiguée en profondeur, toujours documentée comme transitoire/sans impact connu.
+- **NOUVEAU repéré ce soir, pas corrigé** : `Error: Value is null` dans la console navigateur, levée par Lightweight Charts (`createPriceLine`) au chargement de `/scalp` v2, de façon reproductible (confirmé sur plusieurs rechargements complets, PAS un artefact d'instrumentation). Vient très probablement d'une entrée de `d.levels` (niveaux GEX/HVL/Flip/murs envoyés au graphique de prix) avec un `price` null/undefined — un niveau pas encore calculable dans l'état actuel du marché (séance calme/fermée). Ne semble pas bloquant (le graphique de prix fonctionne quand même, les lignes de niveaux valides s'affichent), mais pollue la console et mérite un `.filter(lv => lv.price != null)` côté `applyIndicators` (JS, ~ligne 3630) ou côté Python (`_scalp_indicator_snapshot`/`scalp.build_ladder`) à l'occasion.
 
 ## Pour reprendre proprement
 
