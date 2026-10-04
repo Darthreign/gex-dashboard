@@ -29,7 +29,7 @@
   }
 
   class GexProfileRenderer {
-    constructor(entries) { this._entries = entries; }
+    constructor(entries, barHCss) { this._entries = entries; this._barHCss = barHCss; }
     draw(target) {
       const entries = this._entries;
       if (!entries || !entries.length) return;
@@ -37,7 +37,7 @@
         const ctx = scope.context;
         const paneW = scope.bitmapSize.width;
         const maxBarCssW = (scope.bitmapSize.width / scope.horizontalPixelRatio) * 0.30;
-        const barHCss = 3;
+        const barHCss = this._barHCss;
         entries.forEach((e) => {
           // OI en fond (plus épaisse, plus transparente), volume devant.
           drawBar(ctx, paneW, e.y, barHCss * 2.2, e.oi, e.maxAbs, maxBarCssW, 0.45,
@@ -50,7 +50,7 @@
   }
 
   class GexProfilePaneView {
-    constructor(source) { this._source = source; this._entries = []; }
+    constructor(source) { this._source = source; this._entries = []; this._barHCss = 3; }
     update() {
       const chart = this._source._chart, series = this._source._series,
             data = this._source._data, visible = this._source._visible;
@@ -63,11 +63,36 @@
       for (const d of data) {
         const y = series.priceToCoordinate(d.price);
         if (y === null) continue;
-        entries.push({ y, oi: d.oi || 0, vol: d.vol || 0, maxAbs });
+        entries.push({ y, oi: d.oi || 0, vol: d.vol || 0, maxAbs, price: d.price });
       }
       this._entries = entries;
+      // Hauteur de zone plafonnée à L'ESPACEMENT RÉEL ENTRE STRIKES, converti
+      // en pixels AU ZOOM COURANT (2026-10-05, demande explicite : "si je
+      // dézoome il se superpose"). Avant : hauteur fixe en pixels CSS,
+      // indépendante du zoom — en dézoomant, l'écart entre strikes rétrécit
+      // en pixels mais pas la barre, qui finit par chevaucher ses voisines.
+      // Recalculé à chaque update() (donc à chaque pan/zoom) à partir de
+      // l'écart MINIMUM observé entre deux strikes consécutifs des données
+      // réelles plutôt qu'une valeur supposée (5pts) — robuste si la grille
+      // de strikes change de pas selon le symbole.
+      let minGap = Infinity;
+      const prices = [...new Set(entries.map((e) => e.price))].sort((a, b) => a - b);
+      for (let i = 1; i < prices.length; i++) {
+        const g = prices[i] - prices[i - 1];
+        if (g > 0 && g < minGap) minGap = g;
+      }
+      let gapPx = null;
+      if (isFinite(minGap) && prices.length >= 2) {
+        const y0 = series.priceToCoordinate(prices[0]);
+        const y1 = series.priceToCoordinate(prices[0] + minGap);
+        if (y0 !== null && y1 !== null) gapPx = Math.abs(y1 - y0);
+      }
+      // OI (la plus épaisse, *2.2 dans le renderer) est la contrainte réelle
+      // — on plafonne SUR ELLE, pas sur barHCss nu, sinon OI dépasserait
+      // quand même le strike malgré le plafond appliqué à vol.
+      this._barHCss = gapPx ? Math.max(1, Math.min(3, gapPx / 2.2)) : 3;
     }
-    renderer() { return new GexProfileRenderer(this._entries); }
+    renderer() { return new GexProfileRenderer(this._entries, this._barHCss); }
   }
 
   class GexProfilePrimitive {
