@@ -1680,19 +1680,31 @@ def scalp_gex_profile(symbol: str, spot: float, window: float = 0.04) -> list[di
 _ORDERFLOW_PROFILE_CACHE: dict[str, tuple[float, dict]] = {}
 VALUE_AREA_PCT = 0.70  # convention standard (≈1 écart-type) du volume profile
 
+# Palier DÉDIÉ au profil de volume par jambe (leg profile + zones HVN/LVN non
+# testées), découplé de `ib._vp_bucket` (5pts, pensé pour la détection
+# HVL/absorption — un autre chantier, cf. passation). Demande explicite de
+# l'utilisateur, prix NQ/ES avançant par 0.25 : "on a des trucs tous les 5
+# points mini" après avoir vu le profil — trop grossier pour être lisible à
+# l'échelle d'une jambe de swing (quelques dizaines de points).
+ORDERFLOW_VP_BUCKET = {"NQ": 1.0, "ES": 1.0}
+DEFAULT_ORDERFLOW_VP_BUCKET = 1.0
+
+
+def _orderflow_vp_bucket(symbol: str) -> float:
+    return ORDERFLOW_VP_BUCKET.get(symbol.upper(), DEFAULT_ORDERFLOW_VP_BUCKET)
+
 
 def _volume_profile(leg_ticks: pd.DataFrame, symbol: str) -> dict | None:
     """Profil de volume par palier de prix sur un intervalle de ticks donné —
-    paliers/colonnes identiques à `scalp_order_flow_zones` (même
-    `ib._vp_bucket`, jamais deux tailles de palier différentes pour le même
-    symbole). Ajoute POC (palier le plus traité) et la zone de valeur à 70 %
+    paliers/colonnes selon `_orderflow_vp_bucket` (1pt par défaut, PAS
+    `ib._vp_bucket` qui sert la détection HVL/absorption, un chantier
+    séparé). Ajoute POC (palier le plus traité) et la zone de valeur à 70 %
     (VAH/VAL) : depuis le POC, on étend d'un palier à la fois du côté
     (haut ou bas) le plus volumineux jusqu'à couvrir VALUE_AREA_PCT du volume
     total — définition standard du volume profile, pas une invention maison."""
     if leg_ticks.empty:
         return None
-    from . import iceberg as ib
-    bucket_size = ib._vp_bucket(symbol)
+    bucket_size = _orderflow_vp_bucket(symbol)
     bucket_key = (leg_ticks["price"] / bucket_size).round() * bucket_size
     g = pd.DataFrame({
         "vol": leg_ticks["volume"],
@@ -1787,12 +1799,11 @@ def scalp_orderflow_profile(symbol: str, day_ticks: pd.DataFrame) -> dict:
             if prof:
                 prof.update(t0=int(t0), t1=int(t1), current=is_current)
                 legs.append(prof)
-    from . import iceberg as ib
     out = {"legs": legs, "untested": scalp_orderflow_untested(symbol, day_ticks),
           # Largeur du palier : un HVN/LVN est une ZONE (ce palier de prix),
           # pas un tick exact — demande explicite de l'utilisateur, affichée
           # côté client comme une bande plutôt qu'une ligne fine.
-          "bucket_size": ib._vp_bucket(symbol)}
+          "bucket_size": _orderflow_vp_bucket(symbol)}
     _ORDERFLOW_PROFILE_CACHE[symbol] = (now, out)
     return out
 
@@ -1868,8 +1879,7 @@ def scalp_orderflow_untested(symbol: str, day_ticks: pd.DataFrame) -> list[dict]
     # les plus proches de la structure actuelle) ont une vraie valeur de
     # lecture pour un scalpeur. Demande explicite de l'utilisateur : scan
     # complet en arrière-plan, affichage limité.
-    from . import iceberg as ib
-    min_gap = ib._vp_bucket(symbol) * 2
+    min_gap = _orderflow_vp_bucket(symbol) * 2
     seen_price: set[float] = set()
     kept_prices: list[float] = []
     out = []
