@@ -619,6 +619,12 @@ body {
 /* --- Page Scalp : un écran, deux mises en page ---------------------------- */
 .sc-fixed-top { display: flex; flex-direction: column; gap: 12px; margin-bottom: 12px; }
 
+/* Bascule V1/V2 du calcul du bandeau (2026-10-05) : posée en coin, discrète
+   — l'information qui compte reste le bandeau lui-même, pas le bouton. */
+.sc-bannerbox-wrap { position: relative; }
+.sc-banner-version-btn { position: absolute; top: 6px; right: 6px; z-index: 2;
+  font-size: 11px; padding: 2px 8px; }
+
 /* Widgets déplaçables/redimensionnables (2026-10-04, GridStack.js — cf.
    gex/assets/gridstack-all.js + gridstack.min.css, chargés automatiquement
    comme tout gex/assets/). GridStack gère lui-même la position/taille de

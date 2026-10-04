@@ -2922,7 +2922,27 @@ def create_app() -> Dash:
                              className="sc-order-hint"),
                 ], className="sc-controls"),
                 html.Div([
-                    html.Div(id="scalp-banner", className="sc-bannerbox"),
+                    html.Div([
+                        html.Div(id="scalp-banner", className="sc-bannerbox"),
+                        # Bascule V1 (fenêtre fixe 5 min) / V2 (swing H/L
+                        # 60V) du CALCUL du bandeau — demande explicite :
+                        # "un petit bouton commutateur à côté de l'indicateur
+                        # permettant d'avoir le calcul de la V1 ou de la V2".
+                        # dcc.Store persisté (storage_type="local", même
+                        # principe que les préférences d'indicateurs) : sa
+                        # valeur atteint directement refresh_scalp côté
+                        # Python (le calcul lui-même change de fonction,
+                        # scalp_inputs vs scalp_inputs_swing — contrairement
+                        # aux bascules d'indicateurs du graphique, purement
+                        # client-side). Uniquement sur /scalp : /scalpv1
+                        # garde swing=False forcé quoi que vaille ce store,
+                        # cf. garde dans refresh_scalp.
+                        dcc.Store(id="scalp-banner-version", storage_type="local", data="v2"),
+                        html.Button("V2", id="scalp-banner-version-toggle",
+                                    className="sc-draw-btn sc-ind-btn sc-draw-active sc-banner-version-btn",
+                                    title="Bandeau : V2 (swing H/L 60V) — cliquer pour basculer en V1 "
+                                          "(fenêtre fixe 5 min, comme /scalpv1)"),
+                    ], className="sc-bannerbox-wrap"),
                     html.Div(id="scalp-head", className="sc-head"),
                 ], className="sc-fixed-top"),
                 # Widgets déplaçables/redimensionnables (GridStack.js, cf.
@@ -3676,6 +3696,44 @@ def create_app() -> Dash:
         """,
         Output("scalp-lw-chart", "title"),
         Input("scalp-lw-data", "data"),
+    )
+
+    # Bascule V1/V2 du bandeau (cf. commentaire sur scalp-banner-version dans
+    # le layout) — DEUX callbacks, contrairement aux bascules d'indicateurs
+    # ci-dessous : celles-ci sont purement client-side (elles ne font que
+    # cacher/montrer une couche déjà dessinée), celle-ci doit changer quelle
+    # FONCTION PYTHON calcule le bandeau (scalp_inputs vs
+    # scalp_inputs_swing) — le clic doit donc atteindre le serveur via le
+    # Store, pas juste togglé une classe CSS.
+    app.clientside_callback(
+        """
+        function(n_clicks, current) {
+            if (!n_clicks) { return window.dash_clientside.no_update; }
+            return current === 'v1' ? 'v2' : 'v1';
+        }
+        """,
+        Output("scalp-banner-version", "data"),
+        Input("scalp-banner-version-toggle", "n_clicks"),
+        State("scalp-banner-version", "data"),
+        prevent_initial_call=True,
+    )
+    app.clientside_callback(
+        """
+        function(version) {
+            const btn = document.getElementById('scalp-banner-version-toggle');
+            if (!btn) { return window.dash_clientside.no_update; }
+            const v = (version === 'v1') ? 'v1' : 'v2';
+            btn.textContent = v.toUpperCase();
+            btn.title = v === 'v2'
+                ? 'Bandeau : V2 (swing H/L 60V) — cliquer pour basculer en V1 (fenêtre fixe 5 min, comme /scalpv1)'
+                : 'Bandeau : V1 (fenêtre fixe 5 min, comme /scalpv1) — cliquer pour basculer en V2 (swing H/L 60V)';
+            btn.classList.toggle('sc-draw-active', v === 'v2');
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("scalp-banner-version-toggle", "title", allow_duplicate=True),
+        Input("scalp-banner-version", "data"),
+        prevent_initial_call="initial_duplicate",
     )
 
     # Boutons de bascule des indicateurs (sc-ind-toolbar) — chacun flip son
@@ -4488,9 +4546,10 @@ def create_app() -> Dash:
          Output("scalp-price", "figure")],
         [Input("tape-tick", "n_intervals"), Input("url", "pathname"),
          Input("symbol", "value"), Input("lang", "value"),
-         Input("scalp-window", "value"), Input("scalp-min", "value")],
+         Input("scalp-window", "value"), Input("scalp-min", "value"),
+         Input("scalp-banner-version", "data")],
     )
-    def refresh_scalp(_, path, symbol, lang, window, min_size):
+    def refresh_scalp(_, path, symbol, lang, window, min_size, banner_version):
         if not is_scalp_path(path) or symbol not in ("NQ", "ES"):
             raise PreventUpdate
         hedge = hedge_fig(symbol, lang, int(window if window is not None else -1))
@@ -4506,8 +4565,11 @@ def create_app() -> Dash:
         price.update_layout(uirevision=f"scalp-price-{symbol}")
         absorb = scalp_absorption(symbol)
         # swing=True SEULEMENT sur /scalp exact — même garde que scalp-lw-card/
-        # refresh_scalp_lw, /scalpv1 ne doit jamais recevoir swing=True.
-        return (scalp_banner(symbol, ctx, spot, lang, absorb, swing=(path or "/") == "/scalp"),
+        # refresh_scalp_lw, /scalpv1 ne doit jamais recevoir swing=True quoi
+        # que vaille le store scalp-banner-version (bouton V1/V2, absent du
+        # DOM /scalpv1 de toute façon, mais la garde reste explicite ici).
+        is_v2_banner = (path or "/") == "/scalp" and (banner_version or "v2") != "v1"
+        return (scalp_banner(symbol, ctx, spot, lang, absorb, swing=is_v2_banner),
                 scalp_head(symbol, lang, ctx, spot),
                 scalp_ladder(symbol, ctx, spot), hedge, prints, price)
 
