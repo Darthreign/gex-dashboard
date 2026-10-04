@@ -1634,6 +1634,48 @@ def scalp_order_flow_zones(symbol: str, day_ticks: pd.DataFrame) -> list[dict]:
     return out
 
 
+_GEX_PROFILE_CACHE: dict[str, tuple[float, list[dict]]] = {}
+
+
+def scalp_gex_profile(symbol: str, spot: float, window: float = 0.04) -> list[dict]:
+    """Profil de GEX par strike (pondéré open interest ET volume du jour),
+    même calcul que `heatmap_fig` — porté sur `/scalp` v2 : c'était la seule
+    vraie fonctionnalité de la page heatmap qui n'avait pas déjà un
+    équivalent sur le nouveau graphique (niveaux/confluence/order-flow y
+    sont déjà). Réutilise `_chain_for_day` et
+    `metrics.gex_by_strike_weighted` tels quels plutôt que de recalculer
+    quoi que ce soit — même source de vérité que la heatmap, jamais deux
+    formules pour le même nombre.
+
+    L'open interest décrit le positionnement installé, le volume du jour ce
+    qui se traite et se couvre maintenant — un strike lourd en volume mais
+    absent en open interest prend de l'importance en séance sans figurer
+    dans la structure de la veille. D'où les DEUX séries plutôt qu'une.
+
+    Mis en cache 10s (cf. _GEX_PROFILE_CACHE, même principe que
+    confluence/order-flow) : lit la chaîne enrichie complète à chaque appel,
+    pas gratuit à chaque cycle de 1s."""
+    now = time.time()
+    hit = _GEX_PROFILE_CACHE.get(symbol)
+    if hit and now - hit[0] < SCALP_HEAVY_CACHE_S:
+        return hit[1]
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    df, chain_spot = _chain_for_day(symbol, today)
+    if df is None or df.empty or not chain_spot:
+        return []
+    lo, hi = spot * (1 - window), spot * (1 + window)
+    sel = df[df["strike"].between(lo, hi)]
+    if sel.empty:
+        return []
+    oi = metrics.gex_by_strike_weighted(sel, spot, "open_interest") / 1e9
+    vol = metrics.gex_by_strike_weighted(sel, spot, "volume") / 1e9
+    strikes = sorted(set(oi.index) | set(vol.index))
+    out = [{"price": float(k), "oi": float(oi.get(k, 0.0)), "vol": float(vol.get(k, 0.0))}
+          for k in strikes]
+    _GEX_PROFILE_CACHE[symbol] = (now, out)
+    return out
+
+
 # Sélecteur de TF (/scalp v2, demandé explicitement le 2026-10-03 après
 # avoir découvert que les barres-volume espacent le temps de façon
 # irrégulière, déroutant face à un graphique "1 min" classique) : un préfixe
@@ -1680,6 +1722,11 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
     levels = [{"name": r.name, "price": r.price, "color": C[_SC_KIND_COLOR[r.kind]]}
              for r in scalp.build_ladder(symbol, spot, ctx["zg"], ctx["hvl"], ctx["keys"], ctx["walls"])]
     confluence = scalp_confluence_zones(symbol)
+    try:
+        gex_profile = scalp_gex_profile(symbol, spot)
+    except Exception:  # noqa: BLE001 — un profil raté ne doit jamais casser le graphique
+        log.exception("Profil gamma /scalp v2 indisponible (%s)", symbol)
+        gex_profile = []
     from .tickcapture import _session_day
     day = _session_day(time.time())
     day_ticks = store.load_ticks(symbol, day)
@@ -1698,7 +1745,7 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
                 day_ticks = day_ticks[day_ticks["side"].isin(("BUY", "SELL"))]
     order_flow = scalp_order_flow_zones(symbol, day_ticks)
     empty = {"candles": [], "markers": [], "levels": levels, "confluence": confluence,
-            "order_flow": order_flow, "symbol": symbol}
+            "order_flow": order_flow, "gex_profile": gex_profile, "symbol": symbol}
 
     kind, size = tf[0], int(tf[1:])
 
@@ -1727,7 +1774,8 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
                     "low": float(r.low), "close": float(r.close)}
                   for e, r in zip(epoch, bars.itertuples())]
         return {"candles": candles, "markers": [], "levels": levels,
-                "confluence": confluence, "order_flow": order_flow, "symbol": symbol}
+                "confluence": confluence, "order_flow": order_flow,
+                "gex_profile": gex_profile, "symbol": symbol}
 
     # kind == "v" : barres-volume, base du swing (gex/bars.py, validé le 2026-10-03)
     if day_ticks.empty:
@@ -1754,7 +1802,7 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
         markers = [{"time": int(r.ts), "price": r.price, "kind": r.kind}
                    for r in confirmed.itertuples()]
     return {"candles": candles, "markers": markers, "levels": levels, "confluence": confluence,
-            "order_flow": order_flow, "symbol": symbol}
+            "order_flow": order_flow, "gex_profile": gex_profile, "symbol": symbol}
 
 
 def flow_fig(symbol: str, lang: str, day: str | None = None) -> go.Figure:
@@ -2394,6 +2442,18 @@ def create_app() -> Dash:
                               html.Span(id="rt-label")],
                              id="rt-badge", className="rt-badge",
                              style={"display": "none"}),
+                    # Personnalisation /scalp — repliée en menu déroulant
+                    # (2026-10-04, demande explicite : le panneau ouvert en
+                    # permanence en haut de page prenait trop de place).
+                    # Visible seulement sur /scalp et /scalpv1 (même CSS que
+                    # scalp-link : body.scalp-page), à côté de l'indicateur
+                    # dxFeed. Le panneau .sc-controls lui-même n'a pas bougé
+                    # de place dans l'arbre (toujours dans le contenu de
+                    # /scalp) — seule sa CSS change, position fixed +
+                    # display piloté par cette bascule plutôt que toujours
+                    # ouvert.
+                    html.Button("⚙", id="sc-controls-toggle", className="linkbtn sc-controls-gear",
+                                title="Personnalisation de l'affichage"),
                     # Connexion courtier : lien direct vers la route OAuth
                     # (cf. gex/tt_web.py). Masqué une fois connecté — un bouton
                     # « Connecter » affiché en permanence ferait douter de
@@ -2598,6 +2658,35 @@ def create_app() -> Dash:
                                 html.Button("🗑", title="Tout effacer", id="scalp-draw-clear",
                                             className="sc-draw-btn"),
                             ], id="scalp-draw-toolbar", className="sc-draw-toolbar"),
+                            # Indicateurs du graphique (2026-10-04) —
+                            # demande explicite de l'utilisateur : "il faut
+                            # pouvoir choisir ce qu'on affiche ... tu dois
+                            # être réglable comme des indicateurs". Chaque
+                            # bouton bascule UNE couche (niveaux GEX/HVL/
+                            # Flip/murs, confluence multi-familles,
+                            # order-flow HVL, profil de GEX par strike porté
+                            # de la page heatmap, pivots swing H/L) — état
+                            # partagé window._gexIndicators, persisté en
+                            # localStorage, câblé dans le clientside_callback
+                            # juste après le rendu du graphique.
+                            html.Div([
+                                html.Button("Niveaux GEX", id="scalp-ind-levels-toggle",
+                                            className="sc-draw-btn sc-ind-btn sc-draw-active",
+                                            title="Afficher/masquer les niveaux GEX/HVL/Flip/murs"),
+                                html.Button("Confluence", id="scalp-ind-confluence-toggle",
+                                            className="sc-draw-btn sc-ind-btn sc-draw-active",
+                                            title="Afficher/masquer les zones de confluence multi-familles"),
+                                html.Button("Order flow", id="scalp-ind-orderflow-toggle",
+                                            className="sc-draw-btn sc-ind-btn sc-draw-active",
+                                            title="Afficher/masquer les zones HVL order-flow"),
+                                html.Button("Σ Profil gamma", id="scalp-gexprofile-toggle",
+                                            className="sc-draw-btn sc-ind-btn sc-draw-active",
+                                            title="Afficher/masquer le profil de GEX par strike "
+                                                  "(open interest + volume du jour)"),
+                                html.Button("Swing H/L", id="scalp-ind-markers-toggle",
+                                            className="sc-draw-btn sc-ind-btn sc-draw-active",
+                                            title="Afficher/masquer les pivots swing high/low"),
+                            ], className="sc-ind-toolbar"),
                             html.Div(id="scalp-lw-chart", className="sc-lw-chart"),
                         ], id="scalp-lw-card", className="sc-card sc-underlying"),
                         dcc.Store(id="scalp-lw-data"),
@@ -2818,6 +2907,34 @@ def create_app() -> Dash:
         """,
         Output("url", "hash"),
         Input("url", "pathname"),
+    )
+
+    # Menu déroulant "⚙ Personnalisation" (2026-10-04) — clic sur l'icône
+    # bascule l'ouverture, clic en dehors du panneau (ou sur l'icône, pour
+    # refermer) la referme. Listener posé UNE fois (window._gexControlsWired)
+    # — ce callback se redéclenche à chaque clic sur l'icône, inutile
+    # d'empiler un nouveau listener document à chaque fois.
+    app.clientside_callback(
+        """
+        function(n_clicks) {
+            if (!n_clicks) { return window.dash_clientside.no_update; }
+            document.body.classList.toggle('sc-controls-open');
+            if (!window._gexControlsWired) {
+                window._gexControlsWired = true;
+                document.addEventListener('click', function(e) {
+                    if (!document.body.classList.contains('sc-controls-open')) return;
+                    const panel = document.querySelector('.sc-controls');
+                    const gear = document.getElementById('sc-controls-toggle');
+                    if (panel && (panel.contains(e.target) || (gear && gear.contains(e.target)))) return;
+                    document.body.classList.remove('sc-controls-open');
+                });
+            }
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("sc-controls-toggle", "title", allow_duplicate=True),
+        Input("sc-controls-toggle", "n_clicks"),
+        prevent_initial_call=True,
     )
 
     # Rendu du graphique Lightweight Charts (/scalp v2 uniquement) — crée le
@@ -3051,8 +3168,98 @@ def create_app() -> Dash:
                 };
                 window.addEventListener('resize', onResize);
                 new ResizeObserver(onResize).observe(container);
+                // Profil de GEX par strike (porté de la page heatmap,
+                // 2026-10-04, cf. gex/assets/gex-profile-overlay.js) —
+                // primitive attachée UNE fois comme les outils de dessin,
+                // seule setData() change ensuite à chaque cycle.
+                let profile = null;
+                if (window.GexProfilePrimitive) {
+                    profile = new window.GexProfilePrimitive();
+                    series.attachPrimitive(profile);
+                }
                 window._gexLwChart = { container: container, chart: chart, series: series,
-                                       priceLines: [], fitted: false };
+                                       priceLines: [], fitted: false, profile: profile,
+                                       lastData: null };
+                // Indicateurs du graphique (2026-10-04) — niveaux GEX/HVL/
+                // Flip/murs, confluence, order-flow, profil gamma par
+                // strike (porté de la page heatmap) et pivots swing H/L :
+                // chacun individuellement basculable (demande explicite de
+                // l'utilisateur, "il faut pouvoir choisir ce qu'on affiche
+                // ... tu dois être réglable comme des indicateurs"), état
+                // persisté en localStorage, appliqué par applyIndicators()
+                // ci-dessous — appelée ici ET par les boutons de bascule
+                // (callbacks séparés plus bas), jamais dupliquée.
+                let indicators = { levels: true, confluence: true, order_flow: true,
+                                   gex_profile: true, markers: true };
+                try {
+                    const saved = JSON.parse(window.localStorage.getItem('gex-scalp-indicators') || 'null');
+                    if (saved) indicators = Object.assign(indicators, saved);
+                } catch (e) { /* valeurs par défaut */ }
+                window._gexIndicators = indicators;
+                // Les boutons sont rendus actifs par défaut côté Python
+                // (valeur initiale avant tout chargement) — resynchronise
+                // leur classe visuelle sur la préférence réellement chargée
+                // (localStorage), pour ne jamais afficher un bouton "actif"
+                // dont l'indicateur correspondant est en fait masqué.
+                [["scalp-ind-levels-toggle", "levels"], ["scalp-ind-confluence-toggle", "confluence"],
+                 ["scalp-ind-orderflow-toggle", "order_flow"],
+                 ["scalp-gexprofile-toggle", "gex_profile"],
+                 ["scalp-ind-markers-toggle", "markers"]].forEach(function(pair) {
+                    const btn = document.getElementById(pair[0]);
+                    if (btn) btn.classList.toggle('sc-draw-active', indicators[pair[1]]);
+                });
+                window._gexLwChart.applyIndicators = function() {
+                    const st = window._gexLwChart;
+                    const d = st.lastData;
+                    if (!d) return;
+                    const ind = window._gexIndicators;
+                    for (const pl of st.priceLines) { st.series.removePriceLine(pl); }
+                    const simpleLines = ind.levels ? (d.levels || []).map(function(lv) {
+                        return st.series.createPriceLine({
+                            price: lv.price, color: lv.color, lineWidth: 1,
+                            lineStyle: LightweightCharts.LineStyle.Dashed,
+                            axisLabelVisible: true, title: lv.name,
+                        });
+                    }) : [];
+                    // Confluence multi-familles (SPX/NDX/QQQ/NQ/ES transposés
+                    // sur cette échelle, cf. scalp_confluence_zones) : ligne
+                    // pleine DORÉE, plus épaisse que les niveaux simples —
+                    // distincte visuellement, plusieurs mécanismes de
+                    // couverture différents convergent ici.
+                    const confluenceLines = ind.confluence ? (d.confluence || []).map(function(z) {
+                        return st.series.createPriceLine({
+                            price: z.price, color: '#c98500', lineWidth: 2,
+                            lineStyle: LightweightCharts.LineStyle.Solid,
+                            axisLabelVisible: true, title: 'Confluence x' + z.n,
+                        });
+                    }) : [];
+                    // Zones order flow (HVL volume profil, cf.
+                    // scalp_order_flow_zones) : ligne pointillée cyan,
+                    // étiquette volume+côté — distincte des niveaux GEX/HVL
+                    // simples (tirets) et de la confluence (pleine dorée).
+                    const flowLines = ind.order_flow ? (d.order_flow || []).map(function(h) {
+                        return st.series.createPriceLine({
+                            price: h.price, color: '#3987e5', lineWidth: 1,
+                            lineStyle: LightweightCharts.LineStyle.Dotted,
+                            axisLabelVisible: true,
+                            title: 'HVL ' + (h.side === 'BUY' ? '↑' : '↓') + ' ' + Math.round(h.vol),
+                        });
+                    }) : [];
+                    st.priceLines = simpleLines.concat(confluenceLines, flowLines);
+                    st.series.setMarkers(ind.markers ? (d.markers || []).map(function(m) {
+                        const isHigh = m.kind.startsWith('H');
+                        return {
+                            time: m.time, position: isHigh ? 'aboveBar' : 'belowBar',
+                            color: isHigh ? '#e66767' : '#199e70',
+                            shape: isHigh ? 'arrowDown' : 'arrowUp',
+                            text: m.kind + ' ' + Math.round(m.price),
+                        };
+                    }) : []);
+                    if (st.profile) {
+                        st.profile.setVisible(ind.gex_profile);
+                        st.profile.setData(d.gex_profile || []);
+                    }
+                };
                 setupDrawingTools(chart, series, container);
             }
             const state = window._gexLwChart;
@@ -3069,15 +3276,6 @@ def create_app() -> Dash:
             for (const c of (data.candles || [])) byTime.set(c.time, c);
             const candles = Array.from(byTime.values()).sort(function(a, b) { return a.time - b.time; });
             state.series.setData(candles);
-            state.series.setMarkers((data.markers || []).map(function(m) {
-                const isHigh = m.kind.startsWith('H');
-                return {
-                    time: m.time, position: isHigh ? 'aboveBar' : 'belowBar',
-                    color: isHigh ? '#e66767' : '#199e70',
-                    shape: isHigh ? 'arrowDown' : 'arrowUp',
-                    text: m.kind + ' ' + Math.round(m.price),
-                };
-            }));
             // fitContent() UNE SEULE FOIS (premier chargement de données) —
             // le rappeler à chaque rafraîchissement (chaque cycle ~1s)
             // écrase le zoom/pan de l'utilisateur en permanence, exactement
@@ -3089,46 +3287,51 @@ def create_app() -> Dash:
                 state.chart.timeScale().fitContent();
                 state.fitted = true;
             }
-            // Niveaux GEX/HVL/Flip/murs : enlève les anciennes lignes avant
-            // d'en recréer — Lightweight Charts n'a pas de "setPriceLines"
-            // qui remplace en bloc, seulement add/remove une par une.
-            for (const pl of state.priceLines) { state.series.removePriceLine(pl); }
-            const simpleLines = (data.levels || []).map(function(lv) {
-                return state.series.createPriceLine({
-                    price: lv.price, color: lv.color, lineWidth: 1,
-                    lineStyle: LightweightCharts.LineStyle.Dashed,
-                    axisLabelVisible: true, title: lv.name,
-                });
-            });
-            // Confluence multi-familles (SPX/NDX/QQQ/NQ/ES transposés sur
-            // cette échelle, cf. scalp_confluence_zones) : ligne pleine DORÉE,
-            // plus épaisse que les niveaux simples — distincte visuellement,
-            // plusieurs mécanismes de couverture différents convergent ici.
-            const confluenceLines = (data.confluence || []).map(function(z) {
-                return state.series.createPriceLine({
-                    price: z.price, color: '#c98500', lineWidth: 2,
-                    lineStyle: LightweightCharts.LineStyle.Solid,
-                    axisLabelVisible: true, title: 'Confluence x' + z.n,
-                });
-            });
-            // Zones order flow (HVL volume profil, cf. scalp_order_flow_zones) :
-            // ligne pointillée cyan, étiquette volume+côté — distincte des
-            // niveaux GEX/HVL simples (tirets) et de la confluence (pleine dorée).
-            const flowLines = (data.order_flow || []).map(function(h) {
-                return state.series.createPriceLine({
-                    price: h.price, color: '#3987e5', lineWidth: 1,
-                    lineStyle: LightweightCharts.LineStyle.Dotted,
-                    axisLabelVisible: true,
-                    title: 'HVL ' + (h.side === 'BUY' ? '↑' : '↓') + ' ' + Math.round(h.vol),
-                });
-            });
-            state.priceLines = simpleLines.concat(confluenceLines, flowLines);
+            state.lastData = data;
+            state.applyIndicators();
             return window.dash_clientside.no_update;
         }
         """,
         Output("scalp-lw-chart", "title"),
         Input("scalp-lw-data", "data"),
     )
+
+    # Boutons de bascule des indicateurs (sc-ind-toolbar) — chacun flip son
+    # propre flag dans window._gexIndicators, persiste, puis ré-applique
+    # IMMÉDIATEMENT sur les dernières données reçues (state.lastData) sans
+    # attendre le prochain cycle de rafraîchissement (~1s) : le retour
+    # visuel au clic doit être instantané.
+    for _ind_key, _ind_btn_id in (
+        ("levels", "scalp-ind-levels-toggle"),
+        ("confluence", "scalp-ind-confluence-toggle"),
+        ("order_flow", "scalp-ind-orderflow-toggle"),
+        ("gex_profile", "scalp-gexprofile-toggle"),
+        ("markers", "scalp-ind-markers-toggle"),
+    ):
+        app.clientside_callback(
+            """
+            function(n_clicks) {
+                if (!n_clicks) { return window.dash_clientside.no_update; }
+                const key = '""" + _ind_key + """';
+                const btn = document.getElementById('""" + _ind_btn_id + """');
+                window._gexIndicators = window._gexIndicators || {};
+                const next = !window._gexIndicators[key];
+                window._gexIndicators[key] = next;
+                if (btn) btn.classList.toggle('sc-draw-active', next);
+                try {
+                    window.localStorage.setItem('gex-scalp-indicators',
+                        JSON.stringify(window._gexIndicators));
+                } catch (e) { /* tant pis, pas bloquant */ }
+                if (window._gexLwChart && window._gexLwChart.applyIndicators) {
+                    window._gexLwChart.applyIndicators();
+                }
+                return window.dash_clientside.no_update;
+            }
+            """,
+            Output(_ind_btn_id, "title", allow_duplicate=True),
+            Input(_ind_btn_id, "n_clicks"),
+            prevent_initial_call=True,
+        )
 
     # Couverture des dealers (/scalp v2) — même principe que le graphique de
     # prix : un LineSeries par catégorie, créés UNE fois (persistés dans

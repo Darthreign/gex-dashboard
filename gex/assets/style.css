@@ -682,10 +682,19 @@ body {
    trouvée du premier coup. Carte à part entière, bordée, avec un titre
    explicite, pour qu'elle se voie au même titre que n'importe quelle autre
    carte de la page plutôt que de se fondre dans la barre du haut. */
+/* Menu déroulant (2026-10-04) — repliée par défaut, ouverte via le bouton
+   ⚙ à côté de l'indicateur dxFeed (.sc-controls-gear) plutôt qu'un panneau
+   toujours ouvert qui prenait trop de place en haut de page. `position:
+   fixed` : flotte au-dessus du contenu plutôt que de pousser la page, pas
+   besoin d'ancêtre positionné vu qu'elle s'ancre à la fenêtre, pas à un
+   bloc particulier. */
 .sc-controls {
   display: none; flex-direction: column; gap: 10px;
-  margin: 2px 0 12px; padding: 12px 14px;
+  position: fixed; top: 54px; right: 16px; z-index: 50;
+  width: 320px; max-width: calc(100vw - 32px); max-height: 75vh; overflow-y: auto;
+  padding: 12px 14px;
   background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .45);
 }
 .sc-controls-title {
   font-size: 12px; color: var(--muted); letter-spacing: .02em; text-transform: uppercase;
@@ -698,7 +707,15 @@ body {
    Seule la bascule Plotly/Lightweight Charts plus bas reste scopée à
    .scalp-v2-page : LÀ, c'est une vraie différence de moteur entre les
    pages, pas un simple réglage d'affichage. */
-body.scalp-page .sc-controls { display: flex; }
+body.scalp-page.sc-controls-open .sc-controls { display: flex; }
+.sc-controls-gear {
+  display: none; font-size: 16px; padding: 4px 10px; line-height: 1;
+  background: var(--surface-2); border-radius: 7px; cursor: pointer;
+}
+body.scalp-page .sc-controls-gear { display: inline-flex; align-items: center; }
+body.scalp-page.sc-controls-open .sc-controls-gear {
+  background: var(--ink); color: var(--page);
+}
 .sc-layout-toggle {
   background: var(--surface-2); color: var(--ink);
   border: 1px solid var(--line); border-radius: 7px; padding: 7px 14px;
@@ -793,6 +810,10 @@ body.scalp-v2-page #scalp-lw-card { display: flex; flex-direction: column; }
 }
 .sc-draw-btn:hover { border-color: var(--accent); color: var(--ink); }
 .sc-draw-btn.sc-draw-active { border-color: var(--accent); color: var(--ink); background: #1f3a5c; }
+/* Barre des indicateurs (profil gamma, 2026-10-04) — bouton texte plutôt
+   qu'icône, largeur libre contrairement aux boutons de dessin carrés. */
+.sc-ind-toolbar { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 6px; }
+.sc-ind-btn { width: auto; padding: 0 10px; }
 
 /* Même bascule pour la couverture des dealers (demandé le 2026-10-03,
    "tu ne passes pas par Lightweight Charts ?") — /scalpv1 garde
