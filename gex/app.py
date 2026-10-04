@@ -1676,6 +1676,139 @@ def scalp_gex_profile(symbol: str, spot: float, window: float = 0.04) -> list[di
     return out
 
 
+_ORDERFLOW_PROFILE_CACHE: dict[str, tuple[float, dict]] = {}
+VALUE_AREA_PCT = 0.70  # convention standard (≈1 écart-type) du volume profile
+
+
+def _volume_profile(leg_ticks: pd.DataFrame, symbol: str) -> dict | None:
+    """Profil de volume par palier de prix sur un intervalle de ticks donné —
+    paliers/colonnes identiques à `scalp_order_flow_zones` (même
+    `ib._vp_bucket`, jamais deux tailles de palier différentes pour le même
+    symbole). Ajoute POC (palier le plus traité) et la zone de valeur à 70 %
+    (VAH/VAL) : depuis le POC, on étend d'un palier à la fois du côté
+    (haut ou bas) le plus volumineux jusqu'à couvrir VALUE_AREA_PCT du volume
+    total — définition standard du volume profile, pas une invention maison."""
+    if leg_ticks.empty:
+        return None
+    from . import iceberg as ib
+    bucket_size = ib._vp_bucket(symbol)
+    bucket_key = (leg_ticks["price"] / bucket_size).round() * bucket_size
+    g = pd.DataFrame({
+        "vol": leg_ticks["volume"],
+        "buy": leg_ticks["volume"].where(leg_ticks["side"] == "BUY", 0),
+        "sell": leg_ticks["volume"].where(leg_ticks["side"] == "SELL", 0),
+        "_bucket": bucket_key,
+    }).groupby("_bucket").sum()
+    if g.empty or g["vol"].sum() <= 0:
+        return None
+    sorted_idx = list(g.index.sort_values())
+    poc_price = float(g["vol"].idxmax())
+    poc_pos = sorted_idx.index(poc_price)
+    lo_pos = hi_pos = poc_pos
+    total = float(g["vol"].sum())
+    covered = float(g.loc[poc_price, "vol"])
+    target = total * VALUE_AREA_PCT
+    while covered < target and (lo_pos > 0 or hi_pos < len(sorted_idx) - 1):
+        vol_below = float(g.loc[sorted_idx[lo_pos - 1], "vol"]) if lo_pos > 0 else -1.0
+        vol_above = float(g.loc[sorted_idx[hi_pos + 1], "vol"]) if hi_pos < len(sorted_idx) - 1 else -1.0
+        if vol_above >= vol_below:
+            hi_pos += 1
+            covered += vol_above
+        else:
+            lo_pos -= 1
+            covered += vol_below
+    buckets = [{"price": float(p), "vol": float(r["vol"]), "buy": float(r["buy"]),
+               "sell": float(r["sell"])} for p, r in g.iterrows()]
+    return {"poc": poc_price, "vah": float(sorted_idx[hi_pos]), "val": float(sorted_idx[lo_pos]),
+           "buckets": buckets}
+
+
+def scalp_orderflow_profile(symbol: str, day_ticks: pd.DataFrame) -> dict:
+    """Profils de volume ancrés sur les jambes de swing (2026-10-04,
+    remplace/complète `scalp_order_flow_zones`) — demandé explicitement :
+    profil complet (volume/delta/POC/VAH/VAL) sur les DEUX dernières jambes
+    (la en cours ET la dernière confirmée, pas que celle qui se dessine —
+    sinon le contexte d'un retracement se perd), plus les zones HVL/LVL plus
+    anciennes dont le prix n'a plus été retouché depuis (persistent comme
+    simples niveaux une fois leur jambe sortie des deux gardées en entier).
+
+    Swing calculé EXACTEMENT comme le bandeau (`scalp_inputs_swing` :
+    bar_volume=60, min_move=`scalp.move_threshold(symbol) * 0.6`) —
+    décorrélé du sélecteur de TF du graphique, qui ne change que
+    l'affichage, jamais le moteur (même principe que le bandeau swing).
+
+    Mis en cache 10s (cf. _ORDERFLOW_PROFILE_CACHE) : construit des
+    barres-volume + un zigzag + plusieurs profils par palier à chaque appel,
+    pas gratuit à chaque cycle de 1s."""
+    empty = {"legs": [], "untested": []}
+    if day_ticks.empty:
+        return empty
+    now = time.time()
+    hit = _ORDERFLOW_PROFILE_CACHE.get(symbol)
+    if hit and now - hit[0] < SCALP_HEAVY_CACHE_S:
+        return hit[1]
+    bars = volume_bars(day_ticks, bar_volume=60.0)
+    if len(bars) < 5:
+        return empty
+    swings = zigzag(bars, min_move=scalp.move_threshold(symbol) * 0.6)
+    confirmed = swings[~swings["kind"].str.endswith("?")].reset_index(drop=True)
+    if confirmed.empty:
+        return empty
+
+    last_ts = float(confirmed.iloc[-1]["ts"])
+    now_ts = float(day_ticks["ts"].iloc[-1])
+    # (t0, t1, en_cours) : la jambe en cours (dernier pivot confirmé -> maintenant)
+    # d'abord, puis l'avant-dernière -> dernière si elle existe.
+    bounds = [(last_ts, now_ts, True)]
+    if len(confirmed) >= 2:
+        bounds.append((float(confirmed.iloc[-2]["ts"]), last_ts, False))
+
+    legs = []
+    for t0, t1, is_current in bounds:
+        leg_ticks = day_ticks[(day_ticks["ts"] >= t0) & (day_ticks["ts"] <= t1)]
+        prof = _volume_profile(leg_ticks, symbol)
+        if prof:
+            prof.update(t0=int(t0), t1=int(t1), current=is_current)
+            legs.append(prof)
+
+    # HVL/LVL non revisités : parmi quelques jambes plus anciennes que les
+    # deux gardées en entier (bornées à 4, au-delà le coût de calcul n'en
+    # vaut plus la peine sur une vraie séance), le POC (= HVL : palier le
+    # plus traité) et le palier le moins traité (= LVL) de chaque jambe,
+    # gardés seulement si le prix n'est jamais revenu dans cette zone depuis
+    # la fin de cette jambe.
+    untested = []
+    if len(confirmed) >= 3:
+        touched_since = day_ticks[day_ticks["ts"] >= last_ts]
+        lo_touched = float(touched_since["price"].min()) if not touched_since.empty else None
+        hi_touched = float(touched_since["price"].max()) if not touched_since.empty else None
+        start_i = max(0, len(confirmed) - 6)
+        for i in range(start_i, len(confirmed) - 2):
+            t0, t1 = float(confirmed.iloc[i]["ts"]), float(confirmed.iloc[i + 1]["ts"])
+            leg_ticks = day_ticks[(day_ticks["ts"] >= t0) & (day_ticks["ts"] <= t1)]
+            prof = _volume_profile(leg_ticks, symbol)
+            if not prof or not prof["buckets"]:
+                continue
+            lvl_price = min(prof["buckets"], key=lambda b: b["vol"])["price"]
+            for price, kind in ((prof["poc"], "hvl"), (lvl_price, "lvl")):
+                revisited = (lo_touched is not None and lo_touched <= price <= hi_touched)
+                if not revisited:
+                    untested.append({"price": price, "kind": kind})
+
+    # Déduplique (prix, nature) : deux jambes voisines peuvent partager le
+    # même palier extrême, pas la peine d'afficher deux fois la même ligne.
+    seen = set()
+    untested_dedup = []
+    for u in untested:
+        key = (u["price"], u["kind"])
+        if key not in seen:
+            seen.add(key)
+            untested_dedup.append(u)
+    out = {"legs": legs, "untested": untested_dedup}
+    _ORDERFLOW_PROFILE_CACHE[symbol] = (now, out)
+    return out
+
+
 # Sélecteur de TF (/scalp v2, demandé explicitement le 2026-10-03 après
 # avoir découvert que les barres-volume espacent le temps de façon
 # irrégulière, déroutant face à un graphique "1 min" classique) : un préfixe
@@ -1744,8 +1877,14 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
             if not day_ticks.empty:
                 day_ticks = day_ticks[day_ticks["side"].isin(("BUY", "SELL"))]
     order_flow = scalp_order_flow_zones(symbol, day_ticks)
+    try:
+        orderflow_profile = scalp_orderflow_profile(symbol, day_ticks)
+    except Exception:  # noqa: BLE001 — un profil raté ne doit jamais casser le graphique
+        log.exception("Profil order-flow par jambe /scalp v2 indisponible (%s)", symbol)
+        orderflow_profile = {"legs": [], "untested": []}
     empty = {"candles": [], "markers": [], "levels": levels, "confluence": confluence,
-            "order_flow": order_flow, "gex_profile": gex_profile, "symbol": symbol}
+            "order_flow": order_flow, "gex_profile": gex_profile,
+            "orderflow_profile": orderflow_profile, "symbol": symbol}
 
     kind, size = tf[0], int(tf[1:])
 
@@ -1775,7 +1914,8 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
                   for e, r in zip(epoch, bars.itertuples())]
         return {"candles": candles, "markers": [], "levels": levels,
                 "confluence": confluence, "order_flow": order_flow,
-                "gex_profile": gex_profile, "symbol": symbol}
+                "gex_profile": gex_profile, "orderflow_profile": orderflow_profile,
+                "symbol": symbol}
 
     # kind == "v" : barres-volume, base du swing (gex/bars.py, validé le 2026-10-03)
     if day_ticks.empty:
@@ -1802,7 +1942,8 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
         markers = [{"time": int(r.ts), "price": r.price, "kind": r.kind}
                    for r in confirmed.itertuples()]
     return {"candles": candles, "markers": markers, "levels": levels, "confluence": confluence,
-            "order_flow": order_flow, "gex_profile": gex_profile, "symbol": symbol}
+            "order_flow": order_flow, "gex_profile": gex_profile,
+            "orderflow_profile": orderflow_profile, "symbol": symbol}
 
 
 def flow_fig(symbol: str, lang: str, day: str | None = None) -> go.Figure:
@@ -2686,6 +2827,11 @@ def create_app() -> Dash:
                                 html.Button("Swing H/L", id="scalp-ind-markers-toggle",
                                             className="sc-draw-btn sc-ind-btn sc-draw-active",
                                             title="Afficher/masquer les pivots swing high/low"),
+                                html.Button("Profil volume", id="scalp-ind-ofprofile-toggle",
+                                            className="sc-draw-btn sc-ind-btn sc-draw-active",
+                                            title="Afficher/masquer le profil de volume des 2 "
+                                                  "dernières jambes de swing (POC/VAH/VAL + "
+                                                  "zones HVL/LVL non testées)"),
                             ], className="sc-ind-toolbar"),
                             html.Div(id="scalp-lw-chart", className="sc-lw-chart"),
                         ], id="scalp-lw-card", className="sc-card sc-underlying"),
@@ -3177,20 +3323,29 @@ def create_app() -> Dash:
                     profile = new window.GexProfilePrimitive();
                     series.attachPrimitive(profile);
                 }
+                // Profil de volume par jambe de swing (2026-10-04, cf.
+                // gex/assets/gex-orderflow-profile.js) — même principe
+                // d'attachement unique que le profil gamma.
+                let ofProfile = null;
+                if (window.OrderFlowProfilePrimitive) {
+                    ofProfile = new window.OrderFlowProfilePrimitive();
+                    series.attachPrimitive(ofProfile);
+                }
                 window._gexLwChart = { container: container, chart: chart, series: series,
                                        priceLines: [], fitted: false, profile: profile,
-                                       lastData: null };
+                                       ofProfile: ofProfile, lastData: null };
                 // Indicateurs du graphique (2026-10-04) — niveaux GEX/HVL/
                 // Flip/murs, confluence, order-flow, profil gamma par
-                // strike (porté de la page heatmap) et pivots swing H/L :
-                // chacun individuellement basculable (demande explicite de
+                // strike (porté de la page heatmap), profil de volume par
+                // jambe de swing et pivots swing H/L : chacun
+                // individuellement basculable (demande explicite de
                 // l'utilisateur, "il faut pouvoir choisir ce qu'on affiche
                 // ... tu dois être réglable comme des indicateurs"), état
                 // persisté en localStorage, appliqué par applyIndicators()
                 // ci-dessous — appelée ici ET par les boutons de bascule
                 // (callbacks séparés plus bas), jamais dupliquée.
                 let indicators = { levels: true, confluence: true, order_flow: true,
-                                   gex_profile: true, markers: true };
+                                   gex_profile: true, markers: true, orderflow_profile: true };
                 try {
                     const saved = JSON.parse(window.localStorage.getItem('gex-scalp-indicators') || 'null');
                     if (saved) indicators = Object.assign(indicators, saved);
@@ -3204,7 +3359,8 @@ def create_app() -> Dash:
                 [["scalp-ind-levels-toggle", "levels"], ["scalp-ind-confluence-toggle", "confluence"],
                  ["scalp-ind-orderflow-toggle", "order_flow"],
                  ["scalp-gexprofile-toggle", "gex_profile"],
-                 ["scalp-ind-markers-toggle", "markers"]].forEach(function(pair) {
+                 ["scalp-ind-markers-toggle", "markers"],
+                 ["scalp-ind-ofprofile-toggle", "orderflow_profile"]].forEach(function(pair) {
                     const btn = document.getElementById(pair[0]);
                     if (btn) btn.classList.toggle('sc-draw-active', indicators[pair[1]]);
                 });
@@ -3245,7 +3401,21 @@ def create_app() -> Dash:
                             title: 'HVL ' + (h.side === 'BUY' ? '↑' : '↓') + ' ' + Math.round(h.vol),
                         });
                     }) : [];
-                    st.priceLines = simpleLines.concat(confluenceLines, flowLines);
+                    // Zones HVL/LVL non revisitées (cf. scalp_orderflow_profile)
+                    // — jambes plus anciennes que les deux gardées en entier
+                    // dans le profil ; simple ligne fine, violette (distincte
+                    // de TOUTES les autres couleurs déjà utilisées), tant que
+                    // le prix n'est jamais repassé dans cette zone depuis.
+                    const untestedLines = (ind.orderflow_profile
+                            ? ((d.orderflow_profile || {}).untested || []) : []).map(function(u) {
+                        return st.series.createPriceLine({
+                            price: u.price, color: '#9c6ade', lineWidth: 1,
+                            lineStyle: LightweightCharts.LineStyle.Dotted,
+                            axisLabelVisible: true,
+                            title: (u.kind === 'hvl' ? 'HVL' : 'LVL') + ' non testé',
+                        });
+                    });
+                    st.priceLines = simpleLines.concat(confluenceLines, flowLines, untestedLines);
                     st.series.setMarkers(ind.markers ? (d.markers || []).map(function(m) {
                         const isHigh = m.kind.startsWith('H');
                         return {
@@ -3258,6 +3428,10 @@ def create_app() -> Dash:
                     if (st.profile) {
                         st.profile.setVisible(ind.gex_profile);
                         st.profile.setData(d.gex_profile || []);
+                    }
+                    if (st.ofProfile) {
+                        st.ofProfile.setVisible(ind.orderflow_profile);
+                        st.ofProfile.setData(((d.orderflow_profile || {}).legs) || []);
                     }
                 };
                 setupDrawingTools(chart, series, container);
@@ -3307,6 +3481,7 @@ def create_app() -> Dash:
         ("order_flow", "scalp-ind-orderflow-toggle"),
         ("gex_profile", "scalp-gexprofile-toggle"),
         ("markers", "scalp-ind-markers-toggle"),
+        ("orderflow_profile", "scalp-ind-ofprofile-toggle"),
     ):
         app.clientside_callback(
             """
