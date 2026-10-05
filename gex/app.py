@@ -986,6 +986,38 @@ def hedge_fig(symbol: str, lang: str, window_min: int = 15,
     return fig
 
 
+_HEDGE_FIG_CACHE: dict[tuple, tuple[float, go.Figure]] = {}
+HEDGE_FIG_CACHE_S = 2.0
+
+
+def cached_hedge_fig(symbol: str, lang: str, window_min: int = 15,
+                     day: str | None = None) -> go.Figure:
+    """`hedge_fig`, mis en cache quelques secondes (2026-10-05, urgence
+    serveur en fin d'après-midi — 1ère séance sous charge réelle prolongée).
+
+    `hedge_fig` est recalculée en entier (go.Figure complète, 5 traces) à
+    CHAQUE cycle de `tape-tick` (1s), PAR ONGLET, dans `refresh_scalp` — en
+    mode Live, `_hedge_series` fait en plus une somme cumulée sur toute la
+    fenêtre glissante de prints (`TAPE.live_points`), qui grossit
+    mécaniquement avec le nombre de prints déjà vus dans la séance. Jamais
+    un problème en tests (week-end, séance calme, volume quasi nul) ; sous
+    le vrai volume d'une séance qui avance, ce recalcul répété devient assez
+    coûteux pour saturer le pool de threads avec plusieurs onglets ouverts
+    — repéré en direct (bandeau qui ne répond plus). 2s de cache (même
+    ordre de grandeur que `_load_prices_cached`) : largement sous la
+    perception humaine pour un graphique de ce type, qui absorbe le
+    recalcul répété entre onglets ET entre cycles rapprochés du même
+    onglet."""
+    key = (symbol, lang, window_min, day)
+    now = time.time()
+    hit = _HEDGE_FIG_CACHE.get(key)
+    if hit and now - hit[0] < HEDGE_FIG_CACHE_S:
+        return hit[1]
+    fig = hedge_fig(symbol, lang, window_min, day)
+    _HEDGE_FIG_CACHE[key] = (now, fig)
+    return fig
+
+
 def scalp_v2_hedge_data(symbol: str, window_min: int, day: str) -> dict:
     """Même donnée que `hedge_fig` (via `_hedge_series`, partagée — pas de
     second calcul), en JSON pour les LineSeries Lightweight Charts de
@@ -3895,8 +3927,11 @@ def create_app() -> Dash:
                 };
                 es.onerror = function() {
                     es.close();
-                    if (window._scChartStreamToken !== token) return;
-                    window._scChartStreamTimer = setTimeout(connect, state.delay);
+                    // cf. commentaire détaillé sur le flux prix (gex/api.py) :
+                    // le 2e test (es courant ?) évite des chaînes de
+                    // reconnexion orphelines après plusieurs échecs rapprochés.
+                    if (window._scChartStreamToken !== token || window._scChartStream !== es) return;
+                    window._scChartStreamTimer = setTimeout(connect, state.delay + Math.random() * 2000);
                     state.delay = Math.min(state.delay * 2, 30000);
                 };
             };
@@ -4382,8 +4417,17 @@ def create_app() -> Dash:
                 };
                 es.onerror = function() {
                     es.close();
-                    if (window._scStreamToken !== token) return;  // remplacé depuis
-                    window._scStreamTimer = setTimeout(connect, state.delay);
+                    // remplacé depuis (changement de symbole/page) OU cet `es`
+                    // n'est déjà plus le flux courant (une reconnexion plus
+                    // récente a pris le relais) — sans ce 2e test, plusieurs
+                    // chaînes de reconnexion orphelines peuvent se chevaucher
+                    // indéfiniment après plusieurs échecs rapprochés (ex.
+                    // plusieurs redémarrages serveur de suite), chacune
+                    // ouvrant sa propre connexion sans jamais s'annuler — bug
+                    // trouvé en direct le 2026-10-05 (70+ connexions pour 3
+                    // utilisateurs réels après une série de redémarrages).
+                    if (window._scStreamToken !== token || window._scStream !== es) return;
+                    window._scStreamTimer = setTimeout(connect, state.delay + Math.random() * 2000);
                     state.delay = Math.min(state.delay * 2, 30000);
                 };
             };
@@ -4436,8 +4480,11 @@ def create_app() -> Dash:
                 };
                 es.onerror = function() {
                     es.close();
-                    if (window._scIndStreamToken !== token) return;
-                    window._scIndStreamTimer = setTimeout(connect, state.delay);
+                    // cf. commentaire détaillé sur le flux prix (gex/api.py) :
+                    // le 2e test (es courant ?) évite des chaînes de
+                    // reconnexion orphelines après plusieurs échecs rapprochés.
+                    if (window._scIndStreamToken !== token || window._scIndStream !== es) return;
+                    window._scIndStreamTimer = setTimeout(connect, state.delay + Math.random() * 2000);
                     state.delay = Math.min(state.delay * 2, 30000);
                 };
             };
@@ -4845,7 +4892,7 @@ def create_app() -> Dash:
     def refresh_hedge(_, tab, symbol, window, lang):
         if tab != "tape":
             raise PreventUpdate
-        return hedge_fig(symbol, lang, int(window or 0))    # -1 = live à la seconde
+        return cached_hedge_fig(symbol, lang, int(window or 0))    # -1 = live à la seconde
 
     @app.callback(
         [Output("scalp-banner", "children"),
@@ -4879,7 +4926,7 @@ def create_app() -> Dash:
         # d'affichage (scalp-hedge-card visible, scalp-lw-hedge-card masquée,
         # y compris sur /scalp v2 désormais).
         is_v2 = (path or "/") == "/scalp"
-        hedge = hedge_fig(symbol, lang, int(window if window is not None else -1))
+        hedge = cached_hedge_fig(symbol, lang, int(window if window is not None else -1))
         hedge.update_layout(height=300, uirevision=f"scalp-{symbol}-{window}")
         prints = tape_table(symbol, lang, min_size=float(min_size or 0), include_combos=False)
         ctx = scalp_context(symbol)
@@ -5116,25 +5163,43 @@ def create_app() -> Dash:
 
         def gen():
             last_sig = None
+            last_spot = None
+            last_full_check = 0.0
             last_heartbeat = time.monotonic()
+            # scalp_v2_chart_data (bougies + zigzag + niveaux) est la plus
+            # chère des 3 fonctions poussées par SSE — contrairement au flux
+            # indicateurs ci-dessus (qui compare les horodatages des caches
+            # AVANT de recalculer), cette boucle appelait la fonction complète
+            # à CHAQUE itération, résultat jeté ensuite si inchangé (repéré
+            # en direct, 2026-10-05 ~16h40 ET, contention GIL généralisée —
+            # même les jobs planifiés sans rapport sautaient leur cycle).
+            # Pré-filtre bon marché : les bougies/niveaux ne peuvent pas
+            # changer sans que `spot` bouge — ne recalculer que si le spot a
+            # changé, ou au pire toutes les 5s (changement de minute, niveaux
+            # recalculés par le moteur planifié, etc., qui ne bougent pas
+            # forcément le spot).
             while True:
                 payload = None
                 try:
                     ctx = scalp_context(symbol)
                     if ctx is not None:
                         spot = _scalp_live_spot(symbol, ctx)
-                        data = scalp_v2_chart_data(symbol, ctx, spot, tf=tf)
-                        candles = data.get("candles") or []
-                        markers = data.get("markers") or []
-                        # signature bon marché : nombre de bougies/marqueurs +
-                        # OHLC de la dernière bougie (la seule qui bouge entre
-                        # deux clôtures) — pas tout le payload à chaque cycle
-                        last = candles[-1] if candles else None
-                        sig = (len(candles), len(markers),
-                              last and (last["time"], last["close"]))
-                        if sig != last_sig:
-                            last_sig = sig
-                            payload = f"data: {json.dumps(data)}\n\n"
+                        now_mono = time.monotonic()
+                        if spot != last_spot or now_mono - last_full_check >= 5.0:
+                            last_spot = spot
+                            last_full_check = now_mono
+                            data = scalp_v2_chart_data(symbol, ctx, spot, tf=tf)
+                            candles = data.get("candles") or []
+                            markers = data.get("markers") or []
+                            # signature bon marché : nombre de bougies/marqueurs +
+                            # OHLC de la dernière bougie (la seule qui bouge entre
+                            # deux clôtures) — pas tout le payload à chaque cycle
+                            last = candles[-1] if candles else None
+                            sig = (len(candles), len(markers),
+                                  last and (last["time"], last["close"]))
+                            if sig != last_sig:
+                                last_sig = sig
+                                payload = f"data: {json.dumps(data)}\n\n"
                 except Exception:  # noqa: BLE001 — un cycle de CALCUL raté ne doit jamais fermer le flux
                     log.exception("Flux SSE graphique /scalp échoué (%s, tf=%s)", symbol, tf)
                 now = time.monotonic()
