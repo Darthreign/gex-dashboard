@@ -1984,7 +1984,20 @@ def start_scalp_indicator_scheduler() -> None:
     # en cascade (job jamais fini avant le suivant, pression CPU qui
     # s'auto-entretient). 20s laisse une vraie marge sans dégrader la
     # fraîcheur perçue (les caches eux-mêmes restent à 10s/60s).
-    sched.add_job(_refresh_scalp_indicators, "interval", seconds=20,
+    # Relevé 20s->60s en urgence le 2026-10-05 (~10h ET, lundi, première
+    # vraie séance depuis ces 20s) : le job sautait son propre cycle en
+    # boucle ("maximum number of running instances reached") — il traite
+    # `_scalp_day_ticks` (TOUS les ticks bruts de la séance en cours, pas
+    # une fenêtre) pour NQ et ES, et sous le vrai volume d'une séance active
+    # (vs quasi rien le week-end précédent, jamais testé sous charge réelle)
+    # un seul passage dépasse déjà 20s. Tant qu'il ne finit jamais, il
+    # retient le GIL en continu et ralentit TOUT le reste du serveur, pas
+    # seulement /scalp (cause probable du ralentissement général observé ce
+    # matin, pas seulement tape-tick). 60s laisse une vraie marge ; si ça
+    # continue à sauter, le vrai problème est algorithmique (groupby sur
+    # l'historique complet plutôt qu'une fenêtre) et mérite une session
+    # dédiée, pas un nouveau réglage d'urgence.
+    sched.add_job(_refresh_scalp_indicators, "interval", seconds=60,
                  max_instances=1, coalesce=True)
     sched.start()
     _SCALP_INDICATOR_SCHED = sched
@@ -2800,6 +2813,19 @@ def create_app() -> Dash:
     app.config.suppress_callback_exceptions = True
     enabled = targets()
 
+    # Log d'accès TEMPORAIRE (2026-10-05, ~10h ET lundi) — diagnostic de la
+    # saturation de connexions en pleine heure de marché (200 ESTABLISHED,
+    # file d'attente waitress à 70+ tâches). Aucun log d'accès HTTP
+    # n'existait avant ce soir, impossible de savoir QUOI tapait le serveur
+    # en continu. Un seul INFO par requête (méthode, chemin, IP distante) —
+    # à retirer une fois la cause identifiée, pas fait pour tourner en
+    # continu (volume).
+    @app.server.before_request
+    def _log_access():
+        from flask import request
+        log.info("ACCESS %s %s depuis %s", request.method, request.path,
+                 request.headers.get("X-Forwarded-For", request.remote_addr))
+
     def ctl(label_id, control):
         """Contrôle étiqueté : la légende dit ce que le segment pilote."""
         return html.Div([html.Span(id=label_id, className="ctl-label"), control],
@@ -3255,11 +3281,19 @@ def create_app() -> Dash:
             # — le coût fixe par requête (routage Flask, regroupement Dash,
             # sérialisation JSON, lookup des caches eux-mêmes) × 6 Outputs ×
             # 4 Hz s'additionne même quand chaque cache est un hit. Retombé à
-            # 500 ms, compromis mesuré entre réactivité et charge. Ne pas
-            # redescendre à 250 ms sans alléger le coût fixe par cycle
-            # d'abord (ex. fusionner les Outputs qui partagent déjà `tape-tick`
-            # en un seul callback).
-            dcc.Interval(id="tape-tick", interval=500),
+            # 500 ms cette nuit-là (compromis mesuré) — mais TOUT CE
+            # BENCHMARK a été fait un week-end, marché quasi vide, trafic
+            # solo. Remonté à 1000 ms le 2026-10-05 (~10h ET, lundi, PREMIÈRE
+            # vraie séance depuis ces changements) : 1-2 onglets /scalp
+            # réels ont suffi à saturer le serveur (200+ ESTABLISHED, file
+            # d'attente waitress 70+, scheduler qui saute ses cycles) —
+            # chaque calcul (confluence/order-flow/tape) coûte sans doute
+            # bien plus cher sur du vrai volume d'options que sur les
+            # données quasi vides d'hier soir, et 5 callbacks à 2 Hz par
+            # onglet ne pardonne pas l'écart. Ne pas redescendre sous 1000 ms
+            # sans re-mesurer SOUS CHARGE DE MARCHÉ RÉELLE, pas un test solo
+            # hors séance — la leçon de cette nuit ne s'est pas généralisée.
+            dcc.Interval(id="tape-tick", interval=1000),
             # Ticker de prix /scalp : vrai flux poussé (EventSource, cf.
             # clientside_callback plus bas), aucun sondage — donc pas de dcc.Interval
             # ici. Cible inerte requise par Dash pour un callback JS sans Output
@@ -3778,6 +3812,53 @@ def create_app() -> Dash:
         """,
         Output("scalp-lw-chart", "title"),
         Input("scalp-lw-data", "data"),
+    )
+
+    # Graphique /scalp v2 : flux SSE poussé (2026-10-05, remplace le poll
+    # tape-tick côté serveur, cf. commentaire sur la route Flask
+    # `/api/v1/<symbol>/chart-stream`). `set_props` réinjecte le payload
+    # reçu dans le Store `scalp-lw-data` ci-dessus — déclenche la même
+    # fonction de rendu que le Store seul déclenchait avant, inchangée.
+    # Même structure de reconnexion (délai croissant borné) que les deux
+    # autres flux SSE de la page. Reconnecte aussi au changement de `tf`
+    # (la route ne gère qu'un seul tf par connexion).
+    app.clientside_callback(
+        """
+        function(symbol, path, tf) {
+            if (window._scChartStream) { window._scChartStream.close(); window._scChartStream = null; }
+            if (window._scChartStreamTimer) { clearTimeout(window._scChartStreamTimer); window._scChartStreamTimer = null; }
+            if ((path || '/') !== '/scalp' || !['NQ', 'ES'].includes(symbol)) {
+                return window.dash_clientside.no_update;
+            }
+            const token = {};
+            window._scChartStreamToken = token;
+            const state = {delay: 3000};
+            const connect = function() {
+                const qtf = encodeURIComponent(tf || '');
+                const es = new EventSource(`/api/v1/${symbol}/chart-stream?tf=${qtf}`);
+                window._scChartStream = es;
+                es.onmessage = function(ev) {
+                    state.delay = 3000;
+                    let data;
+                    try { data = JSON.parse(ev.data); } catch (e) { return; }
+                    window.dash_clientside.set_props('scalp-lw-data', {data: data});
+                };
+                es.onerror = function() {
+                    es.close();
+                    if (window._scChartStreamToken !== token) return;
+                    window._scChartStreamTimer = setTimeout(connect, state.delay);
+                    state.delay = Math.min(state.delay * 2, 30000);
+                };
+            };
+            connect();
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("scalp-lw-chart", "title", allow_duplicate=True),
+        Input("symbol", "value"),
+        Input("url", "pathname"),
+        Input("scalp-chart-tf", "value"),
+        prevent_initial_call="initial_duplicate",
     )
 
     # Bascule V1/V2 du bandeau (cf. commentaire sur scalp-banner-version dans
@@ -4748,37 +4829,25 @@ def create_app() -> Dash:
                 scalp_head(symbol, lang, ctx, spot),
                 scalp_ladder(symbol, ctx, spot), hedge, prints, price)
 
-    @app.callback(
-        Output("scalp-lw-data", "data"),
-        [Input("tape-tick", "n_intervals"), Input("url", "pathname"),
-         Input("symbol", "value"), Input("scalp-chart-tf", "value")],
-    )
-    def refresh_scalp_lw(_, path, symbol, tf):
-        """Alimente la carte Lightweight Charts — SEULEMENT sur `/scalp`
-        EXACT (pas `/scalpv1`, qui garde `scalp-price`/Plotly inchangée) :
-        `is_scalp_path` est volontairement PAS utilisé ici, il reconnaît les
-        deux pages, ce callback doit reconnaître uniquement la nouvelle."""
-        if (path or "/") != "/scalp" or symbol not in ("NQ", "ES"):
-            raise PreventUpdate
-        ctx = scalp_context(symbol)
-        if ctx is None:
-            raise PreventUpdate
-        spot = _scalp_live_spot(symbol, ctx)
-        return scalp_v2_chart_data(symbol, ctx, spot, tf=tf or CHART_TF_DEFAULT)
-
-    @app.callback(
-        Output("scalp-lw-hedge-data", "data"),
-        [Input("tape-tick", "n_intervals"), Input("url", "pathname"),
-         Input("symbol", "value"), Input("scalp-window", "value")],
-    )
-    def refresh_scalp_lw_hedge(_, path, symbol, window):
-        """Même garde que `refresh_scalp_lw` — `/scalp` EXACT seulement,
-        `/scalpv1` garde `scalp-hedge`/Plotly (via `hedge_fig` dans
-        `refresh_scalp`) inchangée."""
-        if (path or "/") != "/scalp" or symbol not in ("NQ", "ES"):
-            raise PreventUpdate
-        day = datetime.now(ET).strftime("%Y-%m-%d")
-        return scalp_v2_hedge_data(symbol, int(window if window is not None else -1), day)
+    # scalp-lw-data : migré du poll tape-tick vers un flux SSE poussé
+    # (2026-10-05, ~10h ET lundi, urgence serveur en pleine séance — demande
+    # explicite "on passe en SSE, pas de discussion"). L'ancien callback
+    # (Input tape-tick) faisait une requête HTTP complète par onglet à
+    # chaque cycle ; sous charge réelle ça s'ajoutait aux 4 autres
+    # callbacks partageant tape-tick pour saturer le pool de threads
+    # (200+ ESTABLISHED, file d'attente waitress 70+). La route Flask
+    # `/api/v1/<symbol>/chart-stream` ci-dessous pousse les données,
+    # `window.dash_clientside.set_props` (Dash 4.4+) réinjecte le payload
+    # reçu dans le même Store `scalp-lw-data` — la grosse fonction cliente
+    # qui construit/alimente le graphique (chart init, outils de dessin,
+    # indicateurs) n'a PAS bougé, elle continue de réagir au même Store,
+    # juste alimenté autrement.
+    #
+    # scalp-lw-hedge-data (hedge LW) retiré entièrement : la carte
+    # correspondante est masquée inconditionnellement depuis que
+    # "Couverture des dealers" est repassée sur Plotly (cf. style.css,
+    # confirmé non prioritaire par l'utilisateur) — ce callback ne servait
+    # plus à rien, pur gaspillage de requêtes.
 
     @app.callback(
         Output("tape-table", "children"),
@@ -4943,6 +5012,56 @@ def create_app() -> Dash:
                             payload = f"data: {json.dumps(snap)}\n\n"
                 except Exception:  # noqa: BLE001 — un cycle de CALCUL raté ne doit jamais fermer le flux
                     log.exception("Flux SSE indicateurs /scalp échoué (%s)", symbol)
+                now = time.monotonic()
+                if payload is not None:
+                    yield payload
+                    last_heartbeat = now
+                elif now - last_heartbeat >= 15.0:
+                    yield ": keepalive\n\n"
+                    last_heartbeat = now
+                time.sleep(1.0)
+
+        return Response(gen(), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    # Graphique /scalp v2 (bougies + niveaux + indicateurs) — flux poussé,
+    # remplace le poll tape-tick de `refresh_scalp_lw` (2026-10-05, urgence
+    # serveur en pleine séance). `tf` passé en query param : chaque
+    # changement de timeframe côté client ferme ce flux et en rouvre un avec
+    # le nouveau `tf` (même principe que symbole/page sur les deux flux
+    # ci-dessus) — le serveur ne gère donc qu'UN SEUL tf par connexion,
+    # jamais un mélange.
+    @app.server.route("/api/v1/<symbol>/chart-stream")
+    def _scalp_chart_stream(symbol):
+        from flask import Response, request
+        symbol = symbol.upper()
+        if symbol not in SCALP_SCHED_SYMBOLS:
+            return Response("symbole non couvert (NQ/ES seulement)", status=404)
+        tf = request.args.get("tf") or CHART_TF_DEFAULT
+
+        def gen():
+            last_sig = None
+            last_heartbeat = time.monotonic()
+            while True:
+                payload = None
+                try:
+                    ctx = scalp_context(symbol)
+                    if ctx is not None:
+                        spot = _scalp_live_spot(symbol, ctx)
+                        data = scalp_v2_chart_data(symbol, ctx, spot, tf=tf)
+                        candles = data.get("candles") or []
+                        markers = data.get("markers") or []
+                        # signature bon marché : nombre de bougies/marqueurs +
+                        # OHLC de la dernière bougie (la seule qui bouge entre
+                        # deux clôtures) — pas tout le payload à chaque cycle
+                        last = candles[-1] if candles else None
+                        sig = (len(candles), len(markers),
+                              last and (last["time"], last["close"]))
+                        if sig != last_sig:
+                            last_sig = sig
+                            payload = f"data: {json.dumps(data)}\n\n"
+                except Exception:  # noqa: BLE001 — un cycle de CALCUL raté ne doit jamais fermer le flux
+                    log.exception("Flux SSE graphique /scalp échoué (%s, tf=%s)", symbol, tf)
                 now = time.monotonic()
                 if payload is not None:
                     yield payload

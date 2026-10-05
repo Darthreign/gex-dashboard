@@ -113,9 +113,24 @@ def main(host: str = "127.0.0.1", port: int = 8050) -> None:
     # sans trafic massif. Relevé à 300, large marge au-dessus de threads=128
     # (une connexion en file d'attente ne consomme pas forcément un thread
     # tout de suite, les deux compteurs ne sont pas le même budget).
+    #
+    # Relevé 128->256 le 2026-10-05 (~10h ET, lundi, vraie heure de marché) :
+    # première fois que le serveur encaisse du trafic RÉEL multi-utilisateurs
+    # en semaine (toute la nuit précédente était du test solo, week-end,
+    # quasi sans trafic). 200 ESTABLISHED + file d'attente waitress à 70+
+    # tâches + scheduler qui saute ses propres cycles ("maximum number of
+    # running instances reached") — CloseWait restait bas (1), donc ce n'est
+    # PAS un retour de la fuite corrigée cette nuit, juste un pool de
+    # threads insuffisant pour le volume réel. La plupart de ces connexions
+    # sont des flux SSE endormis l'essentiel du temps (I/O, pas CPU, cf.
+    # panne du 2026-10-04 pour le même raisonnement) — en ouvrir plus ne
+    # recrée pas le risque de contention du `threaded=True` Werkzeug déjà
+    # écarté. connection_limit relevé en proportion (300->500). Stopgap
+    # immédiat : la vraie solution reste la migration gevent (cf. passation),
+    # pas encore assez éprouvée pour la production ce soir-là.
     from waitress import serve
-    serve(create_app().server, host=host, port=port, threads=128,
-         channel_timeout=90, connection_limit=300)
+    serve(create_app().server, host=host, port=port, threads=256,
+         channel_timeout=90, connection_limit=500)
 
 
 if __name__ == "__main__":
