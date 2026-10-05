@@ -12,13 +12,19 @@
 2. **Bug réel trouvé et corrigé : le bandeau restait figé malgré le flux SSE actif.** `scalp_banner(...).to_plotly_json()` ne sérialise que le niveau supérieur du composant — ses enfants (sc-banner-main, sc-banner-side…) restaient des objets Dash, que `json.dumps` seul ne sait pas encoder. Résultat : le flux plantait EN BOUCLE chaque seconde (`TypeError: Object of type Div is not JSON serializable`), jamais le moindre `yield`, bandeau jamais mis à jour côté client. Corrigé avec un `default=` qui rappelle `to_plotly_json()` sur chaque objet non sérialisable rencontré (y compris imbriqué). Vérifié : flux stable (`readyState: 1`), plus d'erreur en log.
 3. **Erreur de process (notée pour ne pas répéter) :** à la question "la page principale n'est-elle pas la cause de la surcharge ?", j'ai directement coupé ses flux (tick/heatmap-tick désactivés, 7 callbacks gatés) au lieu d'investiguer et de proposer. Revert complet (`205cd5c`) : dashboard principal revenu à son fonctionnement normal (tick/heatmap-tick réactivés, callbacks sans garde). **Nouvelle règle validée avec l'utilisateur : reformuler ce qui est compris AVANT d'agir sur une demande ambiguë, attendre sa validation.**
 
-## Deux chantiers explicitement demandés pour la suite
+## Diagnostic du bandeau figé sur "Données insuffisantes" — RÉSOLU
 
-1. **Migrer le dashboard principal et TOUS ses sous-onglets (Gamma Profile, Vanna & Charm, Positionnement, Heatmap, Tape) vers une architecture SSE**, sur le même principe que `/scalp` cette nuit (`tick`/`tape-tick` → flux poussés), au lieu du polling actuel (`tick` 60s, `heatmap-tick` 5s).
-2. **Diagnostiquer le bandeau `/scalp` : après ~27 min de données reçues, il affichait encore "Données insuffisantes".** Hypothèses à vérifier en premier — rappel que le bandeau tourne avec le calcul swing H/L (`scalp_inputs_swing`) et dépend potentiellement du flux d'options :
-   - Le bloc confluence/gex_profile/order_flow/orderflow_profile désactivé cette nuit (point 1 ci-dessus) a-t-il un effet de bord sur `scalp_banner`/`scalp.assess` (même s'il ne devrait en théorie alimenter QUE le graphique) ?
-   - Le calcul swing H/L (`scalp_inputs_swing`, utilisé par le bandeau V2) a-t-il besoin d'un historique de bougies plus long que ce que la capture reconstruit en 27 min ?
-   - Le flux d'options (chaîne CME native) a-t-il bien fini son premier pull complet à ce moment-là, ou la fenêtre "Collecte native en cours ~3-5 min" cache-t-elle un blocage plus long ?
+**Cause réelle, confirmée : mes propres redémarrages du dashboard ce soir tuaient le process de capture séparé.** `Stop-Process -Name python,pythonw -Force` (utilisé ~6 fois cette nuit pour relancer la tâche "GEX dashboard") tue TOUS les processus Python du système, y compris la tâche planifiée **"GEX capture"** (indépendante, qui tourne en `python.exe`) — jamais relancée après coup. Résultat : plus aucun tick écrit depuis ~23:39, donc 0 donnée pour la nouvelle séance CME `2026-10-06` (ouverte à minuit Paris) — pas "insuffisant", carrément vide. `scalp_inputs_swing` → `move=None` → bandeau bloqué, quel que soit le temps écoulé. Les hypothèses swing H/L et flux d'options étaient de fausses pistes.
+
+Accessoirement repéré dans `logs/capture.log` : des `PermissionError` (fichier verrouillé) sur `flush_ticks`/`_flush_bars` vers 18h38-19h00, probablement un chevauchement capture/dashboard pendant un restart — résolu tout seul, pas la cause de ce soir, mais à garder en tête si ça revient.
+
+**Corrigé** : tâche "GEX capture" relancée (`Start-ScheduledTask -TaskName "GEX capture"`), confirmé 280 ticks / 301 contrats de volume en ~1 min, flux dxFeed + order flow actifs à nouveau.
+
+**⚠️ Procédure de redémarrage à corriger pour la suite** : ne plus utiliser `Stop-Process -Name python,pythonw -Force` (trop large). Cibler le PID exact de la tâche "GEX dashboard" (`(Get-ScheduledTask "GEX dashboard" | Get-ScheduledTaskInfo)` ou équivalent), ou au minimum vérifier/relancer aussi "GEX capture" après CHAQUE redémarrage du dashboard tant que ce n'est pas corrigé.
+
+## Chantier restant
+
+1. **Migrer le dashboard principal et TOUS ses sous-onglets (Gamma Profile, Vanna & Charm, Positionnement, Heatmap, Tape) vers une architecture SSE**, sur le même principe que `/scalp` cette nuit (`tick`/`tape-tick` → flux poussés), au lieu du polling actuel (`tick` 60s, `heatmap-tick` 5s). Pas touché cette nuit (mesure d'urgence limitée à `/scalp`, cf. ci-dessus).
 
 ## À lire ensuite (historique, toujours valable)
 
