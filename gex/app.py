@@ -2163,7 +2163,11 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
                     {"timestamp": m, **live_bars[m]} for m in manquantes])], ignore_index=True)
         if size > 1:
             bars = _resample_price_bars(bars, size)
-        n_bars = lookback_min // size if lookback_min else 150
+        # Historique par défaut relevé 150->240 bougies le 2026-10-05
+        # (demande explicite) — pour t1 (1 min), ça passe de 2h30 à 4h de
+        # vue initiale (le scroll/zoom arrière reste possible au-delà,
+        # cf. store.load_prices qui renvoie la séance entière).
+        n_bars = lookback_min // size if lookback_min else 240
         bars = bars.tail(max(n_bars, 1))
         if bars.empty:
             return empty
@@ -2201,7 +2205,9 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
     # CETTE séance plutôt que de tout filtrer à vide.
     last_ts = float(ticks["ts"].iloc[-1])
     anchor = last_ts if last_ts < time.time() - 3600 else time.time()
-    cutoff = anchor - (lookback_min or 90) * 60
+    # Historique par défaut relevé 90->240 min le 2026-10-05 (demande
+    # explicite, même changement que la branche bougies-temps ci-dessus).
+    cutoff = anchor - (lookback_min or 240) * 60
     ticks = ticks[ticks["ts"] >= cutoff]
     if ticks.empty:
         return empty
