@@ -3234,7 +3234,16 @@ def create_app() -> Dash:
             ]),
 
             dcc.Interval(id="tick", interval=SETTINGS.flow_interval_s * 1000),
-            # le Tape doit défiler vivant, pas au rythme des pulls (60 s).
+            # Heatmap : intervalle DÉDIÉ à 5s (2026-10-05, demande explicite,
+            # "c'est une heatmap pas une photo figée") — séparé de `tick`
+            # (60s, partagé par 5 autres graphiques du dashboard principal :
+            # Gamma Profile, Vanna & Charm, Positionnement, Tape…) pour ne
+            # pas tous les accélérer alors que seule la Heatmap doit suivre
+            # le marché de près. `_chain_for_day` lit déjà l'état vivant pour
+            # "aujourd'hui" (cf. commentaire sur `heat_days`), donc ce
+            # rafraîchissement plus fréquent reflète réellement des données
+            # neuves, pas un recalcul à vide.
+            dcc.Interval(id="heatmap-tick", interval=5000),
             # 250 ms MESURÉ et ÉCARTÉ le 2026-10-01 : à l'époque le serveur de
             # dev Werkzeug (MONO-THREAD) saturait à ce rythme — curl direct sur
             # /api/v1/NQ/last (lecture triviale en mémoire) à 2-6 s au lieu de
@@ -4606,15 +4615,29 @@ def create_app() -> Dash:
     )
     def heat_days(symbol, lang, tab, current):
         days = store.snapshot_days(symbol)
+        today = datetime.now(ET).strftime("%Y-%m-%d")
+        # "Aujourd'hui" n'a pas forcément de snapshot écrit sur disque (pull
+        # complet seulement 2x/jour en semaine + dimanche soir, cf.
+        # start_scheduler) — pourtant `_chain_for_day` bascule déjà sur
+        # l'état vivant (STATE, mis à jour en continu) pour ce jour-là, plus
+        # frais que n'importe quel snapshot. Sans l'ajouter ici, le
+        # sélecteur ne le proposait jamais et retombait sur le dernier
+        # snapshot ÉCRIT (ex. vendredi un dimanche soir), alors que les
+        # données elles-mêmes étaient déjà à jour partout ailleurs sur le
+        # dashboard (demande explicite de l'utilisateur, 2026-10-05 :
+        # "c'est une heatmap pas une photo figée").
+        if today not in days:
+            days = sorted(days + [today])
         opts = [{"label": d, "value": d} for d in reversed(days)]
         # conserve le choix de l'utilisateur s'il reste valide après un
-        # changement de sous-jacent, sinon bascule sur la séance la plus récente
-        value = current if current in days else (days[-1] if days else None)
+        # changement de sous-jacent, sinon bascule sur AUJOURD'HUI (toujours
+        # valide désormais, et le plus frais) plutôt que le dernier snapshot
+        value = current if current in days else today
         return opts, value, t(lang, "heat_day_label")
 
     @app.callback(
         [Output("heatmap", "figure"), Output("heat-hint", "children")],
-        [Input("tick", "n_intervals"), Input("tab", "value"), Input("symbol", "value"),
+        [Input("heatmap-tick", "n_intervals"), Input("tab", "value"), Input("symbol", "value"),
          Input("window", "value"), Input("lang", "value"), Input("unit", "value"),
          Input("heat-day", "value"), Input("heat-levels", "value")],
         State("heatmap", "relayoutData"),

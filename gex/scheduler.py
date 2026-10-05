@@ -607,6 +607,21 @@ def start_scheduler(embedded_capture: bool = True) -> BackgroundScheduler:
     # au rythme rapide.
     sched.add_job(pull_native_options, "cron", day_of_week="mon-fri",
                   hour="10,14", minute=0, max_instances=1, coalesce=True)
+    # Ouverture de la séance CME du dimanche soir (~18h ET = 00h Paris,
+    # cf. MARKET_OPEN/market_is_open ci-dessus pour la distinction avec les
+    # heures de marché CASH) : les 0DTE du lundi commencent à se négocier dès
+    # cet instant, pas seulement à l'ouverture cash de lundi matin (demande
+    # explicite de l'utilisateur, 2026-10-05). Sans ce déclenchement, aucun
+    # snapshot n'existait pour "aujourd'hui" avant 10h ET lundi — la Heatmap
+    # (alimentée par `store.save_snapshot`, écrit uniquement par
+    # `pull_native_options`, jamais par `pull_native_options_fast` qui ne
+    # persiste rien) restait bloquée sur le dernier snapshot du vendredi
+    # toute la soirée/nuit de dimanche, alors que le spot et le digest
+    # ailleurs sur le dashboard étaient déjà à jour (pull_native_options_fast,
+    # lui, tourne en continu sans restriction de jour). 30 min après
+    # l'ouverture : laisse le temps à la chaîne de se peupler.
+    sched.add_job(pull_native_options, "cron", day_of_week="sun",
+                  hour=18, minute=30, max_instances=1, coalesce=True)
     # Options natives NQ/ES — fenêtre RESSERRÉE (0DTE/1DTE) : c'est elle qui
     # tient le digest à jour en continu. Fenêtre courte -> salve dxFeed
     # nettement plus rapide que les ~90-280 s de la fenêtre large, d'où une
