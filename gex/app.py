@@ -1331,7 +1331,8 @@ def scalp_banner(symbol: str, ctx: dict, spot: float, lang: str,
     move, net, gross = (scalp_inputs_swing if swing else scalp_inputs)(symbol, spot)
     zg = ctx.get("zg")
     neg = bool(ctx.get("gamma")) and "Négatif" in ctx["gamma"]
-    a = scalp.assess(symbol, move, net, gross, neg, (zg - spot) if zg is not None else None, lang)
+    a = scalp.assess(symbol, move, net, gross, neg, (zg - spot) if zg is not None else None, lang,
+                     swing=swing)
     log_scalp_signal(symbol, a, spot, move, net, gross, basis=basis)
     recent = scalp_absorption_recent(symbol)
     log_absorption_levels(symbol, recent)

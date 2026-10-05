@@ -222,6 +222,12 @@ TR: dict[str, dict[str, str]] = {
         "sc_renforce_favorable": " — malgré un gamma positif",
         "sc_detail": "Mouvement {move_pts:+.0f} pts / 5 min · {flux_txt}"
                     "{gamma_txt}{toward_flip_txt}",
+        # V2 (swing H/L) : le mouvement n'est plus mesuré sur une fenêtre
+        # fixe de 5 min mais depuis le dernier pivot swing confirmé —
+        # mentionner "5 min" induisait en erreur (demande explicite,
+        # 2026-10-05).
+        "sc_detail_swing": "Mouvement {move_pts:+.0f} pts · {flux_txt}"
+                    "{gamma_txt}{toward_flip_txt}",
         "sc_flux_net": "flux net {net:+.0f} M$ ({ratio:.0%} à sens unique)",
         "sc_flux_none": "aucun flux de couverture",
         "sc_gamma_negatif": " · gamma négatif",
@@ -456,6 +462,8 @@ TR: dict[str, dict[str, str]] = {
         "sc_renforce_defavorable": " — unfavorable gamma",
         "sc_renforce_favorable": " — despite positive gamma",
         "sc_detail": "Move {move_pts:+.0f} pts / 5 min · {flux_txt}"
+                    "{gamma_txt}{toward_flip_txt}",
+        "sc_detail_swing": "Move {move_pts:+.0f} pts · {flux_txt}"
                     "{gamma_txt}{toward_flip_txt}",
         "sc_flux_net": "net flow {net:+.0f} M$ ({ratio:.0%} one-sided)",
         "sc_flux_none": "no hedging flow",

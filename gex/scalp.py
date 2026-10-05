@@ -127,7 +127,8 @@ def move_threshold(symbol: str) -> float:
 
 
 def assess(symbol: str, move_pts: float | None, net_musd: float, gross_musd: float,
-           gamma_negative: bool, dist_to_flip: float | None, lang: str = "fr") -> dict:
+           gamma_negative: bool, dist_to_flip: float | None, lang: str = "fr",
+           *, swing: bool = False) -> dict:
     """État d'amplification sur la fenêtre de 5 min.
 
     move_pts   : variation du prix sur la fenêtre (None si données insuffisantes)
@@ -162,7 +163,10 @@ def assess(symbol: str, move_pts: float | None, net_musd: float, gross_musd: flo
                 else i18n.t(lang, "sc_flux_none"))
     gamma_txt = i18n.t(lang, "sc_gamma_negatif" if gamma_negative else "sc_gamma_positif")
     toward_flip_txt = i18n.t(lang, "sc_toward_flip") if toward_flip else ""
-    detail = i18n.t(lang, "sc_detail", move_pts=move_pts, flux_txt=flux_txt,
+    # V2 (swing) : pas de fenêtre fixe de 5 min, "sc_detail_swing" omet la
+    # mention — cf. commentaire i18n.
+    detail = i18n.t(lang, "sc_detail_swing" if swing else "sc_detail",
+                    move_pts=move_pts, flux_txt=flux_txt,
                     gamma_txt=gamma_txt, toward_flip_txt=toward_flip_txt)
     if direction == 0:
         return {"state": "calm", "tone": "neutral", "direction": 0,
