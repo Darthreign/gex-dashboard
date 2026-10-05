@@ -28,6 +28,29 @@ def _price_bars(n: int, start_price: float = 30000.0) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _price_bars_with_swing(n: int, start_price: float = 30000.0) -> pd.DataFrame:
+    """Bougies 1 min formant un aller-retour net (monte puis redescend de
+    plus que move_threshold) — pour vérifier qu'un vrai pivot swing est
+    détecté sur base temps, pas seulement l'absence de faux positif."""
+    now = pd.Timestamp(datetime.now(ET).replace(tzinfo=None)).floor("min")
+    half = n // 2
+    prices = [start_price + i * 3.0 for i in range(half)] + \
+        [start_price + (half - 1) * 3.0 - i * 3.0 for i in range(n - half)]
+    rows = [{"timestamp": now - pd.Timedelta(minutes=(n - i)), "open": p,
+             "high": p + 1, "low": p - 1, "close": p} for i, p in enumerate(prices)]
+    return pd.DataFrame(rows)
+
+
+def _only_today(bars: pd.DataFrame):
+    """`store.load_prices` réaliste : seule la date calendaire ET du jour a
+    ces bougies, tout autre jour (notamment la veille, lue depuis le
+    2026-10-05 pour compléter la séance avant 18h ET — cf. `today_cal` dans
+    `scalp_v2_chart_data`) est vide. Un mock aveugle au jour dupliquait les
+    mêmes bougies sur "hier" ET "aujourd'hui", faussant les pivots swing."""
+    today_cal = datetime.now(ET).strftime("%Y-%m-%d")
+    return lambda symbol, day: bars if day == today_cal else pd.DataFrame()
+
+
 _CTX = {"zg": 29900.0, "hvl": 29950.0, "keys": {"call_wall": 30200.0}, "walls": []}
 
 
@@ -61,7 +84,7 @@ def test_defaut_temps_construit_des_bougies_1min(monkeypatch):
     # le chemin "t" ne les utilise pas pour les candles, seulement pour
     # order_flow (vide ici, pas testé).
     monkeypatch.setattr(store, "load_ticks", lambda s, d: pd.DataFrame())
-    monkeypatch.setattr(store, "load_prices", lambda s, d: _price_bars(200))
+    monkeypatch.setattr(store, "load_prices", _only_today(_price_bars(200)))
     monkeypatch.setattr(store, "tick_days", lambda s: [])
     monkeypatch.setattr(tickcapture, "_session_day", lambda ts: "2026-10-03")
     # spot = dernière close de _price_bars(200) (30000 + 199) — depuis l'ajout
@@ -83,25 +106,12 @@ def test_defaut_temps_construit_des_bougies_1min(monkeypatch):
     assert out["levels"] and set(out["levels"][0]) == {"name", "price", "color"}
 
 
-def _price_bars_with_swing(n: int, start_price: float = 30000.0) -> pd.DataFrame:
-    """Bougies 1 min formant un aller-retour net (monte puis redescend de
-    plus que move_threshold) — pour vérifier qu'un vrai pivot swing est
-    détecté sur base temps, pas seulement l'absence de faux positif."""
-    now = pd.Timestamp(datetime.now(ET).replace(tzinfo=None)).floor("min")
-    half = n // 2
-    prices = [start_price + i * 3.0 for i in range(half)] + \
-        [start_price + (half - 1) * 3.0 - i * 3.0 for i in range(n - half)]
-    rows = [{"timestamp": now - pd.Timedelta(minutes=(n - i)), "open": p,
-             "high": p + 1, "low": p - 1, "close": p} for i, p in enumerate(prices)]
-    return pd.DataFrame(rows)
-
-
 def test_tf_temps_calcule_des_pivots_swing(monkeypatch):
     """Demande explicite (2026-10-05) : les pivots swing (zigzag) ne sont
     plus réservés aux barres-volume — même moteur, mêmes seuils, appliqué
     aux bougies-temps aussi."""
     monkeypatch.setattr(store, "load_ticks", lambda s, d: pd.DataFrame())
-    monkeypatch.setattr(store, "load_prices", lambda s, d: _price_bars_with_swing(60))
+    monkeypatch.setattr(store, "load_prices", _only_today(_price_bars_with_swing(60)))
     monkeypatch.setattr(store, "tick_days", lambda s: [])
     monkeypatch.setattr(tickcapture, "_session_day", lambda ts: "2026-10-03")
     out = app.scalp_v2_chart_data("NQ", _CTX, 30040.0, tf="t1")
@@ -113,7 +123,7 @@ def test_tf_temps_calcule_des_pivots_swing(monkeypatch):
 
 def test_tf_temps_reechantillonne(monkeypatch):
     monkeypatch.setattr(store, "load_ticks", lambda s, d: pd.DataFrame())
-    monkeypatch.setattr(store, "load_prices", lambda s, d: _price_bars(200))
+    monkeypatch.setattr(store, "load_prices", _only_today(_price_bars(200)))
     monkeypatch.setattr(store, "tick_days", lambda s: [])
     monkeypatch.setattr(tickcapture, "_session_day", lambda ts: "2026-10-03")
     out_1min = app.scalp_v2_chart_data("NQ", _CTX, 30040.0, tf="t1")

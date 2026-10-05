@@ -2145,6 +2145,32 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
                 bars = _load_prices_cached(symbol, used_day)
         if bars.empty:
             return empty
+        if used_day == today_cal:
+            # Séance CME, pas date calendaire ET (2026-10-05) : la séance en
+            # cours a commencé la veille (calendaire) à 18h ET = 00h Paris,
+            # bien avant minuit ET où bascule le fichier "aujourd'hui" (cf.
+            # commentaire au-dessus sur la convention de stockage). Sans ce
+            # complément, "depuis l'ouverture" démarrait à minuit ET (6h
+            # Paris) au lieu de 18h ET la veille (0h Paris) — repéré en
+            # direct juste après le retrait de la troncature par défaut.
+            now_et = datetime.now(ET)
+            session_start = now_et.replace(hour=18, minute=0, second=0, microsecond=0)
+            if now_et.hour < 18:
+                # avant 18h ET : la séance en cours a débordé sur la veille
+                # (calendaire) — préfixer le morceau manquant.
+                session_start -= timedelta(days=1)
+                prev_bars = _load_prices_cached(symbol, session_start.strftime("%Y-%m-%d"))
+                if not prev_bars.empty:
+                    prev_bars = prev_bars[pd.to_datetime(prev_bars["timestamp"])
+                                         >= session_start.replace(tzinfo=None)]
+                    if not prev_bars.empty:
+                        bars = pd.concat([prev_bars, bars], ignore_index=True)
+            else:
+                # à/après 18h ET : le fichier "aujourd'hui" contient encore
+                # la fin de la séance PRÉCÉDENTE (00h-17h ET) — la retirer,
+                # sinon "depuis l'ouverture" montre deux séances à la suite.
+                bars = bars[pd.to_datetime(bars["timestamp"])
+                           >= session_start.replace(tzinfo=None)]
         # Bougie(s) en cours (2026-10-05) : sans ça, ce graphique n'affiche
         # jamais rien de moins de 1-2 min (le temps que flush_prices écrive la
         # minute achevée) — repéré en direct ("on dirait qu'il attend la
