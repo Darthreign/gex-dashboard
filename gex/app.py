@@ -3061,7 +3061,13 @@ def create_app() -> Dash:
                         # concentration". Chaque option toggle une classe body,
                         # cf. style.css ; persisté en localStorage (gex-scalp-ergo).
                         dcc.Checklist(
-                            id="sc-ergo-options", className="sc-ergo-options", value=[],
+                            id="sc-ergo-options", className="sc-ergo-options",
+                            # Défaut 2026-10-06 (mesure d'urgence, "décoche tt par défaut
+                            # pour tt le monde") : tous les widgets masqués par défaut,
+                            # seul le bandeau reste visible tant que l'utilisateur ne les
+                            # réactive pas lui-même (préférence explicite, cf. clientside
+                            # callback ci-dessous, toujours respectée si déjà enregistrée).
+                            value=["hide_ladder", "hide_price_chart", "hide_hedge_chart", "hide_tape"],
                             options=[
                                 {"label": "Masquer niveaux", "value": "hide_ladder"},
                                 {"label": "Masquer graphique prix", "value": "hide_price_chart"},
@@ -3211,28 +3217,33 @@ def create_app() -> Dash:
                             # localStorage, câblé dans le clientside_callback
                             # juste après le rendu du graphique.
                             html.Div([
+                                # Désactivés 2026-10-06 (mesure d'urgence, "décoche tt par
+                                # défaut pour tt le monde") : plus de "sc-draw-active" par
+                                # défaut — cohérent avec le chart-stream lui-même coupé
+                                # (cf. clientside_callback chart-stream) ; rien à afficher
+                                # tant que ce n'est pas réactivé.
                                 html.Button("Niveaux GEX", id="scalp-ind-levels-toggle",
-                                            className="sc-draw-btn sc-ind-btn sc-draw-active",
+                                            className="sc-draw-btn sc-ind-btn",
                                             title="Afficher/masquer les niveaux GEX/HVL/Flip/murs"),
                                 html.Button("Confluence", id="scalp-ind-confluence-toggle",
-                                            className="sc-draw-btn sc-ind-btn sc-draw-active",
+                                            className="sc-draw-btn sc-ind-btn",
                                             title="Afficher/masquer les zones de confluence multi-familles"),
                                 html.Button("Order flow", id="scalp-ind-orderflow-toggle",
-                                            className="sc-draw-btn sc-ind-btn sc-draw-active",
+                                            className="sc-draw-btn sc-ind-btn",
                                             title="Afficher/masquer les zones HVL order-flow"),
                                 html.Button("Σ Profil gamma", id="scalp-gexprofile-toggle",
-                                            className="sc-draw-btn sc-ind-btn sc-draw-active",
+                                            className="sc-draw-btn sc-ind-btn",
                                             title="Afficher/masquer le profil de GEX par strike "
                                                   "(open interest + volume du jour)"),
                                 html.Button("Swing H/L", id="scalp-ind-markers-toggle",
-                                            className="sc-draw-btn sc-ind-btn sc-draw-active",
+                                            className="sc-draw-btn sc-ind-btn",
                                             title="Afficher/masquer les pivots swing high/low"),
                                 html.Button("Profil volume", id="scalp-ind-ofprofile-toggle",
-                                            className="sc-draw-btn sc-ind-btn sc-draw-active",
+                                            className="sc-draw-btn sc-ind-btn",
                                             title="Afficher/masquer le profil de volume des 2 "
                                                   "dernières jambes de swing (POC/VAH/VAL)"),
                                 html.Button("HVN/LVN", id="scalp-ind-untested-toggle",
-                                            className="sc-draw-btn sc-ind-btn sc-draw-active",
+                                            className="sc-draw-btn sc-ind-btn",
                                             title="Afficher/masquer les zones HVN/LVN non "
                                                   "testées (indépendant du profil de volume "
                                                   "par jambe ci-dessus)"),
@@ -4225,9 +4236,15 @@ def create_app() -> Dash:
                 .catch(() => ({ email: null, prefs: {} }));
             const data = await window._gexPrefsReady;
             let saved = data.prefs['scalp-ergo'];
+            // Défaut 2026-10-06 (mesure d'urgence) : tt masqué sauf le bandeau,
+            // tant qu'aucune préférence n'a encore été enregistrée (serveur ou
+            // localStorage) — cf. valeur par défaut du Checklist côté Python.
+            const DEFAULT_ERGO = ["hide_ladder", "hide_price_chart", "hide_hedge_chart", "hide_tape"];
             if (saved == null) {
-                try { saved = JSON.parse(window.localStorage.getItem('gex-scalp-ergo') || '[]'); }
-                catch (e) { saved = []; }
+                try {
+                    const raw = window.localStorage.getItem('gex-scalp-ergo');
+                    saved = raw == null ? DEFAULT_ERGO : JSON.parse(raw);
+                } catch (e) { saved = DEFAULT_ERGO; }
             } else {
                 window.localStorage.setItem('gex-scalp-ergo', JSON.stringify(saved));
             }
