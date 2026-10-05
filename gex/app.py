@@ -3408,6 +3408,20 @@ def create_app() -> Dash:
             # le voyant du flux a son propre rythme : une déconnexion doit se
             # voir tout de suite, pas au prochain pull (60 s)
             dcc.Interval(id="rt-tick", interval=5000),
+            # Mesure d'urgence 2026-10-06 : "emergency-ready" reste False les
+            # 5 premières secondes après le montage — toutes les grosses
+            # fonctions d'affichage (refresh/refresh_profile/.../refresh_scalp)
+            # le lisent en State et sortent immédiatement tant qu'il est
+            # False. Raison : les callbacks de "boot" (apply_lang,
+            # update_flow_days, heat_days, détection de langue…) assignent
+            # leurs Output (unit/bucket/flow-day/lang…) au montage — ce sont
+            # de VRAIS changements de valeur (None -> valeur réelle), donc un
+            # `ctx.triggered_id is None` ne suffisait pas à les distinguer
+            # d'un clic utilisateur authentique (repéré en direct, 2026-10-06
+            # : les cartes de la page principale se recalculaient quand même
+            # au chargement malgré prevent_initial_call). Passé ces 5 s, tout
+            # redevient réactif normalement pour une vraie interaction.
+            dcc.Store(id="emergency-ready", data=False),
             dcc.Store(id="lang-boot", data=0),
             dcc.Store(id="sc-layout-boot", data=0),
             dcc.Store(id="sc-ergo-boot", data=0),
@@ -3460,6 +3474,18 @@ def create_app() -> Dash:
                 "rgba(255,255,255,0.10)",
             ))
         return items
+
+    # "emergency-ready" (mesure d'urgence 2026-10-06, cf. commentaire sur le
+    # Store dans le layout) : bascule à True au premier tick de "rt-tick"
+    # (~5 s après le montage), jamais avant — laisse le temps à tous les
+    # callbacks de "boot" (apply_lang, update_flow_days, heat_days, langue)
+    # de finir de se propager avant que les grosses fonctions d'affichage
+    # n'acceptent de calculer quoi que ce soit.
+    app.clientside_callback(
+        "function(n) { return (n || 0) >= 1; }",
+        Output("emergency-ready", "data"),
+        Input("rt-tick", "n_intervals"),
+    )
 
     # Détection de la langue du navigateur au chargement ; un choix manuel
     # (bouton FR/EN) est mémorisé dans localStorage et prime sur la détection.
@@ -4703,6 +4729,11 @@ def create_app() -> Dash:
         minutes. Le recalcul porte sur un seul point de spot, donc son coût
         est négligeable devant la grille de 161 points du Gamma Flip.
         """
+        # Désactivé 2026-10-06 (mesure d'urgence, "tt sauf le bandeau") :
+        # ce panneau (page principale "Vue principale") tournait toutes les
+        # 5 s (rt-tick) pour TOUT visiteur, indépendamment des autres
+        # correctifs de ce soir — à réactiver avec le reste.
+        raise PreventUpdate
         xf, _, _ = _transform_for(symbol, unit)
         return (build_cards(symbol, lang, xf, scale=unit), regime_banner(symbol, lang),
                 pc_gauge(symbol, lang))
@@ -5224,10 +5255,23 @@ def create_app() -> Dash:
                         banner_sig = (round(spot, 2), json.dumps(absorb, sort_keys=True, default=str))
                         if banner_sig != last_banner_sig:
                             last_banner_sig = banner_sig
-                            banner = scalp_banner(symbol, ctx, spot, lang, absorb, swing=swing)
-                            snap["banner"] = banner.to_plotly_json()
+                            # Bug corrigé (2026-10-06) : `.to_plotly_json()` ne
+                            # sérialise que le NIVEAU SUPÉRIEUR du composant —
+                            # ses enfants (sc-banner-main, sc-banner-side…)
+                            # restent des objets Dash (html.Div, html.Span…),
+                            # que `json.dumps` seul ne sait pas encoder
+                            # (TypeError "Object of type Div is not JSON
+                            # serializable", EN BOUCLE, chaque seconde — le
+                            # flux repartait toujours en erreur avant le
+                            # moindre yield, bandeau jamais mis à jour côté
+                            # client). `default=` ci-dessous rappelle
+                            # `to_plotly_json()` sur CHAQUE objet non
+                            # sérialisable rencontré, y compris imbriqué —
+                            # exactement ce que fait le sérialiseur interne
+                            # de Dash.
+                            snap["banner"] = scalp_banner(symbol, ctx, spot, lang, absorb, swing=swing)
                         if snap:
-                            payload = f"data: {json.dumps(snap)}\n\n"
+                            payload = f"data: {json.dumps(snap, default=lambda o: getattr(o, 'to_plotly_json', lambda: str(o))())}\n\n"
                 except Exception:  # noqa: BLE001 — un cycle de CALCUL raté ne doit jamais fermer le flux
                     log.exception("Flux SSE indicateurs /scalp échoué (%s)", symbol)
                 now = time.monotonic()
