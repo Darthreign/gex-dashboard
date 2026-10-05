@@ -3357,11 +3357,11 @@ def create_app() -> Dash:
                 html.Div(id="tape-table"),
             ]),
 
-            # Désactivé 2026-10-05 (mesure d'urgence, séance réelle) : seul
-            # le bandeau /scalp reste vivant (flux SSE), tout le reste du
-            # dashboard (Gamma Profile, Vanna&Charm, Positionnement, Tape…)
-            # est figé à son dernier rendu tant que ce n'est pas réactivé.
-            dcc.Interval(id="tick", interval=SETTINGS.flow_interval_s * 1000, disabled=True),
+            # Réactivé 2026-10-06 : la mesure d'urgence ("tt sauf le bandeau")
+            # ne concerne QUE /scalp, pas le dashboard principal (demande
+            # explicite de l'utilisateur, "j'ai pas dit qu'il fallait
+            # désactiver la page principale") — tick redevient normal.
+            dcc.Interval(id="tick", interval=SETTINGS.flow_interval_s * 1000),
             # Heatmap : intervalle DÉDIÉ à 5s (2026-10-05, demande explicite,
             # "c'est une heatmap pas une photo figée") — séparé de `tick`
             # (60s, partagé par 5 autres graphiques du dashboard principal :
@@ -3371,8 +3371,8 @@ def create_app() -> Dash:
             # "aujourd'hui" (cf. commentaire sur `heat_days`), donc ce
             # rafraîchissement plus fréquent reflète réellement des données
             # neuves, pas un recalcul à vide.
-            # Désactivé 2026-10-05 (même mesure d'urgence que "tick").
-            dcc.Interval(id="heatmap-tick", interval=5000, disabled=True),
+            # Réactivé 2026-10-06, même raison que "tick" ci-dessus.
+            dcc.Interval(id="heatmap-tick", interval=5000),
             # 250 ms MESURÉ et ÉCARTÉ le 2026-10-01 : à l'époque le serveur de
             # dev Werkzeug (MONO-THREAD) saturait à ce rythme — curl direct sur
             # /api/v1/NQ/last (lecture triviale en mémoire) à 2-6 s au lieu de
@@ -4729,11 +4729,6 @@ def create_app() -> Dash:
         minutes. Le recalcul porte sur un seul point de spot, donc son coût
         est négligeable devant la grille de 161 points du Gamma Flip.
         """
-        # Désactivé 2026-10-06 (mesure d'urgence, "tt sauf le bandeau") :
-        # ce panneau (page principale "Vue principale") tournait toutes les
-        # 5 s (rt-tick) pour TOUT visiteur, indépendamment des autres
-        # correctifs de ce soir — à réactiver avec le reste.
-        raise PreventUpdate
         xf, _, _ = _transform_for(symbol, unit)
         return (build_cards(symbol, lang, xf, scale=unit), regime_banner(symbol, lang),
                 pc_gauge(symbol, lang))
@@ -4750,11 +4745,6 @@ def create_app() -> Dash:
          Input("majors", "value"), Input("flow-day", "value"),
          Input("lang", "value"), Input("unit", "value"),
          Input("gflow-series", "value"), Input("tape-series", "value")],
-        # Désactivé 2026-10-05/06 (mesure d'urgence) : plus d'affichage
-        # automatique au chargement de la page (dashboard principal) — seul
-        # le bandeau /scalp (SSE) reste vivant par défaut. Un changement
-        # explicite (symbole, bucket, langue…) continue de rafraîchir.
-        prevent_initial_call=True,
     )
     def refresh(_, symbol, bucket, window, majors, flow_day, lang, unit, gflow_series,
                 tape_series):
@@ -4845,7 +4835,6 @@ def create_app() -> Dash:
          Output("profile-hint", "children")],
         [Input("tick", "n_intervals"), Input("tab", "value"), Input("symbol", "value"),
          Input("window", "value"), Input("lang", "value"), Input("unit", "value")],
-        prevent_initial_call=True,  # mesure d'urgence, cf. refresh()
     )
     def refresh_profile(_, tab, symbol, window, lang, unit):
         if tab != "profile":   # onglet masqué : rien à recalculer
@@ -4870,7 +4859,6 @@ def create_app() -> Dash:
         [Input("tick", "n_intervals"), Input("tab", "value"), Input("symbol", "value"),
          Input("bucket", "value"), Input("window", "value"),
          Input("lang", "value"), Input("unit", "value")],
-        prevent_initial_call=True,  # mesure d'urgence, cf. refresh()
     )
     def refresh_greeks2(_, tab, symbol, bucket, window, lang, unit):
         if tab != "greeks2":
@@ -4928,7 +4916,6 @@ def create_app() -> Dash:
          Input("window", "value"), Input("lang", "value"), Input("unit", "value"),
          Input("heat-day", "value"), Input("heat-levels", "value")],
         State("heatmap", "relayoutData"),
-        prevent_initial_call=True,  # mesure d'urgence, cf. refresh()
     )
     def refresh_heatmap(_, tab, symbol, window, lang, unit, day, levels_shown, relayout):
         # onglet masqué : ne pas relire une quarantaine de fichiers pour rien
@@ -4948,7 +4935,6 @@ def create_app() -> Dash:
         [Output("oi-change", "figure"), Output("pos-hint", "children")],
         [Input("tick", "n_intervals"), Input("tab", "value"), Input("symbol", "value"),
          Input("window", "value"), Input("lang", "value"), Input("unit", "value")],
-        prevent_initial_call=True,  # mesure d'urgence, cf. refresh()
     )
     def refresh_positioning(_, tab, symbol, window, lang, unit):
         if tab != "pos":
@@ -4974,7 +4960,6 @@ def create_app() -> Dash:
         [Input("tape-tick", "n_intervals"), Input("tab", "value"),
          Input("symbol", "value"), Input("hedge-window", "value"),
          Input("lang", "value")],
-        prevent_initial_call=True,  # mesure d'urgence, cf. refresh()
     )
     def refresh_hedge(_, tab, symbol, window, lang):
         if tab != "tape":
@@ -4990,22 +4975,21 @@ def create_app() -> Dash:
          Input("symbol", "value"), Input("lang", "value"),
          Input("scalp-window", "value"), Input("scalp-min", "value"),
          Input("scalp-banner-version", "data")],
+        State("emergency-ready", "data"),
     )
-    def refresh_scalp(_, path, symbol, lang, window, min_size, banner_version):
+    def refresh_scalp(_, path, symbol, lang, window, min_size, banner_version, ready):
         if not is_scalp_path(path) or symbol not in ("NQ", "ES"):
             raise PreventUpdate
-        # Mesure d'urgence 2026-10-06 : au chargement de page, on calcule
-        # UNIQUEMENT le bandeau (déjà repris en direct par le flux SSE
-        # juste après) — hedge/ladder/tape/price restent no_update, donc
-        # jamais calculés "par défaut". Un changement explicite ensuite
-        # (symbole, langue…) recalcule tout normalement.
-        # `triggered_id` vaut None au tout premier appel automatique, MAIS
-        # dcc.Location synchronise aussi son `pathname` juste après le
-        # montage (même valeur, ré-émise comme un "changement") — sans ce
-        # 2e cas, ce second appel automatique retombait dans la branche
-        # complète et recalculait tout quand même (repéré en direct,
-        # 2026-10-06 : "ça a quand même rechargé toutes les données").
-        if ctx.triggered_id in (None, "url"):
+        # Mesure d'urgence 2026-10-06 : au chargement de page (et pendant
+        # les 5 s de `emergency-ready`, cf. commentaire sur le Store dans le
+        # layout), on calcule UNIQUEMENT le bandeau (déjà repris en direct
+        # par le flux SSE juste après) — hedge/ladder/tape/price restent
+        # no_update, donc jamais calculés "par défaut". Un `ctx.triggered_id
+        # is None` seul ne suffisait pas : dcc.Location + les boot callbacks
+        # (lang, scalp-banner-version…) redéclenchent ce callback juste
+        # après le montage avec un VRAI triggered_id, pas None (repéré en
+        # direct, "ça a quand même rechargé toutes les données").
+        if not ready:
             sctx = scalp_context(symbol)
             if sctx is None:
                 wait = html.Div(t(lang, "waiting_native" if symbol in ("NQ", "ES")
@@ -5085,7 +5069,6 @@ def create_app() -> Dash:
         [Input("tape-tick", "n_intervals"), Input("tab", "value"),
          Input("symbol", "value"), Input("tape-min-size", "value"),
          Input("tape-combos", "value"), Input("lang", "value")],
-        prevent_initial_call=True,  # mesure d'urgence, cf. refresh()
     )
     def refresh_tape(_, tab, symbol, min_size, combos, lang):
         # ne se recalcule que lorsque l'onglet est ouvert : inutile de
