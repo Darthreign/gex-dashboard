@@ -3922,6 +3922,11 @@ def create_app() -> Dash:
         function(symbol, path, tf) {
             if (window._scChartStream) { window._scChartStream.close(); window._scChartStream = null; }
             if (window._scChartStreamTimer) { clearTimeout(window._scChartStreamTimer); window._scChartStreamTimer = null; }
+            // Désactivé 2026-10-06 (mesure d'urgence) : le graphique
+            // (bougies/niveaux/confluence) ne se connecte plus par défaut —
+            // seul le bandeau reste vivant. Retirer cette ligne pour
+            // réactiver.
+            return window.dash_clientside.no_update;
             if ((path || '/') !== '/scalp' || !['NQ', 'ES'].includes(symbol)) {
                 return window.dash_clientside.no_update;
             }
@@ -4697,6 +4702,11 @@ def create_app() -> Dash:
          Input("majors", "value"), Input("flow-day", "value"),
          Input("lang", "value"), Input("unit", "value"),
          Input("gflow-series", "value"), Input("tape-series", "value")],
+        # Désactivé 2026-10-05/06 (mesure d'urgence) : plus d'affichage
+        # automatique au chargement de la page (dashboard principal) — seul
+        # le bandeau /scalp (SSE) reste vivant par défaut. Un changement
+        # explicite (symbole, bucket, langue…) continue de rafraîchir.
+        prevent_initial_call=True,
     )
     def refresh(_, symbol, bucket, window, majors, flow_day, lang, unit, gflow_series,
                 tape_series):
@@ -4787,6 +4797,7 @@ def create_app() -> Dash:
          Output("profile-hint", "children")],
         [Input("tick", "n_intervals"), Input("tab", "value"), Input("symbol", "value"),
          Input("window", "value"), Input("lang", "value"), Input("unit", "value")],
+        prevent_initial_call=True,  # mesure d'urgence, cf. refresh()
     )
     def refresh_profile(_, tab, symbol, window, lang, unit):
         if tab != "profile":   # onglet masqué : rien à recalculer
@@ -4811,6 +4822,7 @@ def create_app() -> Dash:
         [Input("tick", "n_intervals"), Input("tab", "value"), Input("symbol", "value"),
          Input("bucket", "value"), Input("window", "value"),
          Input("lang", "value"), Input("unit", "value")],
+        prevent_initial_call=True,  # mesure d'urgence, cf. refresh()
     )
     def refresh_greeks2(_, tab, symbol, bucket, window, lang, unit):
         if tab != "greeks2":
@@ -4868,6 +4880,7 @@ def create_app() -> Dash:
          Input("window", "value"), Input("lang", "value"), Input("unit", "value"),
          Input("heat-day", "value"), Input("heat-levels", "value")],
         State("heatmap", "relayoutData"),
+        prevent_initial_call=True,  # mesure d'urgence, cf. refresh()
     )
     def refresh_heatmap(_, tab, symbol, window, lang, unit, day, levels_shown, relayout):
         # onglet masqué : ne pas relire une quarantaine de fichiers pour rien
@@ -4887,6 +4900,7 @@ def create_app() -> Dash:
         [Output("oi-change", "figure"), Output("pos-hint", "children")],
         [Input("tick", "n_intervals"), Input("tab", "value"), Input("symbol", "value"),
          Input("window", "value"), Input("lang", "value"), Input("unit", "value")],
+        prevent_initial_call=True,  # mesure d'urgence, cf. refresh()
     )
     def refresh_positioning(_, tab, symbol, window, lang, unit):
         if tab != "pos":
@@ -4912,6 +4926,7 @@ def create_app() -> Dash:
         [Input("tape-tick", "n_intervals"), Input("tab", "value"),
          Input("symbol", "value"), Input("hedge-window", "value"),
          Input("lang", "value")],
+        prevent_initial_call=True,  # mesure d'urgence, cf. refresh()
     )
     def refresh_hedge(_, tab, symbol, window, lang):
         if tab != "tape":
@@ -4931,6 +4946,22 @@ def create_app() -> Dash:
     def refresh_scalp(_, path, symbol, lang, window, min_size, banner_version):
         if not is_scalp_path(path) or symbol not in ("NQ", "ES"):
             raise PreventUpdate
+        # Mesure d'urgence 2026-10-06 : à l'appel INITIAL (chargement de
+        # page), on calcule UNIQUEMENT le bandeau (déjà repris en direct par
+        # le flux SSE juste après) — hedge/ladder/tape/price restent
+        # no_update, donc jamais calculés "par défaut". Un changement
+        # explicite ensuite (symbole, langue…) recalcule tout normalement.
+        if ctx.triggered_id is None:
+            sctx = scalp_context(symbol)
+            if sctx is None:
+                wait = html.Div(t(lang, "waiting_native" if symbol in ("NQ", "ES")
+                                  else "waiting_first_pull"), className="hint")
+                return wait, no_update, no_update, no_update, no_update, no_update
+            spot = _scalp_live_spot(symbol, sctx)
+            absorb = scalp_absorption(symbol)
+            is_v2_banner = (path or "/") == "/scalp" and (banner_version or "v2") != "v1"
+            banner = scalp_banner(symbol, sctx, spot, lang, absorb, swing=is_v2_banner)
+            return banner, no_update, no_update, no_update, no_update, no_update
         # /scalp v2 affiche le graphique de PRIX en Lightweight Charts
         # (scalp-lw-card) ; scalp-price (Plotly) reste dans le DOM mais
         # CSS-hidden sur cette page (body.scalp-v2-page, style.css) — seul
@@ -4953,17 +4984,17 @@ def create_app() -> Dash:
         hedge = cached_hedge_fig(symbol, lang, int(window if window is not None else -1))
         hedge.update_layout(height=300, uirevision=f"scalp-{symbol}-{window}")
         prints = tape_table(symbol, lang, min_size=float(min_size or 0), include_combos=False)
-        ctx = scalp_context(symbol)
-        if ctx is None:
+        sctx = scalp_context(symbol)
+        if sctx is None:
             wait = html.Div(t(lang, "waiting_native" if symbol in ("NQ", "ES")
                               else "waiting_first_pull"), className="hint")
             price = no_update if is_v2 else empty_fig(t(lang, "sc_waiting_levels"), symbol)
             return wait, wait, wait, hedge, prints, price
-        spot = _scalp_live_spot(symbol, ctx)
+        spot = _scalp_live_spot(symbol, sctx)
         if is_v2:
             price = no_update
         else:
-            price = scalp_price_fig(symbol, ctx, spot)
+            price = scalp_price_fig(symbol, sctx, spot)
             price.update_layout(uirevision=f"scalp-price-{symbol}")
         absorb = scalp_absorption(symbol)
         # swing=True SEULEMENT sur /scalp exact — même garde que scalp-lw-card/
@@ -4971,9 +5002,9 @@ def create_app() -> Dash:
         # que vaille le store scalp-banner-version (bouton V1/V2, absent du
         # DOM /scalpv1 de toute façon, mais la garde reste explicite ici).
         is_v2_banner = (path or "/") == "/scalp" and (banner_version or "v2") != "v1"
-        return (scalp_banner(symbol, ctx, spot, lang, absorb, swing=is_v2_banner),
-                scalp_head(symbol, lang, ctx, spot),
-                scalp_ladder(symbol, ctx, spot), hedge, prints, price)
+        return (scalp_banner(symbol, sctx, spot, lang, absorb, swing=is_v2_banner),
+                scalp_head(symbol, lang, sctx, spot),
+                scalp_ladder(symbol, sctx, spot), hedge, prints, price)
 
     # scalp-lw-data : migré du poll tape-tick vers un flux SSE poussé
     # (2026-10-05, ~10h ET lundi, urgence serveur en pleine séance — demande
@@ -5000,6 +5031,7 @@ def create_app() -> Dash:
         [Input("tape-tick", "n_intervals"), Input("tab", "value"),
          Input("symbol", "value"), Input("tape-min-size", "value"),
          Input("tape-combos", "value"), Input("lang", "value")],
+        prevent_initial_call=True,  # mesure d'urgence, cf. refresh()
     )
     def refresh_tape(_, tab, symbol, min_size, combos, lang):
         # ne se recalcule que lorsque l'onglet est ouvert : inutile de
@@ -5158,14 +5190,13 @@ def create_app() -> Dash:
                     if ctx is not None:
                         spot = _scalp_live_spot(symbol, ctx)
                         snap = {}
-                        sig = (_CONFLUENCE_CACHE.get(symbol, (0.0,))[0],
-                              _ORDER_FLOW_CACHE.get(symbol, (0.0,))[0],
-                              _GEX_PROFILE_CACHE.get(symbol, (0.0,))[0],
-                              _ORDERFLOW_PROFILE_CACHE.get(symbol, (0.0,))[0])
-                        if sig != last_sig:
-                            last_sig = sig
-                            day_ticks = _scalp_day_ticks(symbol)
-                            snap.update(_scalp_indicator_snapshot(symbol, ctx, spot, day_ticks))
+                        # Bloc confluence/gex_profile/order_flow/orderflow_profile
+                        # désactivé 2026-10-06 (mesure d'urgence) : ne sert qu'au
+                        # graphique /scalp v2, lui-même désactivé par défaut (cf.
+                        # clientside_callback chart-stream ci-dessus) — inutile de
+                        # le recalculer tant que rien ne le consomme. Remettre ce
+                        # bloc en place en même temps que le chart-stream.
+                        # if sig != last_sig: ...
                         absorb = scalp_absorption(symbol)
                         banner_sig = (round(spot, 2), json.dumps(absorb, sort_keys=True, default=str))
                         if banner_sig != last_banner_sig:
