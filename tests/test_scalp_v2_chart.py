@@ -31,6 +31,19 @@ def _price_bars(n: int, start_price: float = 30000.0) -> pd.DataFrame:
 _CTX = {"zg": 29900.0, "hvl": 29950.0, "keys": {"call_wall": 30200.0}, "walls": []}
 
 
+@pytest.fixture(autouse=True)
+def _clear_prices_cache():
+    """`_load_prices_cached` (gex/app.py, ajouté le 2026-10-05) met en cache
+    `store.load_prices` 2s dans un dict MODULE-LEVEL — qui survit donc entre
+    deux tests de ce fichier. Comme ils s'enchaînent largement sous 2s avec la
+    même clé (symbole + date calendaire du jour réel, identique pour tous les
+    tests d'une même exécution), un test pollue le cache pour le suivant sans
+    ce reset (ex. un premier test "pas de bougies" fait recevoir un résultat
+    vide au test suivant, qui simule pourtant 200 bougies)."""
+    app._PRICES_CACHE.clear()
+    yield
+
+
 # --- TF par défaut (temps, "t1") : lit store.load_prices, pas les ticks ----
 
 def test_defaut_temps_sans_bougies_renvoie_des_niveaux_sans_candles(monkeypatch):
@@ -51,7 +64,12 @@ def test_defaut_temps_construit_des_bougies_1min(monkeypatch):
     monkeypatch.setattr(store, "load_prices", lambda s, d: _price_bars(200))
     monkeypatch.setattr(store, "tick_days", lambda s: [])
     monkeypatch.setattr(tickcapture, "_session_day", lambda ts: "2026-10-03")
-    out = app.scalp_v2_chart_data("NQ", _CTX, 30040.0)  # tf par défaut = "t1"
+    # spot = dernière close de _price_bars(200) (30000 + 199) — depuis l'ajout
+    # de la bougie live (2026-10-05, cf. _update_live_bar dans
+    # scalp_v2_chart_data), un spot différent du dernier close créerait un
+    # retracement artificiel sur cette seule bougie ajoutée, polluant le
+    # compte de pivots que ce test vérifie précisément.
+    out = app.scalp_v2_chart_data("NQ", _CTX, 30199.0)  # tf par défaut = "t1"
     assert len(out["candles"]) > 0
     c = out["candles"][0]
     assert set(c) == {"time", "open", "high", "low", "close"}
