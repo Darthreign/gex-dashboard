@@ -3346,7 +3346,11 @@ def create_app() -> Dash:
                 html.Div(id="tape-table"),
             ]),
 
-            dcc.Interval(id="tick", interval=SETTINGS.flow_interval_s * 1000),
+            # Désactivé 2026-10-05 (mesure d'urgence, séance réelle) : seul
+            # le bandeau /scalp reste vivant (flux SSE), tout le reste du
+            # dashboard (Gamma Profile, Vanna&Charm, Positionnement, Tape…)
+            # est figé à son dernier rendu tant que ce n'est pas réactivé.
+            dcc.Interval(id="tick", interval=SETTINGS.flow_interval_s * 1000, disabled=True),
             # Heatmap : intervalle DÉDIÉ à 5s (2026-10-05, demande explicite,
             # "c'est une heatmap pas une photo figée") — séparé de `tick`
             # (60s, partagé par 5 autres graphiques du dashboard principal :
@@ -3356,7 +3360,8 @@ def create_app() -> Dash:
             # "aujourd'hui" (cf. commentaire sur `heat_days`), donc ce
             # rafraîchissement plus fréquent reflète réellement des données
             # neuves, pas un recalcul à vide.
-            dcc.Interval(id="heatmap-tick", interval=5000),
+            # Désactivé 2026-10-05 (même mesure d'urgence que "tick").
+            dcc.Interval(id="heatmap-tick", interval=5000, disabled=True),
             # 250 ms MESURÉ et ÉCARTÉ le 2026-10-01 : à l'époque le serveur de
             # dev Werkzeug (MONO-THREAD) saturait à ce rythme — curl direct sur
             # /api/v1/NQ/last (lecture triviale en mémoire) à 2-6 s au lieu de
@@ -3380,7 +3385,10 @@ def create_app() -> Dash:
             # onglet ne pardonne pas l'écart. Ne pas redescendre sous 1000 ms
             # sans re-mesurer SOUS CHARGE DE MARCHÉ RÉELLE, pas un test solo
             # hors séance — la leçon de cette nuit ne s'est pas généralisée.
-            dcc.Interval(id="tape-tick", interval=1000),
+            # Désactivé 2026-10-05 (même mesure d'urgence) : hedge/ladder/
+            # tape/price (refresh_scalp, refresh_tape) ne se recalculent
+            # plus en boucle — seul le bandeau (SSE) reste live.
+            dcc.Interval(id="tape-tick", interval=1000, disabled=True),
             # Ticker de prix /scalp : vrai flux poussé (EventSource, cf.
             # clientside_callback plus bas), aucun sondage — donc pas de dcc.Interval
             # ici. Cible inerte requise par Dash pour un callback JS sans Output
@@ -4458,7 +4466,7 @@ def create_app() -> Dash:
     # applyIndicators n'existent que là.
     app.clientside_callback(
         """
-        function(symbol, path) {
+        function(symbol, path, lang, bannerVersion) {
             if (window._scIndStream) { window._scIndStream.close(); window._scIndStream = null; }
             if (window._scIndStreamTimer) { clearTimeout(window._scIndStreamTimer); window._scIndStreamTimer = null; }
             const isScalpV2 = (path || '/') === '/scalp' || (path || '/').startsWith('/scalp/');
@@ -4471,15 +4479,24 @@ def create_app() -> Dash:
             const token = {};
             window._scIndStreamToken = token;
             const state = {delay: 3000};
+            // swing=True seulement en V2 (même règle que refresh_scalp côté Python)
+            const swing = (bannerVersion || 'v2') !== 'v1' ? '1' : '0';
             const connect = function() {
-                const es = new EventSource(`/api/v1/${symbol}/scalp-indicators-stream`);
+                const es = new EventSource(
+                    `/api/v1/${symbol}/scalp-indicators-stream?lang=${lang || 'fr'}&swing=${swing}`);
                 window._scIndStream = es;
                 es.onmessage = function(ev) {
                     state.delay = 3000;
-                    const st = window._gexLwChart;
-                    if (!st) return;  // graphique pas encore créé : le prochain cycle Dash suffira
                     let snap;
                     try { snap = JSON.parse(ev.data); } catch (e) { return; }
+                    // Mesure d'urgence 2026-10-05 : le bandeau (scalp-banner)
+                    // est maintenant poussé par CE flux (tape-tick désactivé,
+                    // cf. refresh_scalp) plutôt que recalculé par Dash.
+                    if (snap.banner) {
+                        window.dash_clientside.set_props('scalp-banner', {children: snap.banner});
+                    }
+                    const st = window._gexLwChart;
+                    if (!st) return;  // graphique pas encore créé : le prochain cycle Dash suffira
                     st.lastData = Object.assign({}, st.lastData, snap);
                     st.applyIndicators();
                 };
@@ -4500,6 +4517,8 @@ def create_app() -> Dash:
         Output("scalp-stream-sink", "className", allow_duplicate=True),
         Input("symbol", "value"),
         Input("url", "pathname"),
+        Input("lang", "value"),
+        Input("scalp-banner-version", "data"),
         prevent_initial_call="initial_duplicate",
     )
 
@@ -5098,14 +5117,24 @@ def create_app() -> Dash:
     # bien moins cher à comparer).
     @app.server.route("/api/v1/<symbol>/scalp-indicators-stream")
     def _scalp_indicators_stream(symbol):
-        from flask import Response
+        from flask import Response, request
         symbol = symbol.upper()
         if symbol not in SCALP_SCHED_SYMBOLS:
             return Response("symbole non couvert (NQ/ES seulement)", status=404)
+        lang = request.args.get("lang", "fr")
+        swing = request.args.get("swing") == "1"
 
         def gen():
             last_sig = None
+            last_banner_sig = None
             last_heartbeat = time.monotonic()
+            # Mesure d'urgence 2026-10-05 (tape-tick désactivé) : le bandeau
+            # (scalp_banner) est maintenant poussé PAR CE FLUX plutôt que
+            # recalculé à chaque cycle `tape-tick` côté Dash — seule partie
+            # du calcul qui doit vraiment rester "live" (1 Hz) pendant que le
+            # reste (hedge/ladder/tape/price) est figé. `.to_plotly_json()`
+            # sérialise le composant Dash tel quel : `set_props` côté client
+            # l'assigne directement à `children`, sans round-trip Dash.
             # Bug corrigé (2026-10-05) : le yield était à l'intérieur du
             # try/except ci-dessous — une erreur d'ÉCRITURE (client parti,
             # connexion morte) était donc AVALÉE comme un simple échec de
@@ -5128,6 +5157,7 @@ def create_app() -> Dash:
                     ctx = scalp_context(symbol)
                     if ctx is not None:
                         spot = _scalp_live_spot(symbol, ctx)
+                        snap = {}
                         sig = (_CONFLUENCE_CACHE.get(symbol, (0.0,))[0],
                               _ORDER_FLOW_CACHE.get(symbol, (0.0,))[0],
                               _GEX_PROFILE_CACHE.get(symbol, (0.0,))[0],
@@ -5135,7 +5165,14 @@ def create_app() -> Dash:
                         if sig != last_sig:
                             last_sig = sig
                             day_ticks = _scalp_day_ticks(symbol)
-                            snap = _scalp_indicator_snapshot(symbol, ctx, spot, day_ticks)
+                            snap.update(_scalp_indicator_snapshot(symbol, ctx, spot, day_ticks))
+                        absorb = scalp_absorption(symbol)
+                        banner_sig = (round(spot, 2), json.dumps(absorb, sort_keys=True, default=str))
+                        if banner_sig != last_banner_sig:
+                            last_banner_sig = banner_sig
+                            banner = scalp_banner(symbol, ctx, spot, lang, absorb, swing=swing)
+                            snap["banner"] = banner.to_plotly_json()
+                        if snap:
                             payload = f"data: {json.dumps(snap)}\n\n"
                 except Exception:  # noqa: BLE001 — un cycle de CALCUL raté ne doit jamais fermer le flux
                     log.exception("Flux SSE indicateurs /scalp échoué (%s)", symbol)
