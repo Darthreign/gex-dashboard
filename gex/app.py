@@ -2163,12 +2163,15 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
                     {"timestamp": m, **live_bars[m]} for m in manquantes])], ignore_index=True)
         if size > 1:
             bars = _resample_price_bars(bars, size)
-        # Historique par défaut relevé 150->240 bougies le 2026-10-05
-        # (demande explicite) — pour t1 (1 min), ça passe de 2h30 à 4h de
-        # vue initiale (le scroll/zoom arrière reste possible au-delà,
-        # cf. store.load_prices qui renvoie la séance entière).
-        n_bars = lookback_min // size if lookback_min else 240
-        bars = bars.tail(max(n_bars, 1))
+        # Plus de troncature par défaut depuis le 2026-10-05 (demande
+        # explicite, "figé à l'open de la journée") — `bars` contient déjà
+        # TOUTE la séance chargée par `_load_prices_cached` (+ la bougie
+        # live), donc ne rien couper revient à démarrer la vue à l'ouverture
+        # plutôt qu'une fenêtre glissante. `lookback_min` explicite (passé
+        # par un futur appelant qui en aurait besoin) continue de tronquer
+        # normalement — seul le défaut (None) change de comportement.
+        if lookback_min:
+            bars = bars.tail(max(lookback_min // size, 1))
         if bars.empty:
             return empty
         epoch = _epoch_seconds(pd.Series(to_local(bars["timestamp"])).dt.tz_localize(LOCAL_TZ))
@@ -2205,10 +2208,14 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
     # CETTE séance plutôt que de tout filtrer à vide.
     last_ts = float(ticks["ts"].iloc[-1])
     anchor = last_ts if last_ts < time.time() - 3600 else time.time()
-    # Historique par défaut relevé 90->240 min le 2026-10-05 (demande
-    # explicite, même changement que la branche bougies-temps ci-dessus).
-    cutoff = anchor - (lookback_min or 240) * 60
-    ticks = ticks[ticks["ts"] >= cutoff]
+    # Plus de troncature par défaut depuis le 2026-10-05 (demande explicite,
+    # "figé à l'open de la journée", même principe que la branche
+    # bougies-temps ci-dessus) — `day_ticks` est déjà borné à la séance en
+    # cours (cf. `_scalp_day_ticks`), ne rien couper ici revient à démarrer
+    # la vue à l'ouverture. `lookback_min` explicite continue de tronquer.
+    if lookback_min:
+        cutoff = anchor - lookback_min * 60
+        ticks = ticks[ticks["ts"] >= cutoff]
     if ticks.empty:
         return empty
     bars_df = volume_bars(ticks, bar_volume=float(size))
