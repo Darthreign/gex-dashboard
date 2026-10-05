@@ -3151,6 +3151,16 @@ def create_app() -> Dash:
                                             className="sc-draw-btn"),
                                 html.Button("🗑", title="Tout effacer", id="scalp-draw-clear",
                                             className="sc-draw-btn"),
+                                # Recentrage (2026-10-05, demande explicite) :
+                                # changer de symbole (NQ <-> ES, échelles de
+                                # prix très différentes) laisse le zoom/pan
+                                # d'avant en place (fitContent() n'est rappelé
+                                # qu'au tout premier chargement, cf. plus bas,
+                                # pour ne jamais écraser un zoom manuel) — sans
+                                # ce bouton, il fallait défiler à la main pour
+                                # retrouver le dernier prix après un switch.
+                                html.Button("⌖", title="Recentrer sur le dernier prix",
+                                           id="scalp-chart-recenter", className="sc-draw-btn"),
                             ], id="scalp-draw-toolbar", className="sc-draw-toolbar"),
                             # Indicateurs du graphique (2026-10-04) —
                             # demande explicite de l'utilisateur : "il faut
@@ -3977,6 +3987,31 @@ def create_app() -> Dash:
             Input(_ind_btn_id, "n_clicks"),
             prevent_initial_call=True,
         )
+
+    # Recentrage sur le dernier prix (2026-10-05, demande explicite) —
+    # re-déclenche exactement ce que fait fitContent() au tout premier
+    # chargement (cf. commentaire sur le bouton dans le layout) : axe des
+    # prix ET axe du temps repartent sur la vue complète des données déjà
+    # chargées. `priceScale().applyOptions({autoScale:true})` d'abord : si
+    # l'utilisateur a fait glisser l'axe des prix à la main, Lightweight
+    # Charts le "verrouille" (autoScale coupé) et fitContent() seul ne le
+    # redébloque pas.
+    app.clientside_callback(
+        """
+        function(n_clicks) {
+            if (!n_clicks) return window.dash_clientside.no_update;
+            const st = window._gexLwChart;
+            if (st && st.chart && st.series) {
+                st.series.priceScale().applyOptions({autoScale: true});
+                st.chart.timeScale().fitContent();
+            }
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("scalp-chart-recenter", "title", allow_duplicate=True),
+        Input("scalp-chart-recenter", "n_clicks"),
+        prevent_initial_call=True,
+    )
 
     # Couverture des dealers (/scalp v2) — même principe que le graphique de
     # prix : un LineSeries par catégorie, créés UNE fois (persistés dans
