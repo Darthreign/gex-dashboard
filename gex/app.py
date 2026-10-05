@@ -4946,12 +4946,18 @@ def create_app() -> Dash:
     def refresh_scalp(_, path, symbol, lang, window, min_size, banner_version):
         if not is_scalp_path(path) or symbol not in ("NQ", "ES"):
             raise PreventUpdate
-        # Mesure d'urgence 2026-10-06 : à l'appel INITIAL (chargement de
-        # page), on calcule UNIQUEMENT le bandeau (déjà repris en direct par
-        # le flux SSE juste après) — hedge/ladder/tape/price restent
-        # no_update, donc jamais calculés "par défaut". Un changement
-        # explicite ensuite (symbole, langue…) recalcule tout normalement.
-        if ctx.triggered_id is None:
+        # Mesure d'urgence 2026-10-06 : au chargement de page, on calcule
+        # UNIQUEMENT le bandeau (déjà repris en direct par le flux SSE
+        # juste après) — hedge/ladder/tape/price restent no_update, donc
+        # jamais calculés "par défaut". Un changement explicite ensuite
+        # (symbole, langue…) recalcule tout normalement.
+        # `triggered_id` vaut None au tout premier appel automatique, MAIS
+        # dcc.Location synchronise aussi son `pathname` juste après le
+        # montage (même valeur, ré-émise comme un "changement") — sans ce
+        # 2e cas, ce second appel automatique retombait dans la branche
+        # complète et recalculait tout quand même (repéré en direct,
+        # 2026-10-06 : "ça a quand même rechargé toutes les données").
+        if ctx.triggered_id in (None, "url"):
             sctx = scalp_context(symbol)
             if sctx is None:
                 wait = html.Div(t(lang, "waiting_native" if symbol in ("NQ", "ES")
