@@ -2030,8 +2030,13 @@ def start_scalp_indicator_scheduler() -> None:
     # continue à sauter, le vrai problème est algorithmique (groupby sur
     # l'historique complet plutôt qu'une fenêtre) et mérite une session
     # dédiée, pas un nouveau réglage d'urgence.
+    # next_run_time décalé de 20s : évite que ce job tombe pile au même
+    # instant que flush_ticks/flush_optprints (aussi 60s, gex/scheduler.py)
+    # et pull_all — repéré en direct le 2026-10-05, des pics de charge
+    # ponctuels coïncidant avec plusieurs jobs 60s qui dérivent en phase.
     sched.add_job(_refresh_scalp_indicators, "interval", seconds=60,
-                 max_instances=1, coalesce=True)
+                 max_instances=1, coalesce=True,
+                 next_run_time=datetime.now(ET) + timedelta(seconds=20))
     sched.start()
     _SCALP_INDICATOR_SCHED = sched
 
