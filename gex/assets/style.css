@@ -780,8 +780,40 @@ body.scalp-page .levels-row, body.scalp-page .tabbar, body.scalp-page .toolbar,
 body.scalp-page #unit { display: none; }
 body.scalp-page #symbol label:has(input[value="SPX"]), body.scalp-page #symbol label:has(input[value="NDX"]),
 body.scalp-page #symbol label:has(input[value="SPY"]), body.scalp-page #symbol label:has(input[value="QQQ"]) { display: none; }
-body:not(.scalp-page) .full-link, body.scalp-page .scalp-link { display: none; }
-a.scalp-link, a.full-link { text-decoration: none; }
+body:not(.scalp-page):not(.moc-page) .full-link, body.scalp-page .scalp-link { display: none; }
+a.scalp-link, a.full-link, a.moc-link { text-decoration: none; }
+
+/* Page /moc (cf. gex/mocpage.py) : même principe que /scalp — le reste du
+   dashboard masqué, NQ et ES seulement. */
+#pane-moc { display: none; }
+body.moc-page #pane-moc { display: block; }
+body.moc-page #pane-main, body.moc-page #pane-profile, body.moc-page #pane-greeks2,
+body.moc-page #pane-heat, body.moc-page #pane-pos, body.moc-page #pane-tape,
+body.moc-page #pane-scalp { display: none !important; }
+body.moc-page #cards, body.moc-page #pc-gauge, body.moc-page #regime-banner,
+body.moc-page .levels-row, body.moc-page .tabbar, body.moc-page .toolbar,
+body.moc-page #unit, body.moc-page .moc-link { display: none; }
+body.moc-page #symbol label:has(input[value="SPX"]), body.moc-page #symbol label:has(input[value="NDX"]),
+body.moc-page #symbol label:has(input[value="SPY"]), body.moc-page #symbol label:has(input[value="QQQ"]) { display: none; }
+.moc-bannerbox { margin-bottom: 12px; }
+.moc-bannerbox .sc-banner-title { font-size: 22px; }
+.moc-clock { flex-direction: column; align-items: flex-end; }
+.moc-countdown { font-size: 34px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; }
+.moc-phase { color: var(--ink2); }
+.moc-cards { margin-bottom: 12px; }
+.moc-row { display: grid; grid-template-columns: 3fr 2fr; gap: 12px; }
+.moc-col { min-width: 0; }
+.moc-history { margin-top: 12px; }
+.moc-hist-title { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.moc-hist { border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.moc-hist th, .moc-hist td { padding: 3px 10px; border-bottom: 1px solid var(--line); text-align: right; }
+.moc-hist th:first-child, .moc-hist td:first-child { text-align: left; }
+.moc-ok { color: var(--ok); } .moc-ko { color: var(--neg); }
+.moc-note { margin-top: 10px; max-width: 980px; }
+@media (max-width: 900px) {
+  .moc-row { grid-template-columns: 1fr; }
+  .moc-countdown { font-size: 26px; }
+}
 
 /* Graphique /scalp v2 (Lightweight Charts) : /scalpv1 garde scalp-price
    (Plotly) inchangée, seule /scalp EXACT bascule sur la nouvelle carte —

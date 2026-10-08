@@ -25,6 +25,16 @@
 - **L'edge n'est PAS démontré** tant que `python scripts/edge_report.py` n'a pas tourné sur tes données : il rejoue l'historique (ticks live + import Databento, snapshots, historique des métriques, tape), choisit les seuils sur 60 % des séances et les valide sur les 40 % suivantes contre le rejet naïf et le hasard. Le bandeau n'utilise ces seuils que s'ils sont validés (`data/reports/edge_params_<SYM>.json`), sinon il affiche « edge NON validé ».
 - Banc vérifié sur données synthétiques : aucun edge sur marche aléatoire ; edge détecté et filtre de zone utile quand il existe.
 
+## Page /moc (même session)
+
+- **Ce n'est pas l'imbalance officielle** (NOII Nasdaq / NYSE, absente du flux dxFeed ; source payante possible : Databento XNAS.ITCH / XNYS.PILLAR, à vérifier). C'est une estimation des flux MÉCANIQUES de clôture : `gex/moc.py`.
+  - Couverture dealers sur la famille (NDX + QQQ + NQ, ou SPX + SPY + ES), book estimé du jour (`positioning.dealer_book`) : convergence des échéances 16h00 vers leur intrinsèque + glissement du delta des autres échéances jusqu'à la cloche (horloge de variance).
+  - Débouclage cash des ITM (SPXW/NDXP) montré À PART, hors total : dominé par les contrats profondément ITM dont le détenteur est le plus incertain.
+  - ETF à levier : AUM × (L² − L) × rendement du jour. **AUM indicatifs à tenir à jour** dans `data/moc_letf.json` (`{"NQ": {"TQQQ": [3, 2.5e10], ...}, "ES": {...}}`).
+  - Converti en contrats NQ (20 $/pt) / ES (50 $/pt).
+- Page `gex/mocpage.py` : lien « 🔔 MOC », bandeau + compte à rebours, tuiles par chaîne, profil « si la clôture se fait à X », dernière heure (prix, pression estimée au fil du temps, delta agresseur), historique de validation. Calcul toutes les 5 s, seulement quand la page est ouverte.
+- **Edge non démontré** : `python scripts/moc_report.py` après la clôture rejoue chaque séance telle que lue à 15h45 (snapshots ≤ 15h45, prints d'options < 15h45) et la compare au mouvement du future 15h50 → 16h00 (bon sens, corrélations, terciles, intervalle bootstrap). Historique dans `data/reports/moc_history_<SYM>.csv`, affiché en bas de la page.
+
 ## Conventions de calcul (même session)
 
 Voir README « Conventions de calcul ». Points à surveiller en séance : l'IV est désormais inversée du mid (comparer `iv` et `iv_feed`) ; les séries AM (SPX/NDX mensuels, NQ/ES trimestriels) disparaissent à 9h30 le jour de l'opex ; les recalculs NQ/ES utilisent le vrai multiplicateur (montants ÷5 / ÷2 par rapport à avant). Relancer le backfill pour régénérer les snapshots historiques.

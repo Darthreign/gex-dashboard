@@ -22,7 +22,7 @@ from dash import Dash, ctx, dcc, html, no_update
 from dash.dependencies import Input, Output, State
 from dash.exceptions import PreventUpdate
 
-from . import broadcast, digest, metrics, scales, scalp, store
+from . import broadcast, digest, metrics, mocpage, scales, scalp, store
 from .bars import swing_move, volume_bars, zigzag
 from .api import _futures_last_price, register_api
 from .tt_web import connection_status, register_oauth
@@ -3368,6 +3368,8 @@ def create_app() -> Dash:
                         value="fr", inline=True),
                     dcc.Link("⚡ Mode scalping", id="scalp-link", href="/scalp",
                              className="linkbtn scalp-link"),
+                    dcc.Link("🔔 MOC", id="moc-link", href="/moc",
+                             className="linkbtn moc-link"),
                     dcc.Link("← Vue complète", id="full-link", href="/",
                              className="linkbtn full-link"),
                     # page statique servie depuis assets/ (nouvel onglet)
@@ -3466,6 +3468,8 @@ def create_app() -> Dash:
                     dcc.Graph(config=GRAPH_CONFIG, id="smile"),
                 ], className="row"),
             ]),
+
+            mocpage.layout(),
 
             html.Div(id="pane-scalp", children=[
                 # Disposition verticale (/scalp v2 seulement) : demande de Noé
@@ -3912,6 +3916,9 @@ def create_app() -> Dash:
             ))
         return items
 
+    # Page /moc : ses propres callbacks (cf. gex/mocpage.py)
+    mocpage.register(app)
+
     # "emergency-ready" (mesure d'urgence 2026-10-06, cf. commentaire sur le
     # Store dans le layout) : bascule à True au premier tick de "rt-tick"
     # (~5 s après le montage), jamais avant — laisse le temps à tous les
@@ -3957,6 +3964,7 @@ def create_app() -> Dash:
             const isScalpV1 = p === '/scalpv1' || p.startsWith('/scalpv1/');
             document.body.classList.toggle('scalp-page', isScalpV2 || isScalpV1);
             document.body.classList.toggle('scalp-v2-page', isScalpV2);
+            document.body.classList.toggle('moc-page', p === '/moc' || p.startsWith('/moc/'));
             return window.dash_clientside.no_update;
         }
         """,
@@ -4650,7 +4658,7 @@ def create_app() -> Dash:
     def scalp_symbol(path, symbol):
         """Sur /scalp ou /scalpv1, seuls NQ et ES existent : un autre
         sous-jacent retombe sur NQ."""
-        if is_scalp_path(path) and symbol not in ("NQ", "ES"):
+        if (is_scalp_path(path) or mocpage.is_moc_path(path)) and symbol not in ("NQ", "ES"):
             return "NQ"
         raise PreventUpdate
 

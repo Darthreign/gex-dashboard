@@ -273,6 +273,36 @@ TR: dict[str, dict[str, str]] = {
         "sc_edge_unvalidated": "seuils par défaut, edge NON validé : lancer scripts/edge_report.py",
         "sc_edge_tooltip": "EM = mouvement attendu (straddle de l'échéance proche) : {em} pts. "
                            "Distance au Gamma Flip : {dflip} EM.",
+        "moc_waiting": "En attente des chaînes d'options de la famille…",
+        "moc_buy": "ACHAT", "moc_sell": "VENTE", "moc_flat": "neutre",
+        "moc_detail": "Options {opt} (échéances du jour {exp} · temps {charm}) · ETF à levier {letf}",
+        "moc_to_close": "avant la clôture",
+        "moc_phase_avant": "Hors fenêtre : la pression se lit à partir de 15h00 ET",
+        "moc_phase_fenetre": "Fenêtre de clôture : estimation en cours de formation",
+        "moc_phase_noii": "15h50+ : comparer avec l'imbalance officielle publiée",
+        "moc_phase_clos": "Marché cash clos",
+        "moc_chain_missing": "chaîne indisponible",
+        "moc_card_chain": "Couverture {sym}",
+        "moc_card_chain_sub": "du jour {exp} · temps {charm}",
+        "moc_card_letf": "Rééquilibrage ETF à levier",
+        "moc_letf_default": "AUM indicatifs (data/moc_letf.json)",
+        "moc_letf_custom": "AUM de data/moc_letf.json",
+        "moc_card_magnet": "Aimant 0DTE ({chain})",
+        "moc_card_cash": "Débouclage cash ITM (hors total)",
+        "moc_card_cash_sub": "hypothèse forte : détenteur des ITM inconnu",
+        "moc_profile_title": "Pression de clôture selon le niveau — contrats, + = achat",
+        "moc_tape_title": "Dernière heure — prix, pression estimée (jaune) et delta agresseur",
+        "moc_trail": "pression (contrats)",
+        "moc_no_ticks": "Pas de ticks du future",
+        "moc_hist_none": "Pas encore d'historique de validation : lancer scripts/moc_report.py après la clôture.",
+        "moc_hist_title": "Validation (estimation de 15h45 vs mouvement 15h50→16h00) : {n} séances, bon sens {hit}",
+        "moc_h_day": "Séance", "moc_h_est": "Pression", "moc_h_move": "15h50→16h00 (pts)",
+        "moc_missing": "Chaînes absentes de l'estimation : {chains}.",
+        "moc_note": "Estimation MÉCANIQUE, pas l'imbalance officielle (NOII/NYSE, non fournie par "
+                    "dxFeed) : couverture des dealers sur le book estimé du jour (échéances 16h00 "
+                    "qui convergent, delta qui glisse avec le temps) + rééquilibrage des ETF à "
+                    "levier. Hypothèses : dealers couverts en continu, AUM indicatifs. Edge non "
+                    "démontré tant que scripts/moc_report.py ne l'a pas validé.",
     },
     "en": {
         "app_title": "Gamma / Delta Exposure",
@@ -529,6 +559,36 @@ TR: dict[str, dict[str, str]] = {
         "sc_edge_unvalidated": "default thresholds, edge NOT validated: run scripts/edge_report.py",
         "sc_edge_tooltip": "EM = expected move (front-expiry straddle): {em} pts. "
                            "Distance to the Gamma Flip: {dflip} EM.",
+        "moc_waiting": "Waiting for the family's option chains…",
+        "moc_buy": "BUY", "moc_sell": "SELL", "moc_flat": "flat",
+        "moc_detail": "Options {opt} (today's expiries {exp} · time {charm}) · leveraged ETFs {letf}",
+        "moc_to_close": "to the close",
+        "moc_phase_avant": "Outside the window: read the pressure from 3:00 pm ET",
+        "moc_phase_fenetre": "Closing window: estimate still forming",
+        "moc_phase_noii": "3:50 pm+: compare with the published official imbalance",
+        "moc_phase_clos": "Cash market closed",
+        "moc_chain_missing": "chain unavailable",
+        "moc_card_chain": "{sym} hedging",
+        "moc_card_chain_sub": "today {exp} · time {charm}",
+        "moc_card_letf": "Leveraged ETF rebalance",
+        "moc_letf_default": "indicative AUM (data/moc_letf.json)",
+        "moc_letf_custom": "AUM from data/moc_letf.json",
+        "moc_card_magnet": "0DTE magnet ({chain})",
+        "moc_card_cash": "Cash ITM unwind (excluded)",
+        "moc_card_cash_sub": "strong assumption: ITM holder unknown",
+        "moc_profile_title": "Closing pressure by level — contracts, + = buy",
+        "moc_tape_title": "Last hour — price, estimated pressure (yellow) and aggressor delta",
+        "moc_trail": "pressure (contracts)",
+        "moc_no_ticks": "No futures ticks",
+        "moc_hist_none": "No validation history yet: run scripts/moc_report.py after the close.",
+        "moc_hist_title": "Validation (3:45 pm estimate vs 3:50→4:00 pm move): {n} sessions, right sign {hit}",
+        "moc_h_day": "Session", "moc_h_est": "Pressure", "moc_h_move": "3:50→4:00 pm (pts)",
+        "moc_missing": "Chains missing from the estimate: {chains}.",
+        "moc_note": "MECHANICAL estimate, not the official imbalance (NOII/NYSE, not provided by "
+                    "dxFeed): dealer hedging on today's estimated book (4:00 pm expiries "
+                    "converging, delta drifting with time) + leveraged ETF rebalance. "
+                    "Assumptions: continuously hedged dealers, indicative AUM. Edge not "
+                    "demonstrated until scripts/moc_report.py validates it.",
     },
 }
 
