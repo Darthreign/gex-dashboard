@@ -14,10 +14,10 @@ L'onglet le plus visuel : il superpose **le prix réel** et **la structure de ga
 <a id="heatmap"></a>
 ## Le graphique
 
-- **Les barres horizontales** (axe du haut, en $Bn) : le gamma par strike, exactement comme sur la Vue principale, mais avec **deux pondérations superposées** — les barres épaisses utilisent l'*open interest* (les positions déjà installées), les barres fines le *volume du jour* (ce qui se traite maintenant). Un strike fin en OI mais épais en volume est un niveau qui **prend de l'importance en cours de séance**, alors qu'il n'existait pas la veille.
-- **Les bougies** (axe du bas, en heures) : le parcours réel du prix minute par minute — une vraie bougie japonaise (ouverture/haut/bas/clôture), pas juste une ligne, si le flux temps réel (compte courtier) est actif. Sans lui, seuls les points de chaque pull CBOE sont disponibles (moins précis).
+- **Les bougies** : le parcours réel du prix minute par minute, une vraie bougie japonaise (ouverture/haut/bas/clôture) si le flux temps réel (compte courtier) est actif. Sans lui, seuls les points de chaque pull CBOE sont disponibles (moins précis). Le graphique se met à jour tout seul, en continu, sans perdre ton zoom.
+- **Les barres horizontales** sur le bord droit : le gamma par strike, à la hauteur de son prix, comme l'indicateur « Σ Profil gamma » de la page scalp. **Vert** = strike net call, **rouge** = strike net put, longueur = poids. Deux pondérations superposées : la barre épaisse et pâle utilise l'*open interest* (les positions déjà installées), la barre fine et vive le *volume du jour* (ce qui se traite maintenant). Un strike fin en OI mais épais en volume est un niveau qui **prend de l'importance en cours de séance**, alors qu'il n'existait pas la veille.
 
-C'est le croisement des deux qui compte : si le prix (en bas) traverse une grosse concentration de gamma (en haut), c'est le signal à surveiller.
+C'est le croisement des deux qui compte : si le prix arrive au niveau d'une grosse barre de gamma, c'est le signal à surveiller.
 
 💡 Si tu regardes un indice (SPX, NDX...) mais que le sélecteur d'échelle en haut de page est réglé sur "ES" ou "NQ", les bougies affichent le **vrai** historique du future correspondant plutôt qu'une conversion approximative du prix de l'indice.
 

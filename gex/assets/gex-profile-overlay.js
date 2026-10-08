@@ -10,7 +10,7 @@
  * net put-heavy) — même lecture que les barres Plotly de la heatmap,
  * juste tournée en overlay plutôt qu'en graphique à part.
  *
- * API Lightweight Charts v4 (ISeriesPrimitive) — même pattern que le
+ * API Lightweight Charts v5 (ISeriesPrimitive, inchangée depuis la v4) — même pattern que le
  * moteur de dessin extrait d'OpenCharts (gex-drawing-tools.js) : une
  * primitive attachée à la série, qui dessine sur son propre calque canvas
  * sans jamais toucher aux données de la série elle-même.

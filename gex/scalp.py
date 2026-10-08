@@ -10,7 +10,7 @@ donc où est le spot PAR RAPPORT à chaque niveau, et si un niveau est au contac
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 
 from . import i18n
 
@@ -35,6 +35,8 @@ def round_to_tick(symbol: str, price: float) -> float:
 
 OPEN_ET = time(9, 30)
 CLOSE_ET = time(16, 0)
+# Réouverture Globex (séance ETH des futures NQ/ES) : 18h00 New York
+ETH_OPEN_ET = time(18, 0)
 CONTRARIAN_CUT_ET = time(10, 15)      # 16h15 Paris : le contrarien devient risqué
 
 
@@ -102,6 +104,19 @@ def session_state(now_et: datetime, lang: str = "fr") -> tuple[str, str]:
     if t < CONTRARIAN_CUT_ET:
         return "open", i18n.t(lang, "sc_session_open", minutes=minutes)
     return "late", i18n.t(lang, "sc_session_late", minutes=minutes)
+
+
+def session_start(now_et: datetime, futures: bool) -> datetime:
+    """Début (naïf, heure de New York) de la séance en cours, référence de
+    « pts depuis l'open » : ouverture RTH 9h30 en journée ; pour les futures,
+    ouverture ETH 18h00 dès la réouverture Globex et jusqu'à 9h30 le
+    lendemain matin (sinon on comparerait au 9h30 de la veille)."""
+    now = now_et.replace(tzinfo=None)
+    t = now.time()
+    if not futures or OPEN_ET <= t < ETH_OPEN_ET:
+        return datetime.combine(now.date(), OPEN_ET)
+    day = now.date() if t >= ETH_OPEN_ET else now.date() - timedelta(days=1)
+    return datetime.combine(day, ETH_OPEN_ET)
 
 
 def extension_pts(spot: float | None, open_: float | None) -> float | None:

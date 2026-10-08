@@ -36,6 +36,7 @@ Pour une page : lancer le dashboard et regarder la page concernée (`.claude/lau
 | Calcul de la pression MOC | `gex/moc.py` | Convention : flux = −position dealer × Δδ × mult × S, positif = achat. Le débouclage cash des ITM reste HORS total, sauf si `scripts/moc_report.py` montre qu'il améliore la prévision. Tout changement de calcul : relancer ce rapport et comparer. |
 | Page /moc | `gex/mocpage.py`, `.moc-*` dans `gex/assets/style.css`, `moc_*` dans `gex/i18n.py` (FR **et** EN) | Calcul toutes les 5 s, uniquement quand la page est ouverte. |
 | Page /scalp en temps réel | `gex/app.py` : `scalp_indicators_channel`, `scalp_chart_channel`, `scalp_panels_channel` ; routes dans `gex/asgi.py` **et** routes Flask | Tout passe par SSE, **jamais de `dcc.Interval` à la seconde sur /scalp**. Nouveau bloc : l'ajouter à `scalp_panels_snapshot` et à la table `target` du callback client `/scalp-stream`. Un canal = un calcul partagé par tous les onglets. |
+| Graphiques Lightweight Charts (page principale, /scalp, /scalpv1) | `gex/lwspec.py` (figure Plotly -> description), `LW_CHARTS` et `heatmap_spec` dans `gex/app.py`, `gex/assets/gex-lw.js` (rendu), `.lw-*` dans `style.css` ; routes `/api/v1/lw/<nom>` dans `gex/asgi.py` **et** Flask | Les fonctions `*_fig` Plotly restent la source (titres, couleurs, messages « pas de données ») et servent aussi aux PNG du bot : corriger un graphique = corriger sa `*_fig`. Nouveau graphique temporel : l'ajouter à `LW_CHARTS` et au callback client « lw-streams ». Graphiques par strike (GEX/DEX, profil, vanna/charm, smile, positionnement) : restés en Plotly, volontairement. Tests : `tests/test_lwspec.py`. |
 | Lecture normalisée / edge /scalp | `gex/edge.py`, `gex/edge_report.py` | Seuils utilisés seulement si `data/reports/edge_params_<SYM>.json` dit `validated: true` (`scripts/edge_report.py`). |
 | Architecture de charge | `gex/broadcast.py`, `gex/livestate.py`, `gex/asgi.py`, `gex/run.py` | Repli serveur : `GEX_SERVER=waitress`. Repli moteur : retirer `GEX_ENGINE`. |
 | Conventions de calcul (GEX, IV, AM/PM, horloge de variance…) | `gex/metrics.py`, `gex/greeks.py` | Voir README, « Conventions de calcul ». Ne pas changer une convention sans mettre à jour le README. |
@@ -70,10 +71,22 @@ Les mesures d'urgence des 05-06/10 sont levées et la page scalp n'a plus AUCUN 
 - `/chart-stream` : graphique Lightweight Charts (inchangé, actif dès que le graphique est visible).
 - `/scalp-stream` (nouveau, `scalp_panels_channel`) : en-tête, niveaux, gros prints, couverture des dealers ; sur /scalpv1 aussi le bandeau et le prix Plotly. Poussé seulement si un bloc change, et le navigateur ne remplace que les blocs modifiés. Les blocs masqués via « Personnalisation » ne sont pas calculés (le flux est rouvert avec leur liste).
 - `tape-tick` supprimé ; `refresh_scalp` ne fait plus que le premier rendu du bandeau.
-- Page principale : les onglets Tape et Heatmap ne se rafraîchissent que lorsqu'ils sont ouverts ; les tuiles ne se calculent pas sur /scalp et /moc (masquées).
+- Page principale : les onglets Tape et Heatmap ne se rafraîchissent que lorsqu'ils sont ouverts (graphiques en SSE depuis, cf. section Lightweight Charts) ; les tuiles ne se calculent pas sur /scalp et /moc (masquées).
 - Tous les blocs visibles par défaut ; le masque d'urgence, enregistré comme préférence de chaque visiteur, est remis à zéro une fois par navigateur (marqueur `gex-scalp-ergo-v2`), tout autre choix est respecté.
 - Moteur d'indicateurs repassé de 60 s à 20 s (`SCALP_INDICATORS_EVERY_S`) : 2,6 s à froid pour NQ + ES à 600 000 ticks chacun.
 - **Si ça sature en séance** : `STATS`/logs d'abord ; chaque flux est un canal par réglages, son coût ne dépend pas du nombre d'onglets. Repli serveur : `GEX_SERVER=waitress` (les routes Flask des flux existent aussi).
+
+## Lightweight Charts v5 et graphiques temporels en flux poussé (même session)
+
+- Bibliothèque passée de la v4.1.3 à la v5.2.1 (`gex/assets/lightweight-charts.standalone.production.js`). Le graphique /scalp est porté (`chart.addSeries(...)`, `createSeriesMarkers`) ; le profil gamma et les outils de dessin (primitives) n'ont pas changé. Le petit logo TradingView en bas à gauche est l'attribution exigée par la licence : le laisser.
+- **Heatmap** : ce n'est plus une figure Plotly mais le même graphique que l'indicateur « Σ Profil gamma » de /scalp v2 : bougies 1 min, profil de gamma par strike en barres horizontales sur le bord droit (vert = net call, rouge = net put ; épais pâle = open interest, fin vif = volume), niveaux choisis. `heatmap_fig` (Plotly) ne sert plus qu'au PNG du bot.
+- **Séries temporelles en Lightweight Charts et en SSE** : flux delta, gamma flow, order flow (tape), historique GEX, spot vs Gamma Flip, couverture des dealers (onglet Tape, et /scalp + /scalpv1), prix /scalpv1. Chaque graphique a son flux `/api/v1/lw/<nom>?symbol=…` (un calcul partagé par réglages, poussé seulement si la description change), ouvert seulement si son onglet est affiché. Le zoom de l'utilisateur est conservé entre deux mises à jour ; recadrage seulement quand le contexte change (symbole, jour, fenêtre…).
+- Plus de `heatmap-tick` ni de callback Plotly pour ces graphiques ; l'ancienne carte LW de couverture des dealers (masquée depuis le 05/10 car elle clignotait) est supprimée.
+- Vérifié dans Chromium sur données synthétiques : page principale (tous les graphiques), Heatmap, Tape, /scalp, /scalpv1, aucune erreur JS, aucune 5xx. **À vérifier en séance réelle** : fluidité de la couverture des dealers en « Live » (mise à jour à la seconde).
+
+## « pts depuis l'open » pendant la séance ETH (même session)
+
+Sur /scalp, l'écart était toujours mesuré depuis l'ouverture RTH 9h30 du jour calendaire : après la réouverture Globex (18h00 New York), il comparait au 9h30 de la veille. Désormais (`scalp.session_start`) : ouverture RTH de 9h30 à 18h00, puis ouverture ETH de 18h00 jusqu'au lendemain 9h30 (dimanche 18h00 pour le lundi matin), pour NQ et ES.
 
 ## Tâche planifiée « GEX dashboard » qui ne démarrait plus (même session)
 

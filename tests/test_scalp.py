@@ -191,3 +191,18 @@ def test_should_log_signal_cooldown_nempeche_pas_une_alerte_differente():
     last = ("amplification", 1, 1000.0)
     assert scalp.should_log_signal(("calm", 0), "brake", -1,
                                    last_logged=last, now=1005.0) is True
+
+
+def test_session_start_eth_apres_reouverture_globex():
+    from datetime import datetime
+    d = datetime
+    # journée : ouverture RTH du jour, futures comme indices
+    assert scalp.session_start(d(2026, 10, 8, 11, 0), True) == d(2026, 10, 8, 9, 30)
+    assert scalp.session_start(d(2026, 10, 8, 17, 30), True) == d(2026, 10, 8, 9, 30)
+    # réouverture Globex : l'open de référence devient 18h00 (pas le 9h30 de la veille)
+    assert scalp.session_start(d(2026, 10, 8, 18, 5), True) == d(2026, 10, 8, 18, 0)
+    assert scalp.session_start(d(2026, 10, 9, 3, 0), True) == d(2026, 10, 8, 18, 0)
+    # lundi matin : séance ouverte le dimanche 18h00
+    assert scalp.session_start(d(2026, 10, 12, 4, 0), True) == d(2026, 10, 11, 18, 0)
+    # indices cash : toujours l'ouverture RTH
+    assert scalp.session_start(d(2026, 10, 8, 18, 5), False) == d(2026, 10, 8, 9, 30)

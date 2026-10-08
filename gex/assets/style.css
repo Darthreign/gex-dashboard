@@ -853,17 +853,6 @@ body.scalp-v2-page #scalp-lw-card { display: flex; flex-direction: column; }
 .sc-ind-toolbar { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 6px; }
 .sc-ind-btn { width: auto; padding: 0 10px; }
 
-/* Couverture des dealers : repassée sur Plotly (scalp-hedge) PARTOUT,
-   y compris /scalp v2, depuis le 2026-10-05 — la version Lightweight
-   Charts (scalp-lw-hedge-card) clignotait en mode Live (thread principal
-   du navigateur saturé), deux correctifs tentés ont chacun régressé
-   (intervalle dédié -> page figée ; flux SSE -> graphique vide),
-   abandonnés cette nuit-là. Plotly n'a jamais eu ce problème sur
-   /scalpv1 : plus simple de le réutiliser partout que de persister sur
-   la version qui ne marche pas encore. #scalp-lw-hedge-card reste donc
-   masquée inconditionnellement (plus de bascule par body.scalp-v2-page
-   ici) — à réactiver seulement si ce chantier est repris et corrigé. */
-#scalp-lw-hedge-card { display: none; }
 
 
 /* Bandeau d'amplification : en tête de la page Scalp — position/largeur
@@ -930,4 +919,31 @@ body.sc-keywords-only .sc-edge-status { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   .sc-absorb-active { animation: none; }
+}
+
+/* ------------------------------------- graphiques Lightweight Charts (SSE)
+   Cartes créées par gex/assets/gex-lw.js : heatmap, flux, gamma flow, tape,
+   historique GEX, spot vs zero gamma, couverture des dealers, prix /scalpv1. */
+.lw-card {
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 8px 10px 6px;
+  position: relative;
+  min-width: 0;
+}
+.lw-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-height: 22px; }
+.lw-title { font-size: 13px; color: var(--ink); font-weight: 600; flex: 1 1 auto; min-width: 0; }
+.lw-legend { display: flex; gap: 10px; flex-wrap: wrap; font-size: 11px; color: var(--ink-2); }
+.lw-leg { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.lw-leg i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; }
+.lw-tools { display: flex; gap: 4px; }
+.lw-btn {
+  background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--line);
+  border-radius: 4px; font-size: 11px; padding: 1px 7px; cursor: pointer;
+}
+.lw-btn:hover { color: var(--ink); border-color: var(--accent); }
+.lw-box { width: 100%; margin-top: 4px; }
+.lw-msg {
+  display: none; position: absolute; inset: 30px 10px 6px; align-items: center;
+  justify-content: center; text-align: center; color: var(--muted); font-size: 13px;
 }

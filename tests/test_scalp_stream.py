@@ -34,7 +34,7 @@ def test_scalp_v2_blocks_without_price_or_banner(stubs):
     out = A.scalp_panels_snapshot("NQ", "fr", -1, 0.0, False, frozenset())
     assert set(out) == {"head", "ladder", "prints", "hedge"}
     assert json.loads(out["ladder"])["props"]["children"] == "niveaux"
-    assert "layout" in json.loads(out["hedge"])
+    assert "series" in json.loads(out["hedge"])          # description Lightweight Charts
 
 
 def test_scalpv1_also_gets_banner_and_plotly_price(stubs):

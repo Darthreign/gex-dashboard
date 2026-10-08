@@ -422,22 +422,12 @@ def _apply_user_zoom(lay: dict, relayout: dict | None) -> None:
             lay[axe]["autorange"] = False
 
 
-def heatmap_fig(symbol: str, lang: str, day: str | None = None,
-                window: float = 0.04, xf=None, unit: str | None = None,
-                levels_shown: list[str] | None = None,
-                relayout: dict | None = None) -> go.Figure:
-    """Profil de gamma en barres + parcours du prix, sur un axe de prix commun.
-
-    Deux échelles horizontales partagent l'axe vertical des prix : les barres
-    se lisent en $Bn sur l'axe du haut, le prix en heures sur celui du bas.
-    C'est ce partage qui fait tout l'intérêt — on voit immédiatement si le
-    marché évolue au contact d'une concentration de gamma ou à distance.
-
-    Deux pondérations sont tracées. L'open interest décrit le positionnement
-    installé ; le volume du jour, ce qui se traite et donc se couvre
-    maintenant. Un strike lourd en volume mais absent en open interest est un
-    niveau qui prend de l'importance en séance.
-    """
+def _heatmap_inputs(symbol: str, lang: str, day: str | None, window: float, xf,
+                    unit: str | None, levels_shown: list[str] | None) -> dict:
+    """Données de la heatmap (profil de gamma + parcours du prix + niveaux),
+    partagées par la figure Plotly (PNG du bot) et le graphique Lightweight
+    Charts du dashboard : un seul calcul, deux rendus. `error` renseigné quand
+    il n'y a rien à tracer."""
     day = day or datetime.now(ET).strftime("%Y-%m-%d")
     title = guided(t(lang, "heat_title", day=day), "heat")
     xf = xf or (lambda v: v)
@@ -446,7 +436,7 @@ def heatmap_fig(symbol: str, lang: str, day: str | None = None,
 
     df, spot = _chain_for_day(symbol, day)
     if df is None or df.empty or not spot:
-        return empty_fig(t(lang, "heat_none", day=day), title)
+        return {"title": title, "error": t(lang, "heat_none", day=day)}
 
     # Parcours du prix : si l'échelle affichée est un future qui a SON PROPRE
     # historique (NQ/ES), on le prend tel quel — inutile de transposer une
@@ -463,10 +453,70 @@ def heatmap_fig(symbol: str, lang: str, day: str | None = None,
     lo, hi = spot * (1 - window), spot * (1 + window)
     sel = df[df["strike"].between(lo, hi)]
     if sel.empty:
-        return empty_fig(t(lang, "no_data_window"), title)
+        return {"title": title, "error": t(lang, "no_data_window")}
 
     oi = metrics.gex_by_strike_weighted(sel, spot, "open_interest") / 1e9
     vol = metrics.gex_by_strike_weighted(sel, spot, "volume") / 1e9
+
+    # repères horizontaux, choisis par la checklist de l'onglet — seul le
+    # spot reste toujours affiché, comme référence de lecture systématique.
+    # Murs classés au spot structurel (clôture veille), comme partout ailleurs.
+    _ref = ref_spot(symbol, spot)
+    keys = metrics.key_levels(sel, spot, ref_spot=_ref, all_expiries=True)
+    items = [dict(y=xf(spot), label=t(lang, "legend_spot"), color=C["spot"], dash="dot")]
+    if "zero_gamma" in levels_shown:
+        zg = metrics.zero_gamma(df, spot)
+        if zg is not None:
+            items.append(dict(y=xf(zg), label="Gamma Flip", color=C["zg"], dash="dash"))
+    if "hvl" in levels_shown:
+        hvl = metrics.zero_gamma(df, spot, weight_col="volume")
+        if hvl is not None:
+            items.append(dict(y=xf(hvl), label="HVL", color=C["hvl"], dash="dash"))
+    for opt_key, key, color, label in (
+        ("call_wall", "call_wall", C["cw"], "Call Wall"),
+        ("put_support", "put_support", C["ps"], "Put Support"),
+        ("d1", "d1_min", C["d1"], "1D Min"),
+        ("d1", "d1_max", C["d1"], "1D Max"),
+    ):
+        if opt_key not in levels_shown:
+            continue
+        v = keys.get(key)
+        if v is not None:
+            items.append(dict(y=xf(v), label=label, color=color, dash="dash"))
+    if "gex_walls" in levels_shown:
+        walls = metrics.top_gex_levels(sel, ref_spot=_ref, all_expiries=True)
+        labels = wall_labels(walls) if not walls.empty else {}
+        for lv in walls.itertuples():
+            items.append(dict(y=xf(lv.strike), label=labels.get(lv.strike, "GEX"),
+                              color=C["lvl"], dash="dot"))
+    return {"title": title, "error": None, "day": day, "spot": spot, "path": path,
+            "native_price": native_price, "oi": oi, "vol": vol, "items": items,
+            "lo": lo, "hi": hi}
+
+
+def heatmap_fig(symbol: str, lang: str, day: str | None = None,
+                window: float = 0.04, xf=None, unit: str | None = None,
+                levels_shown: list[str] | None = None,
+                relayout: dict | None = None) -> go.Figure:
+    """Profil de gamma en barres + parcours du prix, sur un axe de prix commun.
+
+    Deux échelles horizontales partagent l'axe vertical des prix : les barres
+    se lisent en $Bn sur l'axe du haut, le prix en heures sur celui du bas.
+    C'est ce partage qui fait tout l'intérêt — on voit immédiatement si le
+    marché évolue au contact d'une concentration de gamma ou à distance.
+
+    Deux pondérations sont tracées. L'open interest décrit le positionnement
+    installé ; le volume du jour, ce qui se traite et donc se couvre
+    maintenant. Un strike lourd en volume mais absent en open interest est un
+    niveau qui prend de l'importance en séance.
+    """
+    xf = xf or (lambda v: v)
+    h = _heatmap_inputs(symbol, lang, day, window, xf, unit, levels_shown)
+    title = h["title"]
+    if h["error"]:
+        return empty_fig(h["error"], title)
+    day, spot, path, native_price = h["day"], h["spot"], h["path"], h["native_price"]
+    oi, vol, items, lo, hi = h["oi"], h["vol"], h["items"], h["lo"], h["hi"]
 
     fig = go.Figure()
     # Barres épaisses (open interest) en fond, barres fines (volume) devant :
@@ -514,37 +564,6 @@ def heatmap_fig(symbol: str, lang: str, day: str | None = None,
                             hovertemplate=(f"%{{x|%H:%M}}<br>{t(lang, 'legend_spot')}"
                                            " %{y:.0f}<extra></extra>"))
 
-    # repères horizontaux, choisis par la checklist de l'onglet — seul le
-    # spot reste toujours affiché, comme référence de lecture systématique.
-    # Murs classés au spot structurel (clôture veille), comme partout ailleurs.
-    _ref = ref_spot(symbol, spot)
-    keys = metrics.key_levels(sel, spot, ref_spot=_ref, all_expiries=True)
-    items = [dict(y=xf(spot), label=t(lang, "legend_spot"), color=C["spot"], dash="dot")]
-    if "zero_gamma" in levels_shown:
-        zg = metrics.zero_gamma(df, spot)
-        if zg is not None:
-            items.append(dict(y=xf(zg), label="Gamma Flip", color=C["zg"], dash="dash"))
-    if "hvl" in levels_shown:
-        hvl = metrics.zero_gamma(df, spot, weight_col="volume")
-        if hvl is not None:
-            items.append(dict(y=xf(hvl), label="HVL", color=C["hvl"], dash="dash"))
-    for opt_key, key, color, label in (
-        ("call_wall", "call_wall", C["cw"], "Call Wall"),
-        ("put_support", "put_support", C["ps"], "Put Support"),
-        ("d1", "d1_min", C["d1"], "1D Min"),
-        ("d1", "d1_max", C["d1"], "1D Max"),
-    ):
-        if opt_key not in levels_shown:
-            continue
-        v = keys.get(key)
-        if v is not None:
-            items.append(dict(y=xf(v), label=label, color=color, dash="dash"))
-    if "gex_walls" in levels_shown:
-        walls = metrics.top_gex_levels(sel, ref_spot=_ref, all_expiries=True)
-        labels = wall_labels(walls) if not walls.empty else {}
-        for lv in walls.itertuples():
-            items.append(dict(y=xf(lv.strike), label=labels.get(lv.strike, "GEX"),
-                              color=C["lvl"], dash="dot"))
     _draw_levels(fig, items, xf(lo), xf(hi))
 
     lay = with_legend(base_layout(title, height=560))
@@ -588,6 +607,66 @@ def heatmap_fig(symbol: str, lang: str, day: str | None = None,
                                     font=dict(color=C["muted"])))
     fig.update_layout(**lay)
     return fig
+
+
+_LW_DASH = {"dash": 2, "dot": 1, "solid": 0}
+
+
+def heatmap_spec(symbol: str, lang: str, day: str | None = None, window: float = 0.04,
+                 unit: str | None = None, levels_shown: list[str] | None = None) -> dict:
+    """Heatmap en Lightweight Charts : parcours du prix (bougies 1 min) avec
+    le profil de gamma par strike en barres horizontales sur le bord droit —
+    le même rendu que l'indicateur « Σ Profil gamma » de /scalp v2
+    (gex/assets/gex-profile-overlay.js) — et les niveaux choisis."""
+    from . import lwspec
+    xf, _, _ = _transform_for(symbol, unit)
+    h = _heatmap_inputs(symbol, lang, day, window, xf, unit, levels_shown)
+    spec = {"title": lwspec._clean_title(h["title"]), "message": h["error"], "height": 560,
+            # couleurs de gex-profile-overlay.js : vert = net call, rouge = net
+            # put ; barre épaisse pâle = open interest, fine vive = volume
+            "legend": [{"name": t(lang, "legend_gex_oi"), "color": "rgba(25, 158, 112, 0.45)"},
+                       {"name": t(lang, "legend_gex_vol"), "color": "rgba(25, 158, 112, 0.85)"},
+                       {"name": t(lang, "legend_heat_sign"), "color": "rgba(230, 103, 103, 0.85)"}],
+            "range": None, "rangeButtons": False, "series": [], "lines": [],
+            "profile": [], "priceRange": None}
+    if h["error"]:
+        return spec
+    path, native = h["path"], h["native_price"]
+    if path is not None and not path.empty:
+        ts = lwspec._epoch(to_local(path["timestamp"]))
+        conv = (lambda v: v) if native else xf
+        o, hi, lo, c = (np.asarray(conv(path[k].to_numpy()), dtype=float)
+                        for k in ("open", "high", "low", "close"))
+        ok = np.isfinite(ts) & np.isfinite(c)
+        order = np.argsort(ts[ok], kind="stable")
+        rows = list(zip(*(a[ok][order] for a in (ts, o, hi, lo, c))))
+        has_ohlc = (path["open"] != path["close"]).any() or (path["high"] != path["low"]).any()
+        seen, data = set(), []
+        for tt, oo, hh, ll, cc in rows:
+            if tt in seen:
+                continue
+            seen.add(tt)
+            data.append({"time": float(tt), "open": float(oo), "high": float(hh),
+                         "low": float(ll), "close": float(cc)} if has_ohlc
+                        else {"time": float(tt), "value": float(cc)})
+        spec["series"].append({
+            "name": t(lang, "legend_spot"), "type": "Candlestick" if has_ohlc else "Line",
+            "pane": 0, "scale": "right",
+            "options": ({"upColor": C["pos"], "downColor": C["neg"], "wickUpColor": C["pos"],
+                         "wickDownColor": C["neg"], "borderVisible": False} if has_ohlc
+                        else {"color": "#22d3ee", "lineWidth": 1, "priceLineVisible": False}),
+            "data": data})
+    strikes = sorted(set(h["oi"].index) | set(h["vol"].index))
+    spec["profile"] = [{"price": float(xf(np.array([k]))[0]), "oi": float(h["oi"].get(k, 0.0)),
+                        "vol": float(h["vol"].get(k, 0.0))} for k in strikes]
+    spec["lines"] = [{"series": 0, "price": float(it["y"]), "color": it["color"],
+                      "title": it["label"], "style": _LW_DASH.get(it.get("dash"), 2),
+                      "axisLabel": True} for it in h["items"]]
+    spec["priceRange"] = [float(xf(np.array([h["lo"]]))[0]), float(xf(np.array([h["hi"]]))[0])]
+    r = lwspec._epoch(_session_range(h["day"]))
+    if np.isfinite(r).all():
+        spec["range"] = [float(r[0]), float(r[1])]
+    return spec
 
 
 def _session_range(day: str) -> list:
@@ -1185,12 +1264,18 @@ def scalp_context(symbol: str) -> dict | None:
     if summary is not None:
         rd = digest.symbol_reading(summary.net_gex, summary.net_dex,
                                    hist["net_gex"] if not hist.empty and "net_gex" in hist else None)
-    day = datetime.now(ET).strftime("%Y-%m-%d")
-    bars = store.load_prices(symbol, day)
+    # ouverture de la séance EN COURS : RTH 9h30, ou ETH 18h00 pour les
+    # futures après la réouverture Globex (fichier de la veille avant minuit)
+    start = scalp.session_start(datetime.now(ET), symbol in ("NQ", "ES"))
     open_ = None
-    if not bars.empty:
-        rth = bars[pd.to_datetime(bars["timestamp"]) >= pd.Timestamp(f"{day} 09:30")]
-        open_ = float(rth["open"].iloc[0]) if not rth.empty else None
+    for d in sorted({start.date(), datetime.now(ET).date()}):
+        bars = store.load_prices(symbol, d.strftime("%Y-%m-%d"))
+        if bars.empty:
+            continue
+        cur = bars[pd.to_datetime(bars["timestamp"]) >= pd.Timestamp(start)]
+        if not cur.empty:
+            open_ = float(cur["open"].iloc[0])
+            break
     ctx = {"snap_spot": snap.spot,
            "zg": summary.zero_gamma if summary else None,
            "hvl": metrics.zero_gamma(df, snap.spot, weight_col="volume"),
@@ -2365,11 +2450,13 @@ SCALP_PANEL_HIDE = {"ladder": "hide_ladder", "prints": "hide_tape",
 
 def scalp_panels_snapshot(symbol: str, lang: str, window: int, min_size: float,
                           v1: bool, hide: frozenset) -> dict[str, str]:
-    """Blocs de la page scalp hors bandeau et graphique LW, chacun sérialisé
-    en JSON (composants Dash et figures Plotly) : en-tête, niveaux, gros
-    prints, couverture des dealers, et prix Plotly sur /scalpv1 seulement.
-    Les blocs masqués par l'utilisateur ne sont pas calculés."""
+    """Blocs de la page scalp hors bandeau et graphique principal, chacun
+    sérialisé en JSON : composants Dash (en-tête, niveaux, gros prints) et
+    descriptions Lightweight Charts (couverture des dealers, et prix sur
+    /scalpv1 seulement — cf. gex/lwspec.py). Les blocs masqués par
+    l'utilisateur ne sont pas calculés."""
     from plotly.utils import PlotlyJSONEncoder
+    from . import lwspec
 
     def enc(o) -> str:
         return json.dumps(o, cls=PlotlyJSONEncoder)
@@ -2386,9 +2473,9 @@ def scalp_panels_snapshot(symbol: str, lang: str, window: int, min_size: float,
         out["banner"] = enc(scalp_banner(symbol, sctx, spot, lang, scalp_absorption(symbol),
                                          swing=False, edge=False))
     if "hedge" in want:
-        hedge = cached_hedge_fig(symbol, lang, window)
-        hedge.update_layout(height=300, uirevision=f"scalp-{symbol}-{window}")
-        out["hedge"] = enc(hedge)
+        spec = lwspec.fig_to_spec(cached_hedge_fig(symbol, lang, window), height=300)
+        spec["key"] = f"scalp-{symbol}-{window}"
+        out["hedge"] = enc(spec)
     if "prints" in want:
         out["prints"] = enc(tape_table(symbol, lang, min_size=min_size, include_combos=False))
     if sctx is None:
@@ -2402,9 +2489,9 @@ def scalp_panels_snapshot(symbol: str, lang: str, window: int, min_size: float,
     if "ladder" in want:
         out["ladder"] = enc(scalp_ladder(symbol, sctx, spot))
     if "price" in want:
-        price = scalp_price_fig(symbol, sctx, spot)
-        price.update_layout(uirevision=f"scalp-price-{symbol}")
-        out["price"] = enc(price)
+        spec = lwspec.fig_to_spec(scalp_price_fig(symbol, sctx, spot))
+        spec["key"] = f"scalp-price-{symbol}"
+        out["price"] = enc(spec)
     return out
 
 
@@ -2443,6 +2530,75 @@ def scalp_panels_params(args) -> tuple:
                      if h in SCALP_PANEL_HIDE.values())
     return (args.get("lang", "fr"), num("window", -1, int), num("min", 0.0, float),
             args.get("v1") == "1", hide)
+
+
+# --- Graphiques Lightweight Charts poussés en SSE ---------------------------
+# Nom -> (constructeur de la description, cadence de recalcul en s). Les
+# constructeurs réutilisent les figures existantes (cf. gex/lwspec.py) : même
+# calcul que les PNG du bot. Un canal par (graphique, paramètres), partagé par
+# tous les onglets, poussé seulement quand la description change.
+def _lw_list(v: str | None) -> list[str]:
+    return [x for x in (v or "").split(",") if x]
+
+
+def _lw_hedge(a: dict) -> dict:
+    from . import lwspec
+    try:
+        window = int(a.get("window", 15))
+    except ValueError:
+        window = 15
+    return lwspec.fig_to_spec(cached_hedge_fig(a["symbol"], a["lang"], window),
+                              height=int(a.get("h") or 340))
+
+
+def _lw_fig(builder):
+    def build(a: dict) -> dict:
+        from . import lwspec
+        return lwspec.fig_to_spec(builder(a))
+    return build
+
+
+LW_CHARTS = {
+    "flow": (_lw_fig(lambda a: flow_fig(a["symbol"], a["lang"], a.get("day") or None)), 10.0),
+    "gflow": (_lw_fig(lambda a: gamma_flow_fig(a["symbol"], a["lang"], a.get("day") or None,
+                                               _lw_list(a.get("series")))), 10.0),
+    "tape": (_lw_fig(lambda a: tape_fig(a["symbol"], a["lang"], a.get("day") or None,
+                                        _lw_list(a.get("series")))), 10.0),
+    "history": (_lw_fig(lambda a: history_fig(a["symbol"], a["lang"])), 30.0),
+    "spotzg": (_lw_fig(lambda a: spot_zg_fig(a["symbol"], a["lang"])), 30.0),
+    "hedge": (_lw_hedge, 1.0),
+    "heatmap": (lambda a: heatmap_spec(
+        a["symbol"], a["lang"], a.get("day") or None,
+        float(a.get("window") or 0.04), a.get("unit") or None,
+        _lw_list(a.get("levels")) if "levels" in a else None), 5.0),
+}
+LW_ARGS = ("symbol", "lang", "day", "series", "window", "unit", "levels", "h")
+
+
+def lw_params(args) -> tuple | None:
+    """Paramètres d'un flux de graphique, filtrés (clé du canal partagé)."""
+    a = {k: str(args.get(k)) for k in LW_ARGS if args.get(k) is not None}
+    if a.get("symbol") not in UNDERLYINGS:
+        return None
+    a.setdefault("lang", "fr")
+    return tuple(sorted(a.items()))
+
+
+def lw_channel(name: str, params: tuple) -> broadcast.Channel:
+    builder, interval = LW_CHARTS[name]
+
+    def factory():
+        last = {"j": None}
+
+        def produce():
+            j = json.dumps(builder(dict(params)), default=float)
+            if j == last["j"]:
+                return None
+            last["j"] = j
+            return f"data: {j}\n\n"
+        return produce
+
+    return broadcast.channel(("lw", name, params), factory, interval)
 
 
 _SCALP_INDICATOR_SCHED = None
@@ -3549,13 +3705,13 @@ def create_app() -> Dash:
                                  style={"width": "160px"}),
                     html.Button(id="flow-today", n_clicks=0, className="btn"),
                 ], className="daybar"),
-                dcc.Graph(config=GRAPH_CONFIG, id="flow", style={"marginBottom": "12px"}),
+                html.Div(id="flow", className="lw-chart", style={"marginBottom": "12px"}),
                 html.Div([
                     html.Span(id="lbl-gflow-series", className="ctl-label"),
                     dcc.Checklist(id="gflow-series", className="check", inline=True,
                                  value=["calls", "puts", "net"]),
                 ], className="daybar"),
-                dcc.Graph(config=GRAPH_CONFIG, id="gflow", style={"marginBottom": "12px"}),
+                html.Div(id="gflow", className="lw-chart", style={"marginBottom": "12px"}),
                 # Order flow SIGNÉ : placé juste après les deux proxys non
                 # signés, pour que la différence saute aux yeux plutôt que de
                 # se deviner. Le bandeau porte la provenance et la licence.
@@ -3564,12 +3720,12 @@ def create_app() -> Dash:
                     dcc.Checklist(id="tape-series", className="check", inline=True,
                                  value=["net", "calls", "puts"]),
                 ], className="daybar"),
-                dcc.Graph(config=GRAPH_CONFIG, id="tape"),
+                html.Div(id="tape", className="lw-chart"),
                 html.Div(id="tape-note", className="hint",
                          style={"marginBottom": "12px"}),
                 html.Div([
-                    dcc.Graph(config=GRAPH_CONFIG, id="gex-history"),
-                    dcc.Graph(config=GRAPH_CONFIG, id="spot-zg"),
+                    html.Div(id="gex-history", className="lw-chart"),
+                    html.Div(id="spot-zg", className="lw-chart"),
                     dcc.Graph(config=GRAPH_CONFIG, id="smile"),
                 ], className="row"),
             ]),
@@ -3678,7 +3834,7 @@ def create_app() -> Dash:
                        **{"data-gs-id": "ladder"}),
                     html.Div([html.Div([
                         html.Span("⠿ Graphique", className="sc-widget-handle"),
-                        html.Div([dcc.Graph(config=GRAPH_CONFIG, id="scalp-price")],
+                        html.Div([html.Div(id="scalp-price", className="lw-chart")],
                                  id="scalp-price-card", className="sc-card sc-underlying"),
                         # Carte v2 (Lightweight Charts) : masquée par défaut
                         # (CSS), affichée seulement sur /scalp EXACT (pas
@@ -3825,15 +3981,8 @@ def create_app() -> Dash:
                                                               {"label": "15 min", "value": 15},
                                                               {"label": "30 min", "value": 30}])],
                                      className="sc-cardhead"),
-                            html.Div([dcc.Graph(config=GRAPH_CONFIG, id="scalp-hedge")],
+                            html.Div([html.Div(id="scalp-hedge", className="lw-chart")],
                                      id="scalp-hedge-card"),
-                            # Carte v2 (Lightweight Charts, LineSeries) :
-                            # même bascule Plotly/LW que
-                            # scalp-price/scalp-lw-card — /scalpv1 garde
-                            # scalp-hedge (Plotly) inchangée.
-                            html.Div([html.Div(id="scalp-lw-hedge", className="sc-lw-chart")],
-                                     id="scalp-lw-hedge-card"),
-                            dcc.Store(id="scalp-lw-hedge-data"),
                         ], className="sc-card sc-hedge"),
                     ], className="grid-stack-item-content"),
                     ], className="grid-stack-item",
@@ -3868,7 +4017,7 @@ def create_app() -> Dash:
                     dcc.Checklist(id="heat-levels", className="check", inline=True,
                                  value=["zero_gamma", "call_wall", "put_support"]),
                 ], className="ctl", style={"flexWrap": "wrap"}),
-                dcc.Graph(config=GRAPH_CONFIG, id="heatmap"),
+                html.Div(id="heatmap", className="lw-chart"),
             ]),
 
             html.Div(id="pane-pos", children=[
@@ -3889,8 +4038,7 @@ def create_app() -> Dash:
                                             {"label": "30 min", "value": 30},
                                             {"label": "Σ", "value": 0}]),
                 ], className="daybar"),
-                dcc.Graph(config=GRAPH_CONFIG, id="hedge-graph",
-                          style={"marginBottom": "12px"}),
+                html.Div(id="hedge-graph", className="lw-chart", style={"marginBottom": "12px"}),
                 html.Div([
                     html.Span(id="lbl-tape-size", className="ctl-label"),
                     dcc.RadioItems(id="tape-min-size", className="seg", inline=True,
@@ -3908,17 +4056,10 @@ def create_app() -> Dash:
             # explicite de l'utilisateur, "j'ai pas dit qu'il fallait
             # désactiver la page principale") — tick redevient normal.
             dcc.Interval(id="tick", interval=SETTINGS.flow_interval_s * 1000),
-            # Heatmap : intervalle DÉDIÉ à 5s (2026-10-05, demande explicite,
-            # "c'est une heatmap pas une photo figée") — séparé de `tick`
-            # (60s, partagé par 5 autres graphiques du dashboard principal :
-            # Gamma Profile, Vanna & Charm, Positionnement, Tape…) pour ne
-            # pas tous les accélérer alors que seule la Heatmap doit suivre
-            # le marché de près. `_chain_for_day` lit déjà l'état vivant pour
-            # "aujourd'hui" (cf. commentaire sur `heat_days`), donc ce
-            # rafraîchissement plus fréquent reflète réellement des données
-            # neuves, pas un recalcul à vide.
-            # Réactivé 2026-10-06, même raison que "tick" ci-dessus.
-            dcc.Interval(id="heatmap-tick", interval=5000),
+            # Heatmap, flux, gamma flow, tape, historique GEX, spot vs zero
+            # gamma, couverture des dealers : graphiques Lightweight Charts en
+            # flux poussé (SSE, /api/v1/lw/<nom>), cf. callback « lw-streams ».
+            html.Div(id="lw-stream-sink", style={"display": "none"}),
             # 250 ms MESURÉ et ÉCARTÉ le 2026-10-01 : à l'époque le serveur de
             # dev Werkzeug (MONO-THREAD) saturait à ce rythme — curl direct sur
             # /api/v1/NQ/last (lecture triviale en mémoire) à 2-6 s au lieu de
@@ -4026,19 +4167,59 @@ def create_app() -> Dash:
     # Page /moc : ses propres callbacks (cf. gex/mocpage.py)
     mocpage.register(app)
 
-    # Les onglets Tape et Heatmap de la page principale ne sont rafraîchis
-    # que lorsqu'ils sont ouverts : aucune requête périodique depuis une
-    # autre page (scalp, moc) ou un autre onglet.
+    # L'onglet Tape de la page principale n'est rafraîchi que lorsqu'il est
+    # ouvert : aucune requête périodique depuis une autre page (scalp, moc)
+    # ou un autre onglet.
     app.clientside_callback(
         """
         function(path, tab) {
             const p = path || '/';
             const other = p.startsWith('/scalp') || p.startsWith('/moc');
-            return [other || tab !== 'tape', other || tab !== 'heat'];
+            return other || tab !== 'tape';
         }
         """,
-        [Output("tape-tab-tick", "disabled"), Output("heatmap-tick", "disabled")],
+        Output("tape-tab-tick", "disabled"),
         Input("url", "pathname"), Input("tab", "value"),
+    )
+
+    # « lw-streams » : graphiques Lightweight Charts de la page principale,
+    # chacun alimenté par son flux SSE (LW_CHARTS). Un flux n'est ouvert que
+    # si son onglet est affiché ; changer un réglage remplace le flux (même
+    # URL = rien à faire, cf. GexLW.stream). Hors page principale : tout fermé.
+    app.clientside_callback(
+        """
+        function(path, tab, symbol, lang, unit, win, flowDay, gflow, tapeSeries,
+                 heatDay, heatLevels, hedgeWin) {
+            const G = window.GexLW;
+            if (!G) return window.dash_clientside.no_update;
+            const p = path || '/';
+            const main = !(p.startsWith('/scalp') || p.startsWith('/moc'));
+            const url = (name, on, extra) => {
+                if (!main || !on || !symbol) return null;
+                const q = new URLSearchParams(Object.assign({symbol: symbol, lang: lang || 'fr'}, extra));
+                return '/api/v1/lw/' + name + '?' + q.toString();
+            };
+            const day = flowDay || '';
+            const onMain = tab === 'main';
+            G.stream('flow', url('flow', onMain, {day: day}));
+            G.stream('gflow', url('gflow', onMain, {day: day, series: (gflow || []).join(',')}));
+            G.stream('tape', url('tape', onMain, {day: day, series: (tapeSeries || []).join(',')}));
+            G.stream('gex-history', url('history', onMain, {}));
+            G.stream('spot-zg', url('spotzg', onMain, {}));
+            G.stream('heatmap', url('heatmap', tab === 'heat', {
+                day: heatDay || '', window: win || 0.04, unit: unit || '',
+                levels: (heatLevels || []).join(',')}));
+            G.stream('hedge-graph', url('hedge', tab === 'tape',
+                                        {window: hedgeWin == null ? 15 : hedgeWin}));
+            return '';
+        }
+        """,
+        Output("lw-stream-sink", "children"),
+        Input("url", "pathname"), Input("tab", "value"), Input("symbol", "value"),
+        Input("lang", "value"), Input("unit", "value"), Input("window", "value"),
+        Input("flow-day", "value"), Input("gflow-series", "value"),
+        Input("tape-series", "value"), Input("heat-day", "value"),
+        Input("heat-levels", "value"), Input("hedge-window", "value"),
     )
 
     # "emergency-ready" (mesure d'urgence 2026-10-06, cf. commentaire sur le
@@ -4332,10 +4513,13 @@ def create_app() -> Dash:
                         timeFormatter: (t) => new Date(t * 1000).toLocaleTimeString(),
                     },
                 });
-                const series = chart.addCandlestickSeries({
+                // API v5 : addSeries(type, options) ; les marqueurs passent
+                // par un plugin dédié (createSeriesMarkers), créé une fois.
+                const series = chart.addSeries(LightweightCharts.CandlestickSeries, {
                     upColor: '#199e70', downColor: '#e66767', borderVisible: false,
                     wickUpColor: '#199e70', wickDownColor: '#e66767',
                 });
+                const seriesMarkers = LightweightCharts.createSeriesMarkers(series, []);
                 // ResizeObserver sur le CONTENEUR, pas juste window.resize —
                 // la taille du conteneur change aussi sans redimensionner la
                 // fenêtre : masquer un bloc voisin (cases "Masquer..."),
@@ -4371,6 +4555,7 @@ def create_app() -> Dash:
                     series.attachPrimitive(ofProfile);
                 }
                 window._gexLwChart = { container: container, chart: chart, series: series,
+                                       markers: seriesMarkers,
                                        priceLines: [], fitted: false, profile: profile,
                                        ofProfile: ofProfile, lastData: null };
                 // Indicateurs du graphique (2026-10-04) — niveaux GEX/HVL/
@@ -4481,7 +4666,7 @@ def create_app() -> Dash:
                         };
                     }) : [];
                     // Lightweight Charts exige des marqueurs triés par temps
-                    st.series.setMarkers(swingMarks.concat(absorbMarks).sort(function(x, y) {
+                    st.markers.setMarkers(swingMarks.concat(absorbMarks).sort(function(x, y) {
                         return x.time - y.time;
                     }));
                     if (st.profile) {
@@ -4697,79 +4882,6 @@ def create_app() -> Dash:
         prevent_initial_call=True,
     )
 
-    # Couverture des dealers (/scalp v2) — même principe que le graphique de
-    # prix : un LineSeries par catégorie, créés UNE fois (persistés dans
-    # window._gexLwHedge), seulement `setData` ensuite. Piège du canvas à
-    # largeur 0 déjà réglé pour le graphique de prix, même fix ici.
-    app.clientside_callback(
-        """
-        function(data) {
-            const container = document.getElementById('scalp-lw-hedge');
-            if (!container || !data || !window.LightweightCharts) {
-                return window.dash_clientside.no_update;
-            }
-            if (!window._gexLwHedge || window._gexLwHedge.container !== container) {
-                container.innerHTML = '';
-                const chart = LightweightCharts.createChart(container, {
-                    width: container.clientWidth, height: container.clientHeight,
-                    layout: { background: { color: 'transparent' }, textColor: '#cfd3da' },
-                    grid: { vertLines: { color: '#1e222a' }, horzLines: { color: '#1e222a' } },
-                    // Lightweight Charts n'utilise PAS le fuseau du navigateur
-                    // par défaut malgré ce que laissait croire sa doc — il
-                    // formate les UTCTimestamp en UTC pur sauf formateur
-                    // explicite. Bug réel vérifié en direct le 2026-10-04
-                    // (axe/étiquettes affichés en UTC, pas en heure locale).
-                    // `new Date(t*1000).toLocaleTimeString()` sans option
-                    // `timeZone` explicite utilise le fuseau LOCAL du
-                    // navigateur — cohérent avec le reste du dashboard
-                    // (to_local() côté Python) sans dépendre d'un fuseau
-                    // serveur codé en dur (Europe/Paris), utile si un
-                    // scalpeur ouvre la page depuis un autre fuseau.
-                    timeScale: {
-                        timeVisible: true, secondsVisible: true,
-                        tickMarkFormatter: (t, type) => {
-                            const d = new Date(t * 1000);
-                            return type <= 2
-                                ? d.toLocaleDateString([], { day: '2-digit', month: '2-digit' })
-                                : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                        },
-                    },
-                    localization: {
-                        timeFormatter: (t) => new Date(t * 1000).toLocaleTimeString(),
-                    },
-                });
-                // Même correctif que le graphique de prix : ResizeObserver
-                // sur le conteneur, pas juste window.resize (cf. commentaire
-                // détaillé là-bas).
-                const onResize = () => {
-                    const w = container.clientWidth, h = container.clientHeight;
-                    if (w > 0 && h > 0) chart.resize(w, h);
-                };
-                window.addEventListener('resize', onResize);
-                new ResizeObserver(onResize).observe(container);
-                window._gexLwHedge = { container: container, chart: chart, series: {}, fitted: false };
-            }
-            const state = window._gexLwHedge;
-            (data.series || []).forEach(function(s) {
-                if (!state.series[s.name]) {
-                    state.series[s.name] = state.chart.addLineSeries({
-                        color: s.color, lineWidth: s.width || 1, title: s.name,
-                    });
-                }
-                state.series[s.name].setData(s.points || []);
-            });
-            // fitContent() une seule fois — même correctif que le graphique
-            // de prix ci-dessus, même raison (zoom écrasé à chaque cycle).
-            if (!state.fitted && (data.series || []).length && (data.series[0].points || []).length) {
-                state.chart.timeScale().fitContent();
-                state.fitted = true;
-            }
-            return window.dash_clientside.no_update;
-        }
-        """,
-        Output("scalp-lw-hedge", "title"),
-        Input("scalp-lw-hedge-data", "data"),
-    )
 
     @app.callback(
         Output("symbol", "value", allow_duplicate=True),
@@ -5344,20 +5456,18 @@ def create_app() -> Dash:
 
     @app.callback(
         [Output("levels", "children"), Output("gex-strike", "figure"),
-         Output("dex-strike", "figure"), Output("flow", "figure"),
-         Output("gflow", "figure"), Output("tape", "figure"),
-         Output("gex-history", "figure"), Output("spot-zg", "figure"),
+         Output("dex-strike", "figure"),
          Output("smile", "figure"), Output("tv-copy", "content"),
          Output("tv-copy", "title")],
         [Input("tick", "n_intervals"), Input("symbol", "value"),
          Input("bucket", "value"), Input("window", "value"),
-         Input("majors", "value"), Input("flow-day", "value"),
-         Input("lang", "value"), Input("unit", "value"),
-         Input("gflow-series", "value"), Input("tape-series", "value")],
+         Input("majors", "value"),
+         Input("lang", "value"), Input("unit", "value")],
     )
     @broadcast.shared(ttl=10.0, skip=(0,))
-    def refresh(_, symbol, bucket, window, majors, flow_day, lang, unit, gflow_series,
-                tape_series):
+    def refresh(_, symbol, bucket, window, majors, lang, unit):
+        # Flux, gamma flow, tape, historique GEX et spot vs zero gamma : graphiques
+        # Lightweight Charts poussés en SSE (LW_CHARTS, cf. lw-streams plus bas).
         st = chain_state(symbol)
         with STATE.lock:
             df = st.enriched
@@ -5371,11 +5481,6 @@ def create_app() -> Dash:
 
                 empty_fig(wait, guided(t(lang, "gex_title", bucket=bucket_label), "gex_strike")),
                 empty_fig(wait, guided(t(lang, "dex_title", bucket=bucket_label), "dex_strike")),
-                empty_fig(wait, t(lang, "flow_title")),
-                empty_fig(wait, t(lang, "gflow_title")),
-                empty_fig(wait, t(lang, "tape_title")),
-                empty_fig(wait, t(lang, "hist_title")),
-                empty_fig(wait, t(lang, "spotzg_title")),
                 empty_fig(wait, t(lang, "smile_title")),
                 "", t(lang, "tv_copy_title", scale=unit),
             )
@@ -5418,13 +5523,6 @@ def create_app() -> Dash:
                               guided(t(lang, "dex_title", bucket=bucket_label), "dex_strike"), lang,
                               hvl=hvl, window=window, xf=xf, keys=keys,
                               level_set="regime"), rev),
-            _pin(flow_fig(symbol, lang, flow_day), f"{symbol}-{flow_day}"),
-            _pin(gamma_flow_fig(symbol, lang, flow_day, gflow_series),
-                f"g{symbol}-{flow_day}-{gflow_series}"),
-            _pin(tape_fig(symbol, lang, flow_day, tape_series),
-                f"t{symbol}-{flow_day}-{tape_series}"),
-            _pin(history_fig(symbol, lang), symbol),
-            _pin(spot_zg_fig(symbol, lang), symbol),
             _pin(smile_fig(sel, snap.spot, lang), rev),
             tv_levels_string(levels, hvl, zg, keys, xf),
             t(lang, "tv_copy_title", scale=unit),
@@ -5522,27 +5620,11 @@ def create_app() -> Dash:
         value = current if current in days else today
         return opts, value, t(lang, "heat_day_label")
 
-    @app.callback(
-        [Output("heatmap", "figure"), Output("heat-hint", "children")],
-        [Input("heatmap-tick", "n_intervals"), Input("tab", "value"), Input("symbol", "value"),
-         Input("window", "value"), Input("lang", "value"), Input("unit", "value"),
-         Input("heat-day", "value"), Input("heat-levels", "value")],
-        State("heatmap", "relayoutData"),
-    )
-    @broadcast.shared(ttl=2.0, skip=(0,))
-    def refresh_heatmap(_, tab, symbol, window, lang, unit, day, levels_shown, relayout):
-        # onglet masqué : ne pas relire une quarantaine de fichiers pour rien
-        if tab != "heat":
-            raise PreventUpdate
-        # Un zoom manuel n'est conservé que sur un simple rafraîchissement ou un
-        # changement de niveaux/langue. Dès que le CONTEXTE change (symbole,
-        # jour, échelle, fenêtre), le zoom d'avant n'a plus de sens — il portait
-        # sur une autre plage de prix — donc on repart de la vue complète.
-        reset = ctx.triggered_id in ("symbol", "window", "unit", "heat-day")
-        xf, _, _ = _transform_for(symbol, unit)
-        return (heatmap_fig(symbol, lang, day, window, xf, unit, levels_shown,
-                            relayout=None if reset else relayout),
-                t(lang, "heat_hint"))
+    # Heatmap : graphique Lightweight Charts (bougies + profil de gamma par
+    # strike, comme /scalp v2) poussé en SSE — cf. heatmap_spec et lw-streams.
+    @app.callback(Output("heat-hint", "children"), Input("lang", "value"))
+    def heat_hint(lang):
+        return t(lang, "heat_hint")
 
     @app.callback(
         [Output("oi-change", "figure"), Output("pos-hint", "children")],
@@ -5568,18 +5650,6 @@ def create_app() -> Dash:
         chg = metrics.oi_change(prev_df, df)
         return (oi_change_fig(chg, snap.spot, lang, prev_day, window, xf),
                 t(lang, "pos_hint"))
-
-    @app.callback(
-        Output("hedge-graph", "figure"),
-        [Input("tape-tab-tick", "n_intervals"), Input("tab", "value"),
-         Input("symbol", "value"), Input("hedge-window", "value"),
-         Input("lang", "value")],
-    )
-    @broadcast.shared(ttl=1.0, skip=(0,))
-    def refresh_hedge(_, tab, symbol, window, lang):
-        if tab != "tape":
-            raise PreventUpdate
-        return cached_hedge_fig(symbol, lang, int(window or 0))    # -1 = live à la seconde
 
     # Page scalp en temps réel PAR FLUX POUSSÉ (2026-10-08) : plus aucun
     # sondage à la seconde. Ce callback ne fait que le PREMIER rendu du
@@ -5627,8 +5697,9 @@ def create_app() -> Dash:
                 window: window_ == null ? -1 : window_, min: minSize || 0,
                 v1: v1 ? '1' : '0', hide: hide});
             const target = {head: ['scalp-head', 'children'], ladder: ['scalp-ladder', 'children'],
-                            prints: ['scalp-prints', 'children'], hedge: ['scalp-hedge', 'figure'],
-                            price: ['scalp-price', 'figure'], banner: ['scalp-banner', 'children']};
+                            prints: ['scalp-prints', 'children'], banner: ['scalp-banner', 'children']};
+            // graphiques Lightweight Charts (description, cf. gex/lwspec.py)
+            const charts = {hedge: 'scalp-hedge', price: 'scalp-price'};
             const token = {};
             window._scPanelsToken = token;
             window._scPanelsSig = {};
@@ -5642,8 +5713,12 @@ def create_app() -> Dash:
                     try { m = JSON.parse(ev.data); } catch (e) { return; }
                     const seen = window._scPanelsSig;
                     Object.keys(m.blocks || {}).forEach(function(k) {
-                        if (!target[k] || seen[k] === m.sig[k]) return;
+                        if (!(target[k] || charts[k]) || seen[k] === m.sig[k]) return;
                         seen[k] = m.sig[k];
+                        if (charts[k]) {
+                            if (window.GexLW) window.GexLW.render(charts[k], m.blocks[k]);
+                            return;
+                        }
                         const prop = {};
                         prop[target[k][1]] = m.blocks[k];
                         window.dash_clientside.set_props(target[k][0], prop);
@@ -5680,11 +5755,10 @@ def create_app() -> Dash:
     # indicateurs) n'a PAS bougé, elle continue de réagir au même Store,
     # juste alimenté autrement.
     #
-    # scalp-lw-hedge-data (hedge LW) retiré entièrement : la carte
-    # correspondante est masquée inconditionnellement depuis que
-    # "Couverture des dealers" est repassée sur Plotly (cf. style.css,
-    # confirmé non prioritaire par l'utilisateur) — ce callback ne servait
-    # plus à rien, pur gaspillage de requêtes.
+    # Couverture des dealers (scalp-hedge) : graphique Lightweight Charts
+    # générique (gex-lw.js) alimenté par le flux /scalp-stream, sur /scalp
+    # comme sur /scalpv1. L'ancienne carte LW dédiée (scalp-lw-hedge, qui
+    # clignotait en Live en octobre) est supprimée.
 
     @app.callback(
         Output("tape-table", "children"),
@@ -5854,6 +5928,16 @@ def create_app() -> Dash:
     # le nouveau `tf` (même principe que symbole/page sur les deux flux
     # ci-dessus) — le serveur ne gère donc qu'UN SEUL tf par connexion,
     # jamais un mélange.
+    @app.server.route("/api/v1/lw/<name>")
+    def _lw_stream(name):
+        from flask import Response, request
+        params = lw_params(request.args)
+        if name not in LW_CHARTS or params is None:
+            return Response("graphique ou symbole inconnu", status=404)
+        return Response(broadcast.sse_events(lw_channel(name, params)),
+                        mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
     @app.server.route("/api/v1/<symbol>/scalp-stream")
     def _scalp_panels_stream(symbol):
         from flask import Response, request

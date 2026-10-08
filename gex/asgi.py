@@ -71,6 +71,15 @@ async def scalp_panels_stream(request):
     return _sse(scalp_panels_channel(symbol, *scalp_panels_params(request.query_params)))
 
 
+async def lw_stream(request):
+    from .app import LW_CHARTS, lw_channel, lw_params
+    name = request.path_params["name"]
+    params = lw_params(request.query_params)
+    if name not in LW_CHARTS or params is None:
+        return JSONResponse({"error": "graphique ou symbole inconnu"}, 404)
+    return _sse(lw_channel(name, params))
+
+
 def build(dash_app, wsgi_threads: int = WSGI_THREADS) -> Starlette:
     """Application ASGI : routes SSE asynchrones, puis tout le reste vers
     l'application Flask de Dash."""
@@ -79,5 +88,6 @@ def build(dash_app, wsgi_threads: int = WSGI_THREADS) -> Starlette:
         Route("/api/v1/{symbol}/scalp-indicators-stream", scalp_indicators_stream),
         Route("/api/v1/{symbol}/chart-stream", scalp_chart_stream),
         Route("/api/v1/{symbol}/scalp-stream", scalp_panels_stream),
+        Route("/api/v1/lw/{name}", lw_stream),
         Mount("/", app=WSGIMiddleware(dash_app.server, workers=wsgi_threads)),
     ])
