@@ -439,6 +439,7 @@ def enrich_native(chain: pd.DataFrame, raw: dict[str, dict], spot: float,
     df["delta_bs"] = d
     sign = np.where(is_call, 1.0, -1.0)
     oi = df["open_interest"].to_numpy()
+    df["multiplier"] = float(multiplier)
     df["gex"] = greeks.gex_dollars(sign, g, oi, multiplier, spot)
     # cf. metrics.enrich pour la justification complète (revue le 2026-07-28,
     # après un premier correctif erroné le 2026-07-27) : le DEX suit une

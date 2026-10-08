@@ -212,3 +212,15 @@ def test_gex_lineaire_avec_le_spot_a_structure_egale():
     c2 = chain_at(2000.0)
     b = futopt.enrich_native(c2, _raw(c2, iv=0.20), 2000.0, 20.0, now_et=now)["gex"].abs().sum()
     assert b / a == pytest.approx(2.0, rel=0.1)
+
+
+def test_recalculs_utilisent_le_multiplicateur_du_future():
+    """GEX net recalculé au spot = somme de la colonne gex (multiplicateur 20,
+    pas 100) ; idem pour les murs recalculés à un spot de référence."""
+    from gex import metrics
+    chain = _chain(28700.0)
+    now = datetime(2026, 7, 27, 10, 0, tzinfo=ET)
+    df = futopt.enrich_native(chain, _raw(chain), 28700.0, 20.0, now_et=now)
+    assert (df["multiplier"] == 20.0).all()
+    assert metrics.net_gex_at(df, 28700.0) == pytest.approx(df["gex"].sum(), rel=1e-6)
+    assert metrics.gex_at_spot(df, 28700.0).sum() == pytest.approx(df["gex"].sum(), rel=1e-6)

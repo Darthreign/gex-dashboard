@@ -245,6 +245,16 @@ def calibrate_chain(df: pd.DataFrame, spot: float, r: float,
     return d
 
 
+def multiplier(df: pd.DataFrame):
+    """Multiplicateur $/point par contrat : 100 pour les options d'indice et
+    d'ETF, le notionnel du future pour les options sur future (20 NQ, 50 ES).
+    Les recalculs (profils, murs, vanna/charm) le relisent sur la chaîne au
+    lieu de supposer 100, qui gonflait les montants NQ ×5 et ES ×2."""
+    if "multiplier" in df:
+        return df["multiplier"].to_numpy(dtype=float)
+    return float(CONTRACT_MULTIPLIER)
+
+
 def carry(df: pd.DataFrame):
     """q par contrat pour les recalculs de greeks (0 sur les snapshots
     antérieurs à la calibration)."""
@@ -286,6 +296,7 @@ def enrich(snapshot: ChainSnapshot, now_et: datetime | None = None) -> pd.DataFr
 
     oi = df["open_interest"].to_numpy()
     sign = np.where(is_call, 1.0, -1.0)
+    df["multiplier"] = float(CONTRACT_MULTIPLIER)
     df["gex"] = greeks.gex_dollars(sign, g, oi, CONTRACT_MULTIPLIER, s)
     # Convention DIFFÉRENTE de celle du GEX, et c'est voulu. Le gamma d'une
     # option est TOUJOURS positif (call comme put) : sans un signe artificiel,
@@ -350,8 +361,9 @@ def add_second_order(df: pd.DataFrame, spot: float) -> pd.DataFrame:
     oi = d["open_interest"].to_numpy()
     d["vanna"] = v
     d["charm"] = c
-    d["vex"] = sign * v * 0.01 * oi * CONTRACT_MULTIPLIER * spot
-    d["cex"] = sign * c * oi * CONTRACT_MULTIPLIER * spot
+    mult = multiplier(d)
+    d["vex"] = sign * v * 0.01 * oi * mult * spot
+    d["cex"] = sign * c * oi * mult * spot
     return d
 
 
@@ -434,7 +446,9 @@ def gamma_profile(df: pd.DataFrame, spot: float, weight_col: str = "open_interes
     q = np.asarray(carry(d))
     q = q[:, None] if q.ndim else q
     g = greeks.gamma(grid[None, :], k, t, rates.current_rate(), iv, q)
-    profile = greeks.gex_dollars(sign, g, oi, CONTRACT_MULTIPLIER, grid[None, :]).sum(axis=0)
+    mult = np.asarray(multiplier(d))
+    mult = mult[:, None] if mult.ndim else mult
+    profile = greeks.gex_dollars(sign, g, oi, mult, grid[None, :]).sum(axis=0)
     return grid, profile
 
 
@@ -463,7 +477,7 @@ def gex_at_spot(df: pd.DataFrame, ref_spot: float,
                      rates.current_rate(), d["iv"].to_numpy(), carry(d))
     sign = np.where((d["type"] == "C").to_numpy(), 1.0, -1.0)
     gex = greeks.gex_dollars(sign, g, d[weight_col].to_numpy(),
-                             CONTRACT_MULTIPLIER, ref_spot)
+                             multiplier(d), ref_spot)
     return pd.Series(gex, index=d["strike"].to_numpy()).groupby(level=0).sum()
 
 
@@ -480,7 +494,7 @@ def gex_by_strike_weighted(df: pd.DataFrame, spot: float,
         return pd.Series(dtype=float)
     sign = np.where((df["type"] == "C").to_numpy(), 1.0, -1.0)
     gex = greeks.gex_dollars(sign, df["gamma_bs"].to_numpy(), df[weight_col].to_numpy(),
-                             CONTRACT_MULTIPLIER, spot)
+                             multiplier(df), spot)
     return pd.Series(gex, index=df["strike"].to_numpy()).groupby(level=0).sum()
 
 
@@ -591,7 +605,9 @@ def vanna_profile(df: pd.DataFrame, spot: float, weight_col: str = "open_interes
     q = np.asarray(carry(d))
     q = q[:, None] if q.ndim else q
     v = greeks.vanna(grid[None, :], k, t, rates.current_rate(), iv, q)
-    profile = (sign * v * 0.01 * oi * CONTRACT_MULTIPLIER * grid[None, :]).sum(axis=0)
+    mult = np.asarray(multiplier(d))
+    mult = mult[:, None] if mult.ndim else mult
+    profile = (sign * v * 0.01 * oi * mult * grid[None, :]).sum(axis=0)
     return grid, profile
 
 
@@ -947,7 +963,7 @@ def flow_delta(prev: pd.DataFrame, cur: pd.DataFrame, spot: float) -> dict[str, 
         how="left",
     )
     dvol = (m["volume"] - m["volume_prev"].fillna(0.0)).clip(lower=0.0)
-    signed = dvol * m["delta_bs"] * CONTRACT_MULTIPLIER * spot
+    signed = dvol * m["delta_bs"] * multiplier(m) * spot
     is_call = m["type"] == "C"
     today = datetime.now(ET).date()
     is_0dte = bucket_mask(m, "0DTE", today)
@@ -957,7 +973,7 @@ def flow_delta(prev: pd.DataFrame, cur: pd.DataFrame, spot: float) -> dict[str, 
     # séance, cela montre si ce qui se traite ajoute du gamma stabilisant
     # (calls) ou déstabilisant (puts) — un « CVD » du gamma.
     gsign = np.where(is_call, 1.0, -1.0)
-    gsigned = greeks.gex_dollars(gsign, m["gamma_bs"], dvol, CONTRACT_MULTIPLIER, spot)
+    gsigned = greeks.gex_dollars(gsign, m["gamma_bs"], dvol, multiplier(m), spot)
     return {
         "flow_total": float(signed.sum()),
         "flow_calls": float(signed[is_call].sum()),
