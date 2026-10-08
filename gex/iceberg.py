@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 THRESHOLDS_VERSION = "v2-2026-09-29"
@@ -122,6 +123,66 @@ def flag_absorption(sweeps: list[Sweep], symbol: str, min_ratio: float = MIN_RAT
         out.append(s)
     return out
 
+
+def detect_absorptions(ticks: pd.DataFrame, symbol: str, max_gap_s: float = MAX_GAP_S,
+                       min_ratio: float = MIN_RATIO,
+                       min_refill_fraction: float = MIN_REFILL_FRACTION) -> pd.DataFrame:
+    """`build_sweeps` + `flag_absorption` VECTORISÉS : mêmes salves (même prix,
+    même sens, écart <= `max_gap_s`, un côté indéterminé coupe la salve), mêmes
+    seuils, en numpy au lieu d'une boucle Python par tick — utilisable sur la
+    fenêtre glissante en direct comme sur une séance entière (graphique).
+
+    Une taille affichée absente (NaN) écarte la salve : la version itérative
+    la laissait passer avec un ratio NaN (NaN < seuil est faux).
+
+    Colonnes : side, price, start_ts, end_ts, n_prints, total_size,
+    size_before, size_after, ratio — une ligne par absorption, ordre chronologique.
+    """
+    cols = ["side", "price", "start_ts", "end_ts", "n_prints", "total_size",
+            "size_before", "size_after", "ratio"]
+    if ticks is None or ticks.empty:
+        return pd.DataFrame(columns=cols)
+    n = len(ticks)
+    side = ticks["side"].to_numpy()
+    price = ticks["price"].to_numpy(dtype=float)
+    ts = ticks["ts"].to_numpy(dtype=float)
+    vol = ticks["volume"].to_numpy(dtype=float)
+
+    def col(name):
+        return (ticks[name].to_numpy(dtype=float) if name in ticks
+                else np.full(n, np.nan))
+    is_sell = side == "SELL"
+    valid = is_sell | (side == "BUY")
+    code = np.where(is_sell, 2, np.where(valid, 1, 0))   # comparaisons entières, pas chaînes
+    before = np.where(is_sell, col("prev_bid_size"), col("prev_ask_size"))
+    after = np.where(is_sell, col("bid_size"), col("ask_size"))
+
+    prev_valid = np.concatenate([[False], valid[:-1]])
+    same = np.concatenate([[False], (code[1:] == code[:-1]) & (price[1:] == price[:-1])
+                           & (ts[1:] - ts[:-1] <= max_gap_s)])
+    starts = np.flatnonzero(valid & ~(prev_valid & same))
+    if len(starts) == 0:
+        return pd.DataFrame(columns=cols)
+    # fin d'une salve : dernier tick valide avant la salve suivante (ou un
+    # tick indéterminé, qui ne peut jamais en faire partie)
+    nxt = np.concatenate([starts[1:], [n]])
+    invalid_idx = np.append(np.flatnonzero(~valid), n)   # sentinelle : fin des données
+    first_invalid = invalid_idx[np.searchsorted(invalid_idx, starts, side="right")]
+    ends = np.minimum(nxt, first_invalid) - 1
+
+    cum = np.concatenate([[0.0], np.cumsum(vol)])
+    total = cum[ends + 1] - cum[starts]
+    b, a = before[starts], after[ends]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.where(b > 0, total / b, np.nan)
+    keep = ((total >= _min_total(symbol)) & (b > 0) & (ratio >= min_ratio)
+            & np.isfinite(a) & (a >= min_refill_fraction * b))
+    starts, ends, total, b, a, ratio = (x[keep] for x in (starts, ends, total, b, a, ratio))
+    return pd.DataFrame({
+        "side": side[starts], "price": price[starts], "start_ts": ts[starts],
+        "end_ts": ts[ends], "n_prints": ends - starts + 1, "total_size": total,
+        "size_before": b, "size_after": a, "ratio": ratio,
+    })
 
 
 # --- Volume profile de séance (HVL — High Volume Level) --------------------

@@ -191,8 +191,9 @@ class TickCapture:
             import pandas as pd
 
             from . import iceberg as ib
-            sw = ib.build_sweeps(pd.DataFrame(rows))
-            flags = sorted(ib.flag_absorption(sw, symbol), key=lambda f: f.end_ts)
+            # vectorisé (gex.iceberg.detect_absorptions) : quelques ms sur la
+            # fenêtre, au lieu d'une boucle Python par tick toutes les 2 s
+            flags = list(ib.detect_absorptions(pd.DataFrame(rows), symbol).itertuples())
         with self._lock:
             self._absorb_cache[symbol] = (now, flags)
         return flags

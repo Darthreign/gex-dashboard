@@ -146,3 +146,39 @@ def test_hvl_near_trouve_le_palier_proche():
     hv = ib.hvl_near(levels, 30002.0, "NQ")            # même palier (arrondi à 30000)
     assert hv is not None and hv["side"] == "SELL"
     assert ib.hvl_near(levels, 30500.0, "NQ") is None  # trop loin
+
+
+def _ticks_aleatoires(n, seed, avec_indetermines=True):
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    sides = ["BUY", "SELL", "UNDEFINED"] if avec_indetermines else ["BUY", "SELL"]
+    p = [0.47, 0.47, 0.06] if avec_indetermines else [0.5, 0.5]
+    return pd.DataFrame({
+        "ts": np.cumsum(rng.exponential(0.4, n)),
+        "price": 100 + np.cumsum(rng.choice([-0.25, 0, 0, 0, 0.25], n)),
+        "volume": rng.integers(1, 40, n).astype(float),
+        "side": rng.choice(sides, n, p=p),
+        **{c: rng.integers(1, 30, n).astype(float)
+           for c in ("bid_size", "ask_size", "prev_bid_size", "prev_ask_size")}})
+
+
+@pytest.mark.parametrize("seed,indetermines", [(1, True), (2, False), (3, True)])
+def test_detect_absorptions_vectorise_egal_a_la_version_iterative(seed, indetermines):
+    df = _ticks_aleatoires(4000, seed, indetermines)
+    ref = ib.flag_absorption(ib.build_sweeps(df), "NQ")
+    v = ib.detect_absorptions(df, "NQ")
+    assert [(s.side, s.price, s.start_ts, s.end_ts, s.n_prints, s.total_size,
+             s.size_before, s.size_after) for s in ref] == \
+        [(r.side, r.price, r.start_ts, r.end_ts, r.n_prints, r.total_size,
+          r.size_before, r.size_after) for r in v.itertuples()]
+
+
+def test_detect_absorptions_ecarte_une_taille_affichee_manquante():
+    df = _ticks_aleatoires(4000, 4)
+    df["prev_bid_size"] = float("nan")
+    df["prev_ask_size"] = float("nan")
+    assert ib.detect_absorptions(df, "NQ").empty
+
+
+def test_detect_absorptions_vide():
+    assert ib.detect_absorptions(pd.DataFrame(), "NQ").empty

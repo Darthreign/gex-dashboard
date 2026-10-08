@@ -214,3 +214,48 @@ def test_volume_bars_vectorise_egal_a_la_boucle_de_reference():
     for bv in (1.0, 7.0, 60.0, 10_000.0):
         pd.testing.assert_frame_equal(bars.volume_bars(ticks, bv), reference(ticks, bv),
                                       check_dtype=False)
+
+
+def _salve(t0, side="SELL", price=30000.0, n=12):
+    """Salve absorbée : 12 prints de 10 au même prix, taille affichée 5 -> ratio 24."""
+    size_col = "bid_size" if side == "SELL" else "ask_size"
+    prev_col = "prev_" + size_col
+    return [{"ts": t0 + i * 0.5, "price": price, "volume": 10.0, "side": side,
+             size_col: 5.0, prev_col: 5.0} for i in range(n)]
+
+
+def test_absorptions_rattachees_a_la_bougie_et_fusionnees_avec_le_live(monkeypatch):
+    from gex import app as app_mod
+    app_mod._ABSORPTIONS_CACHE.clear()
+    ticks = pd.DataFrame(_salve(1000.0) + _salve(2000.0, side="BUY", price=30010.0))
+    monkeypatch.setattr(app_mod, "_scalp_day_ticks", lambda s, sides_only=True: ticks)
+    live = {"ts": 2005.5, "price": 30010.0, "side": "BUY", "total": 120.0, "ratio": 24.0,
+            "n_prints": 12}
+    monkeypatch.setattr(app_mod, "scalp_absorption_recent", lambda s: [live])
+    marks = app_mod._absorption_marks("NQ", [900, 1900, 2500])
+    assert [(m["time"], m["side"]) for m in marks] == [(900, "SELL"), (1900, "BUY")]
+    assert marks[0]["ratio"] == 24.0 and marks[0]["total"] == 120.0
+    # avant la première bougie : écartée
+    assert app_mod._absorption_marks("NQ", [5000]) == []
+
+
+def test_donnees_du_graphique_portent_les_absorptions(monkeypatch):
+    from gex import app as app_mod
+    app_mod._ABSORPTIONS_CACHE.clear()
+    base = 1_760_000_000.0
+    rows = []
+    for i in range(400):        # séance de fond, sans absorption
+        rows.append({"ts": base + i * 3.0, "price": 30000.0 + (i % 7) * 0.25, "volume": 1.0,
+                     "side": "BUY" if i % 2 else "SELL", "bid_size": 50.0, "ask_size": 50.0,
+                     "prev_bid_size": 50.0, "prev_ask_size": 50.0})
+    rows += _salve(base + 1300.0)     # après le fond : rien ne coupe la salve
+    ticks = pd.DataFrame(rows).sort_values("ts")
+    monkeypatch.setattr(app_mod, "_scalp_day_ticks", lambda s, sides_only=True: ticks)
+    monkeypatch.setattr(app_mod, "scalp_absorption_recent", lambda s: [])
+    monkeypatch.setattr(app_mod, "_scalp_indicator_snapshot",
+                        lambda *a: {"levels": [], "confluence": [], "order_flow": [],
+                                    "gex_profile": [], "orderflow_profile": {}})
+    data = app_mod.scalp_v2_chart_data("NQ", {}, 30000.0, tf="v60")
+    assert len(data["absorptions"]) == 1
+    a = data["absorptions"][0]
+    assert a["side"] == "SELL" and a["time"] in {c["time"] for c in data["candles"]}

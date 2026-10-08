@@ -1680,6 +1680,62 @@ def scalp_order_flow_zones(symbol: str, day_ticks: pd.DataFrame) -> list[dict]:
     return out
 
 
+_ABSORPTIONS_CACHE: dict[str, tuple[float, list[dict]]] = {}
+
+
+def scalp_absorptions(symbol: str, raw_ticks: pd.DataFrame) -> list[dict]:
+    """Toutes les absorptions de la séance (cf. gex.iceberg.detect_absorptions,
+    mêmes règles que la fenêtre glissante de TickCapture mais sur la séance
+    entière) — pour les marquer sur le graphique. `raw_ticks` : ticks BRUTS
+    (un côté indéterminé coupe une salve). Calculé par le moteur planifié,
+    mis en cache 10 s ; vectorisé, ~0,2 s pour un million de ticks."""
+    if INDICATORS_REMOTE:
+        return _remote_value(_ABSORPTIONS_CACHE, symbol, [])
+    now = time.time()
+    hit = _ABSORPTIONS_CACHE.get(symbol)
+    if hit and now - hit[0] < SCALP_HEAVY_CACHE_S:
+        return hit[1]
+    from . import iceberg as ib
+    flags = ib.detect_absorptions(raw_ticks, symbol)
+    out = [{"ts": float(r.end_ts), "price": float(r.price), "side": r.side,
+            "total": float(r.total_size), "ratio": round(float(r.ratio), 1),
+            "n_prints": int(r.n_prints)} for r in flags.itertuples()]
+    _ABSORPTIONS_CACHE[symbol] = (now, out)
+    return out
+
+
+def _absorption_marks(symbol: str, candle_times: list[int]) -> list[dict]:
+    """Absorptions de la séance + celles de la fenêtre live (plus fraîches que
+    le dernier calcul planifié), rattachées à la bougie qui les contient —
+    Lightweight Charts ne place un marqueur que sur le temps d'une bougie."""
+    if not candle_times:
+        return []
+    try:
+        events = scalp_absorptions(symbol, _scalp_day_ticks(symbol, sides_only=False))
+    except Exception:  # noqa: BLE001 — un indicateur raté ne casse pas le graphique
+        log.exception("Absorptions de séance indisponibles (%s)", symbol)
+        events = []
+    try:
+        live = scalp_absorption_recent(symbol)
+    except Exception:  # noqa: BLE001
+        live = []
+    seen, merged = set(), []
+    for e in list(events) + [{"ts": a["ts"], "price": a["price"], "side": a["side"],
+                              "total": a["total"], "ratio": a.get("ratio"),
+                              "n_prints": a.get("n_prints")} for a in live or []]:
+        key = (round(float(e["ts"]), 3), e["price"], e["side"])
+        if key not in seen:
+            seen.add(key)
+            merged.append(e)
+    times = np.asarray(sorted(candle_times))
+    out = []
+    for e in merged:
+        i = int(np.searchsorted(times, e["ts"], side="right")) - 1
+        if i >= 0:
+            out.append(dict(e, time=int(times[i])))
+    return sorted(out, key=lambda e: e["time"])
+
+
 _GEX_PROFILE_CACHE: dict[str, tuple[float, list[dict]]] = {}
 
 
@@ -1982,7 +2038,7 @@ INDICATORS_REMOTE = False
 _INDICATOR_CACHES = {
     "confluence": "_CONFLUENCE_CACHE", "order_flow": "_ORDER_FLOW_CACHE",
     "gex_profile": "_GEX_PROFILE_CACHE", "orderflow_profile": "_ORDERFLOW_PROFILE_CACHE",
-    "untested": "_ORDERFLOW_UNTESTED_CACHE",
+    "untested": "_ORDERFLOW_UNTESTED_CACHE", "absorptions": "_ABSORPTIONS_CACHE",
 }
 
 
@@ -2060,6 +2116,10 @@ def _refresh_scalp_indicators() -> None:
         except Exception:  # noqa: BLE001
             log.exception("Rafraîchissement planifié order-flow échoué (%s)", symbol)
         try:
+            scalp_absorptions(symbol, _scalp_day_ticks(symbol, sides_only=False))
+        except Exception:  # noqa: BLE001
+            log.exception("Rafraîchissement planifié absorptions échoué (%s)", symbol)
+        try:
             scalp_confluence_zones(symbol)
         except Exception:  # noqa: BLE001
             log.exception("Rafraîchissement planifié confluence échoué (%s)", symbol)
@@ -2127,7 +2187,8 @@ def scalp_chart_channel(symbol: str, tf: str) -> broadcast.Channel:
             candles = data.get("candles") or []
             markers = data.get("markers") or []
             tail = candles[-1] if candles else None
-            sig = (len(candles), len(markers), tail and (tail["time"], tail["close"]))
+            sig = (len(candles), len(markers), len(data.get("absorptions") or []),
+                   tail and (tail["time"], tail["close"]))
             if sig == last["sig"]:
                 return None
             last["sig"] = sig
@@ -2223,7 +2284,7 @@ def _resample_price_bars(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
     return out
 
 
-def _scalp_day_ticks(symbol: str) -> pd.DataFrame:
+def _scalp_day_ticks(symbol: str, sides_only: bool = True) -> pd.DataFrame:
     """Ticks BUY/SELL de la séance en cours, repli sur le dernier jour
     disponible si elle est encore vide (nuit, week-end) — factorisé le
     2026-10-04 : utilisé par `scalp_v2_chart_data` ET par le moteur planifié
@@ -2231,41 +2292,45 @@ def _scalp_day_ticks(symbol: str) -> pd.DataFrame:
     logique de repli qui pourraient diverger."""
     from .tickcapture import _session_day
     day = _session_day(time.time())
-    day_ticks = _ticks_cached(symbol, day)
+    day_ticks = _ticks_cached(symbol, day, sides_only)
     if day_ticks.empty:
         # Repli : séance en cours encore vide — dernier jour avec des ticks,
         # même principe que `scalp_price_fig` pour les bougies Plotly.
         days = store.tick_days(symbol)
         if days:
-            day_ticks = _ticks_cached(symbol, days[-1])
+            day_ticks = _ticks_cached(symbol, days[-1], sides_only)
     return day_ticks
 
 
-_TICKS_CACHE: dict[tuple[str, str], tuple[tuple, pd.DataFrame]] = {}
+_TICKS_CACHE: dict[tuple[str, str, bool], tuple[tuple, pd.DataFrame]] = {}
 _TICKS_LOCK = threading.Lock()
 
 
-def _ticks_cached(symbol: str, day: str) -> pd.DataFrame:
-    """Ticks BUY/SELL d'un jour, relus seulement quand le fichier change (le
-    process capture le réécrit ~1 fois/min) : tous les appelants partagent
-    UNE lecture par écriture au lieu d'une par appel. Lecture seule."""
+def _ticks_cached(symbol: str, day: str, sides_only: bool = True) -> pd.DataFrame:
+    """Ticks d'un jour (BUY/SELL seulement par défaut ; bruts avec
+    `sides_only=False`, pour la détection d'absorption où un côté indéterminé
+    coupe une salve), relus seulement quand le fichier change (le process
+    capture le réécrit ~1 fois/min) : tous les appelants partagent UNE
+    lecture par écriture au lieu d'une par appel. Lecture seule."""
     path = store.SETTINGS.data_dir / "ticks" / symbol / f"{day}.parquet"
     try:
         st = path.stat()
         sig = (st.st_mtime_ns, st.st_size)
     except OSError:
         sig = None                 # pas de fichier : lecture directe, sans cache
-    if sig is None:
+    def load():
         df = store.load_ticks(symbol, day)
-        return df[df["side"].isin(("BUY", "SELL"))] if not df.empty else df
+        if sides_only and not df.empty:
+            df = df[df["side"].isin(("BUY", "SELL"))]
+        return df
+    if sig is None:
+        return load()
     with _TICKS_LOCK:
-        hit = _TICKS_CACHE.get((symbol, day))
+        hit = _TICKS_CACHE.get((symbol, day, sides_only))
         if hit and hit[0] == sig:
             return hit[1]
-        df = store.load_ticks(symbol, day)
-        if not df.empty:
-            df = df[df["side"].isin(("BUY", "SELL"))]
-        _TICKS_CACHE[(symbol, day)] = (sig, df)
+        df = load()
+        _TICKS_CACHE[(symbol, day, sides_only)] = (sig, df)
         return df
 
 
@@ -2319,7 +2384,7 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
     levels, confluence = snap["levels"], snap["confluence"]
     order_flow, gex_profile = snap["order_flow"], snap["gex_profile"]
     orderflow_profile = snap["orderflow_profile"]
-    empty = {"candles": [], "markers": [], "levels": levels, "confluence": confluence,
+    empty = {"candles": [], "markers": [], "absorptions": [], "levels": levels, "confluence": confluence,
             "order_flow": order_flow, "gex_profile": gex_profile,
             "orderflow_profile": orderflow_profile, "symbol": symbol}
 
@@ -2433,7 +2498,9 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
             confirmed = swings[~swings["kind"].str.endswith("?")]
             markers = [{"time": int(r.ts), "price": r.price, "kind": r.kind}
                       for r in confirmed.itertuples()]
-        return {"candles": candles, "markers": markers, "levels": levels,
+        return {"candles": candles, "markers": markers,
+                "absorptions": _absorption_marks(symbol, [c["time"] for c in candles]),
+                "levels": levels,
                 "confluence": confluence, "order_flow": order_flow,
                 "gex_profile": gex_profile, "orderflow_profile": orderflow_profile,
                 "symbol": symbol}
@@ -2468,7 +2535,9 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
         confirmed = swings[~swings["kind"].str.endswith("?")]
         markers = [{"time": int(r.ts), "price": r.price, "kind": r.kind}
                    for r in confirmed.itertuples()]
-    return {"candles": candles, "markers": markers, "levels": levels, "confluence": confluence,
+    return {"candles": candles, "markers": markers,
+            "absorptions": _absorption_marks(symbol, [c["time"] for c in candles]),
+            "levels": levels, "confluence": confluence,
             "order_flow": order_flow, "gex_profile": gex_profile,
             "orderflow_profile": orderflow_profile, "symbol": symbol}
 
@@ -3451,6 +3520,12 @@ def create_app() -> Dash:
                                             title="Afficher/masquer les zones HVN/LVN non "
                                                   "testées (indépendant du profil de volume "
                                                   "par jambe ci-dessus)"),
+                                html.Button("Absorptions", id="scalp-ind-absorb-toggle",
+                                            className="sc-draw-btn sc-ind-btn",
+                                            title="Afficher/masquer les absorptions de la "
+                                                  "séance (rond sous la bougie : vendeurs "
+                                                  "absorbés au bid = support ; au-dessus : "
+                                                  "acheteurs absorbés à l'ask = résistance)"),
                             ], className="sc-ind-toolbar"),
                             html.Div(id="scalp-lw-chart", className="sc-lw-chart"),
                         ], id="scalp-lw-card", className="sc-card sc-underlying"),
@@ -4022,7 +4097,7 @@ def create_app() -> Dash:
                 // (callbacks séparés plus bas), jamais dupliquée.
                 let indicators = { levels: true, confluence: true, order_flow: true,
                                    gex_profile: true, markers: true, orderflow_profile: true,
-                                   orderflow_untested: true };
+                                   orderflow_untested: true, absorptions: true };
                 try {
                     const saved = JSON.parse(window.localStorage.getItem('gex-scalp-indicators') || 'null');
                     if (saved) indicators = Object.assign(indicators, saved);
@@ -4038,7 +4113,8 @@ def create_app() -> Dash:
                  ["scalp-gexprofile-toggle", "gex_profile"],
                  ["scalp-ind-markers-toggle", "markers"],
                  ["scalp-ind-ofprofile-toggle", "orderflow_profile"],
-                 ["scalp-ind-untested-toggle", "orderflow_untested"]].forEach(function(pair) {
+                 ["scalp-ind-untested-toggle", "orderflow_untested"],
+                 ["scalp-ind-absorb-toggle", "absorptions"]].forEach(function(pair) {
                     const btn = document.getElementById(pair[0]);
                     if (btn) btn.classList.toggle('sc-draw-active', indicators[pair[1]]);
                 });
@@ -4093,7 +4169,7 @@ def create_app() -> Dash:
                     // fine — demande explicite de l'utilisateur, "en général
                     // c'est une zone pas un prix fixe").
                     st.priceLines = simpleLines.concat(confluenceLines, flowLines);
-                    st.series.setMarkers(ind.markers ? (d.markers || []).map(function(m) {
+                    const swingMarks = ind.markers ? (d.markers || []).map(function(m) {
                         const isHigh = m.kind.startsWith('H');
                         return {
                             time: m.time, position: isHigh ? 'aboveBar' : 'belowBar',
@@ -4101,7 +4177,25 @@ def create_app() -> Dash:
                             shape: isHigh ? 'arrowDown' : 'arrowUp',
                             text: m.kind + ' ' + Math.round(m.price),
                         };
-                    }) : []);
+                    }) : [];
+                    // Absorptions (cf. gex/iceberg.py::detect_absorptions) :
+                    // vendeurs absorbés au bid (le niveau tient) = support,
+                    // rond sous la bougie ; acheteurs absorbés à l'ask =
+                    // résistance, rond au-dessus. Texte : prix, volume
+                    // absorbé et multiple de la taille affichée.
+                    const absorbMarks = ind.absorptions ? (d.absorptions || []).map(function(a) {
+                        const support = a.side === 'SELL';
+                        return {
+                            time: a.time, position: support ? 'belowBar' : 'aboveBar',
+                            color: support ? '#14b8a6' : '#f59e0b', shape: 'circle',
+                            text: 'Abs ' + a.price + ' · ' + Math.round(a.total)
+                                  + (a.ratio ? ' ×' + a.ratio : ''),
+                        };
+                    }) : [];
+                    // Lightweight Charts exige des marqueurs triés par temps
+                    st.series.setMarkers(swingMarks.concat(absorbMarks).sort(function(x, y) {
+                        return x.time - y.time;
+                    }));
                     if (st.profile) {
                         st.profile.setVisible(ind.gex_profile);
                         st.profile.setData(d.gex_profile || []);
@@ -4160,14 +4254,20 @@ def create_app() -> Dash:
     # (la route ne gère qu'un seul tf par connexion).
     app.clientside_callback(
         """
-        function(symbol, path, tf) {
+        function(symbol, path, tf, ergo) {
             if (window._scChartStream) { window._scChartStream.close(); window._scChartStream = null; }
             if (window._scChartStreamTimer) { clearTimeout(window._scChartStreamTimer); window._scChartStreamTimer = null; }
-            // Désactivé 2026-10-06 (mesure d'urgence) : le graphique
-            // (bougies/niveaux/confluence) ne se connecte plus par défaut —
-            // seul le bandeau reste vivant. Retirer cette ligne pour
-            // réactiver.
-            return window.dash_clientside.no_update;
+            // Réactivé 2026-10-08 : la mesure d'urgence du 06 coupait ce flux
+            // parce que chaque connexion recalculait le graphique ; il passe
+            // désormais par un canal partagé (un calcul par symbole/tf, cf.
+            // gex/broadcast.py). Il ne se connecte que si le graphique est
+            // VISIBLE (case « Masquer graphique prix » décochée, masqué par
+            // défaut) : rien n'est calculé pour un graphique caché.
+            ergo = ergo || [];
+            if (ergo.includes('hide_price_chart') || ergo.includes('keywords_only')) {
+                window._scChartStreamToken = null;
+                return window.dash_clientside.no_update;
+            }
             if ((path || '/') !== '/scalp' || !['NQ', 'ES'].includes(symbol)) {
                 return window.dash_clientside.no_update;
             }
@@ -4202,6 +4302,7 @@ def create_app() -> Dash:
         Input("symbol", "value"),
         Input("url", "pathname"),
         Input("scalp-chart-tf", "value"),
+        Input("sc-ergo-options", "value"),
         prevent_initial_call="initial_duplicate",
     )
 
@@ -4256,6 +4357,7 @@ def create_app() -> Dash:
         ("markers", "scalp-ind-markers-toggle"),
         ("orderflow_profile", "scalp-ind-ofprofile-toggle"),
         ("orderflow_untested", "scalp-ind-untested-toggle"),
+        ("absorptions", "scalp-ind-absorb-toggle"),
     ):
         app.clientside_callback(
             """
