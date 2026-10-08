@@ -40,9 +40,17 @@ STALE_AFTER_S = 5.0          # sans message depuis ce délai, le miroir se dit h
 MAX_MESSAGE = 2 ** 26        # l'instantané (prints + points live) dépasse le 1 Mo par défaut
 
 
+# Vrai dans le process capture/moteur lui-même : il DÉTIENT les collecteurs,
+# il ne doit jamais se prendre pour un client de sa propre liaison, même si
+# GEX_CAPTURE_URL est défini dans l'environnement système partagé.
+IS_CAPTURE_PROCESS = False
+
+
 def remote_url() -> str | None:
     """URL du process capture si le dashboard doit s'y brancher, sinon None
     (= mode autonome, collecteurs dans le même process)."""
+    if IS_CAPTURE_PROCESS:
+        return None
     return _env("GEX_CAPTURE_URL") or None
 
 

@@ -1577,6 +1577,8 @@ def scalp_confluence_zones(symbol: str) -> list[dict]:
     (seules familles pour lesquelles `cluster_levels` a un seuil défini).
     Ne garde que les zones d'au moins 2 niveaux : un niveau seul n'est pas
     une confluence, juste un niveau — cf. docstring de confluence.py."""
+    if INDICATORS_REMOTE:
+        return _remote_value(_CONFLUENCE_CACHE, symbol, [])
     if _confluence is None or not _confluence.supported(symbol):
         return []
     now = time.time()
@@ -1646,6 +1648,8 @@ def scalp_order_flow_zones(symbol: str, day_ticks: pd.DataFrame) -> list[dict]:
     vectorisé reste un travail non négligeable sur une séance pleine (des
     centaines de milliers de ticks, potentiellement des milliers de paliers
     de prix) — inutile de le refaire à chaque cycle de 1s."""
+    if INDICATORS_REMOTE:
+        return _remote_value(_ORDER_FLOW_CACHE, symbol, [])
     if day_ticks.empty:
         return []
     now = time.time()
@@ -1698,6 +1702,8 @@ def scalp_gex_profile(symbol: str, spot: float, window: float = 0.04) -> list[di
     confluence/order-flow) : lit la chaîne enrichie complète à chaque appel,
     pas gratuit à chaque cycle de 1s."""
     now = time.time()
+    if INDICATORS_REMOTE:
+        return _remote_value(_GEX_PROFILE_CACHE, symbol, [])
     hit = _GEX_PROFILE_CACHE.get(symbol)
     if hit and now - hit[0] < SCALP_HEAVY_CACHE_S:
         return hit[1]
@@ -1831,6 +1837,8 @@ def scalp_orderflow_profile(symbol: str, day_ticks: pd.DataFrame) -> dict:
 
     Mis en cache 10s (cf. _ORDERFLOW_PROFILE_CACHE)."""
     empty = {"legs": [], "untested": []}
+    if INDICATORS_REMOTE:
+        return _remote_value(_ORDERFLOW_PROFILE_CACHE, symbol, {"legs": [], "untested": []})
     if day_ticks.empty:
         return empty
     now = time.time()
@@ -1884,6 +1892,8 @@ def scalp_orderflow_untested(symbol: str, day_ticks: pd.DataFrame) -> list[dict]
     pour de vrai qu'une fois sur ~7-8 cycles — le reste du temps, simple
     lecture de cache, exactement comme les autres indicateurs. Un TTL plus
     large qu'un calcul plus lent, pas une exception à la règle."""
+    if INDICATORS_REMOTE:
+        return _remote_value(_ORDERFLOW_UNTESTED_CACHE, symbol, [])
     if day_ticks.empty:
         return []
     now = time.time()
@@ -1965,6 +1975,51 @@ def scalp_orderflow_untested(symbol: str, day_ticks: pd.DataFrame) -> list[dict]
     return out
 
 
+# Processus web en mode MOTEUR séparé (cf. gex/livestate.py) : les indicateurs
+# /scalp sont calculés par le moteur et publiés ; ici on ne fait que les lire,
+# sans jamais les recalculer, quel que soit leur âge.
+INDICATORS_REMOTE = False
+_INDICATOR_CACHES = {
+    "confluence": "_CONFLUENCE_CACHE", "order_flow": "_ORDER_FLOW_CACHE",
+    "gex_profile": "_GEX_PROFILE_CACHE", "orderflow_profile": "_ORDERFLOW_PROFILE_CACHE",
+    "untested": "_ORDERFLOW_UNTESTED_CACHE",
+}
+
+
+def _remote_value(cache: dict, symbol: str, default):
+    hit = cache.get(symbol)
+    return hit[1] if hit else default
+
+
+def export_scalp_indicators(symbol: str) -> dict:
+    """Caches d'indicateurs déjà calculés pour `symbol`, à publier."""
+    out = {}
+    for name, var in _INDICATOR_CACHES.items():
+        hit = globals()[var].get(symbol)
+        if hit:
+            out[name] = hit[1]
+    return out
+
+
+def import_scalp_indicators(name: str, payload: dict) -> None:
+    """Gestionnaire du miroir : `scalp-<SYM>.json` -> caches locaux."""
+    symbol = name.split("-", 1)[1]
+    now = time.time()
+    for key, value in (payload.get("data") or {}).items():
+        var = _INDICATOR_CACHES.get(key)
+        if var:
+            globals()[var][symbol] = (now, value)
+
+
+def publish_scalp_indicators() -> None:
+    from . import livestate
+    for symbol in SCALP_SCHED_SYMBOLS:
+        try:
+            livestate.publish_json(f"scalp-{symbol}", export_scalp_indicators(symbol))
+        except Exception:  # noqa: BLE001
+            log.exception("Publication des indicateurs /scalp échouée (%s)", symbol)
+
+
 # Moteur planifié des indicateurs /scalp (2026-10-04) — demande explicite de
 # l'utilisateur : "plutôt que les recalculer par graphique, un moteur qui les
 # calcule et remplit un fichier de données qui est ensuite envoyé à tous les
@@ -1976,6 +2031,9 @@ def scalp_orderflow_untested(symbol: str, day_ticks: pd.DataFrame) -> list[dict]
 # soit ouvert ou non : les requêtes ne font plus jamais que LIRE un cache
 # déjà chaud.
 SCALP_SCHED_SYMBOLS = ("NQ", "ES")  # les deux seuls symboles de /scalp
+
+
+PUBLISH_INDICATORS = False
 
 
 def _refresh_scalp_indicators() -> None:
@@ -2011,6 +2069,8 @@ def _refresh_scalp_indicators() -> None:
                 scalp_gex_profile(symbol, spot)
             except Exception:  # noqa: BLE001
                 log.exception("Rafraîchissement planifié profil gamma échoué (%s)", symbol)
+    if PUBLISH_INDICATORS:
+        publish_scalp_indicators()
 
 
 _SCALP_INDICATOR_SCHED = None

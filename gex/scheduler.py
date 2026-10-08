@@ -56,6 +56,28 @@ class GlobalState:
 
 STATE = GlobalState()
 
+# Processus MOTEUR (cf. gex/livestate.py) : chaque mise à jour de STATE est
+# aussi publiée pour le(s) processus web. Activé par gex.capture en mode moteur.
+PUBLISH_STATE = False
+
+
+def set_state(key: str, snap: ChainSnapshot, enriched: pd.DataFrame,
+              summary: SummaryMetrics) -> None:
+    """Seul point d'écriture d'une chaîne dans STATE (et de sa publication)."""
+    st = STATE.get(key)
+    with STATE.lock:
+        st.snapshot = snap
+        st.enriched = enriched
+        st.summary = summary
+        st.last_feed_ts = snap.feed_timestamp
+        STATE.last_error = None
+    if PUBLISH_STATE:
+        from . import livestate
+        try:
+            livestate.publish_state(key, snap, enriched, summary)
+        except Exception:  # noqa: BLE001 — la publication ne doit pas casser l'ingestion
+            log.exception("Publication de l'état %s échouée", key)
+
 
 def pull_symbol(symbol: str, persist_snapshot: bool) -> None:
     u = UNDERLYINGS[symbol]
@@ -82,12 +104,7 @@ def pull_symbol(symbol: str, persist_snapshot: bool) -> None:
         store.save_snapshot(symbol, enriched, now)
         store.append_history(summary.as_row())
 
-    with STATE.lock:
-        st.snapshot = snap
-        st.enriched = enriched
-        st.summary = summary
-        st.last_feed_ts = snap.feed_timestamp
-        STATE.last_error = None
+    set_state(symbol, snap, enriched, summary)
     log.info(
         "%s pull ok — spot=%.2f netGEX=%.2f Bn zeroG=%s basis=%s",
         symbol, snap.spot, summary.net_gex / 1e9,
@@ -245,12 +262,7 @@ def _seed_native_state(code: str, df: pd.DataFrame, ts: datetime) -> SummaryMetr
     """Construit (ChainSnapshot, SummaryMetrics) depuis `df`/`ts` et peuple
     STATE — factorisé entre le chemin cache et le chemin collecte live."""
     snap, summary = build_native_summary(code, df, ts)
-    st = STATE.get(code)
-    with STATE.lock:
-        st.snapshot = snap
-        st.enriched = df
-        st.summary = summary
-        st.last_feed_ts = snap.feed_timestamp
+    set_state(code, snap, df, summary)
     return summary
 
 
@@ -583,10 +595,32 @@ def resolve_scalp_signals(now: datetime | None = None) -> None:
         log.exception("Résolution des signaux /scalp échouée")
 
 
-def start_scheduler(embedded_capture: bool = True) -> BackgroundScheduler:
+def start_scheduler(embedded_capture: bool = True, ingest: bool = True) -> BackgroundScheduler:
     """`embedded_capture=False` : la capture (ticks, tape, bougies) vit dans un
-    autre process, le dashboard n'écrit donc AUCUN de ces flux."""
+    autre process, le dashboard n'écrit donc AUCUN de ces flux.
+    `ingest=False` : un processus MOTEUR séparé récupère et calcule les
+    chaînes (cf. gex/livestate.py) ; ce processus web ne garde que le taux du
+    jour (recalculs de greeks) et la vidange du tampon de bougies."""
     sched = BackgroundScheduler(timezone="America/New_York")
+    if embedded_capture:
+        add_flush_jobs(sched)
+    else:
+        sched.add_job(discard_bars, "interval", seconds=30, max_instances=1,
+                      coalesce=True)
+    if not ingest:
+        sched.add_job(rates.refresh, "cron", day_of_week="mon-fri", hour=8, minute=15)
+        sched.start()
+        threading.Thread(target=rates.refresh, daemon=True).start()
+        return sched
+    add_ingest_jobs(sched)
+    sched.start()
+    start_initial_pulls()
+    return sched
+
+
+def add_ingest_jobs(sched: BackgroundScheduler) -> None:
+    """Récupération des chaînes et tâches qui en dépendent : portées par le
+    dashboard en mode autonome, par le processus moteur sinon."""
     sched.add_job(
         pull_all,
         "interval",
@@ -594,11 +628,6 @@ def start_scheduler(embedded_capture: bool = True) -> BackgroundScheduler:
         max_instances=1,
         coalesce=True,
     )
-    if embedded_capture:
-        add_flush_jobs(sched)
-    else:
-        sched.add_job(discard_bars, "interval", seconds=30, max_instances=1,
-                      coalesce=True)
     # Options natives NQ/ES — fenêtre LARGE (14 j) : 2 fois/jour seulement
     # depuis le 2026-09-23 (cf. pull_native_options), la fraîcheur intraday
     # étant désormais du ressort de pull_native_options_fast ci-dessous.
@@ -646,7 +675,9 @@ def start_scheduler(embedded_capture: bool = True) -> BackgroundScheduler:
     # calibration a posteriori, pas une donnée de marché — 2 min suffit large.
     sched.add_job(resolve_scalp_signals, "interval", minutes=2, max_instances=1,
                   coalesce=True)
-    sched.start()
+
+
+def start_initial_pulls() -> None:
     # Premier chargement du taux au démarrage (dans un thread : ne pas bloquer
     # le lancement sur un appel réseau ; repli sur la constante si indisponible).
     threading.Thread(target=rates.refresh, daemon=True).start()
@@ -659,4 +690,3 @@ def start_scheduler(embedded_capture: bool = True) -> BackgroundScheduler:
     threading.Thread(target=pull_native_options_fast, daemon=True).start()
     threading.Thread(target=pull_native_options, daemon=True).start()
     threading.Thread(target=pull_native_index, daemon=True).start()
-    return sched

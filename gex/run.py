@@ -9,7 +9,10 @@ http://127.0.0.1:8050. Utilisable de trois façons équivalentes :
 """
 from __future__ import annotations
 
-from gex import flowtape
+import logging
+
+from gex import app as app_mod
+from gex import flowtape, livestate
 from gex.app import create_app, start_scalp_indicator_scheduler
 from gex.capturebus import RemoteTape, remote_url
 from gex.flowtape import TAPE
@@ -19,6 +22,9 @@ from gex.scheduler import start_scheduler
 from gex.tickcapture import CAPTURE
 
 
+log = logging.getLogger(__name__)
+
+
 def main(host: str = "127.0.0.1", port: int = 8050) -> None:
     # console + logs/gex.log (rotatif) : la trace survit à la fermeture du terminal
     setup_logging()
@@ -26,7 +32,14 @@ def main(host: str = "127.0.0.1", port: int = 8050) -> None:
     # Mode SÉPARÉ (GEX_CAPTURE_URL défini) : ticks, order flow et bougies vivent
     # dans le process `gex.capture`, que redémarrer le dashboard ne coupe plus.
     # Le dashboard s'y abonne et lit un miroir (RemoteTape, même interface).
-    start_scheduler(embedded_capture=url is None)
+    # Mode MOTEUR (GEX_ENGINE=1 en plus) : ce même process récupère et calcule
+    # aussi les chaînes et les indicateurs ; le dashboard ne fait que lire
+    # l'état publié (gex/livestate.py) et servir les pages.
+    engine = livestate.enabled() and url is not None
+    if livestate.enabled() and url is None:
+        log.warning("GEX_ENGINE=1 sans GEX_CAPTURE_URL : mode moteur ignoré, "
+                    "le dashboard calcule lui-même")
+    start_scheduler(embedded_capture=url is None, ingest=not engine)
     # spot temps réel pour l'AFFICHAGE : sans identifiants courtier, sans effet
     QUOTES.start()
     # repli gratuit NQ/ES délayé : ne démarre que si QUOTES ne tourne pas
@@ -45,7 +58,12 @@ def main(host: str = "127.0.0.1", port: int = 8050) -> None:
     # séparé de start_scheduler() ci-dessus à dessein, PAS appelé depuis
     # create_app() : les tests construisent l'app en boucle sans jamais
     # vouloir de vrai travail de fond planifié.
-    start_scalp_indicator_scheduler()
+    if engine:
+        app_mod.INDICATORS_REMOTE = True
+        livestate.MIRROR.on_json("scalp-", app_mod.import_scalp_indicators)
+        livestate.MIRROR.start()
+    else:
+        start_scalp_indicator_scheduler()
     # `threaded=True` sur le serveur de dev Werkzeug a été essayé le
     # 2026-10-03 et retiré dans la minute (observé pire en direct). Diagnostic
     # confirmé le 2026-10-04 par un test isolé (app Flask jouet, hors
