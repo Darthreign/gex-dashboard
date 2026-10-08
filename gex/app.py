@@ -2428,6 +2428,14 @@ def profile_fig(df: pd.DataFrame, spot: float, zg: float | None, lang: str,
                       annotation_font=dict(color=C["zg"], size=10),
                       annotation_position="top right", annotation_textangle=-90,
                       annotation_xshift=2)
+        # fourchette du flip si le smile suit le spot (sticky moneyness)
+        zg_m = metrics.zero_gamma_info(df, spot, sticky="moneyness")["level"]
+        if zg_m is not None and abs(zg_m - zg) > 1e-9:
+            lo, hi = sorted((xf(zg), xf(zg_m)))
+            fig.add_vrect(x0=lo, x1=hi, fillcolor=C["zg"], opacity=0.12, line_width=0,
+                          annotation_text=t(lang, "zg_band", v=f"{xf(zg_m):.0f}"),
+                          annotation_font=dict(color=C["zg"], size=9),
+                          annotation_position="bottom left")
     return fig
 
 

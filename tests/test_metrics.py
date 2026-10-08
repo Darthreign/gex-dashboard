@@ -622,3 +622,22 @@ def test_bucket_pondere_decroit_avec_l_echeance():
     assert w["gex"].to_numpy() == pytest.approx(df["gex"].to_numpy() * ratio)
     res = metrics.compute_levels(df, 100.0, 100.0, bucket="Pondéré", today=now.date())
     assert not res["levels"].empty
+
+
+def test_sticky_moneyness_deplace_le_flip_avec_un_skew():
+    """Smile plat : les deux hypothèses donnent le même flip. Avec un skew,
+    le flip sticky moneyness s'écarte."""
+    exp = far_expiry()
+    plat = [{"expiry": exp, "type": "C", "strike": 93.0, "iv": 0.2},
+            {"expiry": exp, "type": "P", "strike": 107.0, "iv": 0.2},
+            {"expiry": exp, "type": "C", "strike": 100.0, "iv": 0.2, "open_interest": 0.0}]
+    df = metrics.enrich(make_chain(100.0, plat))
+    a, b = metrics.zero_gamma_band(df, 100.0)
+    assert a == pytest.approx(b, abs=0.05)
+
+    skew = [{"expiry": exp, "type": "C", "strike": 93.0, "iv": 0.30},
+            {"expiry": exp, "type": "P", "strike": 107.0, "iv": 0.12},
+            {"expiry": exp, "type": "C", "strike": 100.0, "iv": 0.20, "open_interest": 0.0}]
+    df = metrics.enrich(make_chain(100.0, skew))
+    a, b = metrics.zero_gamma_band(df, 100.0)
+    assert a is not None and b is not None and abs(a - b) > 0.1

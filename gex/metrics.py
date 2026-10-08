@@ -420,15 +420,36 @@ def exposure_by_strike(df: pd.DataFrame, col: str) -> pd.DataFrame:
     return pivot.reset_index()
 
 
+def _sticky_moneyness_iv(d: pd.DataFrame, spot: float, grid: np.ndarray) -> np.ndarray:
+    """IV (contrats × grille) si le smile suit le spot : au spot S', le strike K
+    prend l'IV que le smile actuel donne à K·S/S' (même moneyness). Une
+    interpolation par échéance ; extrapolation plate aux bords."""
+    k = d["strike"].to_numpy(dtype=float)
+    out = np.empty((len(d), len(grid)))
+    pos = np.arange(len(d))
+    for _, idx in d.groupby("t_years").indices.items():
+        e = d.iloc[idx]
+        smile = e.groupby("strike")["iv"].mean()
+        ks, ivs = smile.index.to_numpy(dtype=float), smile.to_numpy(dtype=float)
+        rows = pos[idx]
+        out[rows] = np.interp(k[rows, None] * spot / grid[None, :], ks, ivs)
+    return out
+
+
 def gamma_profile(df: pd.DataFrame, spot: float, weight_col: str = "open_interest",
-                  range_pct: float | None = None, steps: int | None = None
-                  ) -> tuple[np.ndarray, np.ndarray] | None:
+                  range_pct: float | None = None, steps: int | None = None,
+                  sticky: str = "strike") -> tuple[np.ndarray, np.ndarray] | None:
     """Profil de GEX net recalculé sur une grille de spots hypothétiques.
 
-    IV et maturités sont figées : on ne simule que le déplacement du spot, ce
-    qui isole l'effet de position. La pente au niveau du spot dit à quelle
-    vitesse le régime se dégrade ; les creux signalent les zones
-    d'accélération.
+    `sticky="strike"` (défaut) : IV et maturités figées, on ne simule que le
+    déplacement du spot, ce qui isole l'effet de position. La pente au niveau
+    du spot dit à quelle vitesse le régime se dégrade ; les creux signalent
+    les zones d'accélération.
+
+    `sticky="moneyness"` : le smile se déplace avec le spot (cf.
+    `_sticky_moneyness_iv`) — plus réaliste en marché baissier, où le skew
+    suit le prix. L'écart entre les deux flips borne l'incertitude due à la
+    dynamique de vol.
 
     Retourne (grille de spots, GEX net en $ par 1 %), ou None si rien d'exploitable.
     """
@@ -440,7 +461,8 @@ def gamma_profile(df: pd.DataFrame, spot: float, weight_col: str = "open_interes
     grid = np.linspace(spot * (1 - rng), spot * (1 + rng), n)
     k = d["strike"].to_numpy()[:, None]
     t = d["t_years"].to_numpy()[:, None]
-    iv = d["iv"].to_numpy()[:, None]
+    iv = (_sticky_moneyness_iv(d, spot, grid) if sticky == "moneyness"
+          else d["iv"].to_numpy()[:, None])
     oi = d[weight_col].to_numpy()[:, None]
     sign = np.where((d["type"] == "C").to_numpy()[:, None], 1.0, -1.0)
     q = np.asarray(carry(d))
@@ -530,6 +552,13 @@ def zero_gamma(df: pd.DataFrame, spot: float, weight_col: str = "open_interest")
     return zero_gamma_info(df, spot, weight_col)["level"]
 
 
+def zero_gamma_band(df: pd.DataFrame, spot: float) -> tuple[float | None, float | None]:
+    """(flip sticky strike, flip sticky moneyness) : la fourchette du Gamma
+    Flip selon que le smile reste accroché aux strikes ou suit le spot."""
+    return (zero_gamma_info(df, spot)["level"],
+            zero_gamma_info(df, spot, sticky="moneyness")["level"])
+
+
 # Fenêtres successives de recherche du flip : la première est celle du
 # réglage (±8 % par défaut) ; un marché qui a dérivé loin de son flip le
 # retrouve dans les suivantes au lieu de renvoyer « rien » sans explication.
@@ -549,7 +578,7 @@ def _nearest_crossing(grid: np.ndarray, profile: np.ndarray,
 
 
 def zero_gamma_info(df: pd.DataFrame, spot: float,
-                    weight_col: str = "open_interest") -> dict:
+                    weight_col: str = "open_interest", sticky: str = "strike") -> dict:
     """Zero gamma avec son contexte :
 
     - `status` : "ok", "no_flip" (profil d'un seul signe jusqu'à ±25 % — le
@@ -564,7 +593,7 @@ def zero_gamma_info(df: pd.DataFrame, spot: float,
     for rng in (base, *[r for r in ZG_FALLBACK_RANGES if r > base]):
         # pas de grille constant quelle que soit la fenêtre
         steps = max(SETTINGS.zg_steps, int(round(SETTINGS.zg_steps * rng / base)))
-        res = gamma_profile(df, spot, weight_col, range_pct=rng, steps=steps)
+        res = gamma_profile(df, spot, weight_col, range_pct=rng, steps=steps, sticky=sticky)
         if res is None:
             return out
         out["status"], out["range"] = "no_flip", rng

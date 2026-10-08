@@ -316,6 +316,10 @@ def register_api(app) -> None:
             "zero_gamma_status": zg_info["status"],
             # $ de GEX net par point d'indice au flip (non transposé)
             "zero_gamma_slope": zg_info["slope"],
+            # même flip si le smile suit le spot (sticky moneyness) : l'écart
+            # avec zero_gamma borne l'incertitude due à la dynamique de vol
+            "zero_gamma_moneyness": _t(metrics.zero_gamma_info(
+                df, s.spot, sticky="moneyness")["level"]),
             "hvl": _t(hvl),
             "key_levels": {k: _t(v) for k, v in keys.items()},
             "gex_walls": [
