@@ -774,13 +774,18 @@ async def niveaux(ctx: commands.Context, symbole: str | None = None,
     if sc and sc != sym:
         titre += f" (échelle {sc})"
     titre += f" · spot {_fmt(d.get('spot'))}"
+    flip = _fmt(d.get("zero_gamma"))
+    if d.get("zero_gamma") is None and d.get("zero_gamma_status") == "no_flip":
+        flip = "aucun à ±25 % (régime franc)"
     lignes = [
         titre,
-        f"Gamma Flip {_fmt(d.get('zero_gamma'))} · HVL {_fmt(d.get('hvl'))}",
+        f"Gamma Flip {flip} · HVL {_fmt(d.get('hvl'))}",
         f"Call Wall {_fmt(k.get('call_wall'))} · Put Support {_fmt(k.get('put_support'))}",
         f"1D min/max : {_fmt(k.get('d1_min'))} – {_fmt(k.get('d1_max'))}",
         f"Murs GEX : {murs}",
     ]
+    if d.get("scale_warning"):
+        lignes.append(f"⚠ {d['scale_warning']}")
     await ctx.send("\n".join(lignes))
 
 

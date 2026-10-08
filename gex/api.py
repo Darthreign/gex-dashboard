@@ -300,9 +300,18 @@ def register_api(app) -> None:
         # quand on trade le future mais que les niveaux viennent de l'indice.
         scale = request.args.get("scale")
         xf = (lambda v: v)
+        scale_warning = None
         if scale and scale.upper() != symbol:
+            from . import scales
             from .app import _transform_for
-            xf, _, _ = _transform_for(symbol, scale.upper())
+            xf, ratio, mode = _transform_for(symbol, scale.upper())
+            target = scales.scale_by_key(scale.upper())
+            # même mise en garde que le dashboard (app._scale_note) : un
+            # ratio SP <-> ND dérive, ces niveaux ne sont qu'un repère instantané
+            if mode == "ratio" and target is not None and target.cross_family(symbol):
+                scale_warning = (f"transposition croisée {symbol} -> {target.label} "
+                                 f"(ratio ×{ratio:.4f}) : repère instantané, "
+                                 "le ratio dérive dans le temps")
 
         def _t(v):
             return float(xf(v)) if isinstance(v, (int, float)) else v
@@ -310,6 +319,7 @@ def register_api(app) -> None:
         return jsonify({
             "symbol": symbol,
             "scale": (scale.upper() if scale else symbol),
+            "scale_warning": scale_warning,
             "spot": _t(s.spot),
             "zero_gamma": _t(s.zero_gamma),
             # "ok" | "no_flip" (régime franc jusqu'à ±25 %) | "no_data"

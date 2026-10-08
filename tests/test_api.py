@@ -301,3 +301,21 @@ def test_stream_route_emet_un_evenement_sse_par_changement(monkeypatch):
     first = next(gen)
     second = next(gen)
     assert first == b"data: 30500.0\n\n" and second == b"data: 30500.25\n\n"
+
+
+def test_levels_expose_statut_du_flip_et_book():
+    _seed("TST9")
+    c = _client()
+    body = c.get("/api/v1/TST9/levels").get_json()
+    assert body["zero_gamma_status"] in ("ok", "no_flip", "no_data")
+    assert "zero_gamma_moneyness" in body and body["scale_warning"] is None
+    book = c.get("/api/v1/TST9/book").get_json()
+    assert book["net_gex_book"] == pytest.approx(book["net_gex_naive"])  # aucun print
+
+
+def test_levels_transposition_croisee_signalee(monkeypatch):
+    from gex import app as app_mod
+    _seed("SPX")
+    monkeypatch.setattr(app_mod, "_transform_for", lambda s, k: ((lambda v: v * 3.6), 3.6, "ratio"))
+    body = _client().get("/api/v1/SPX/levels?scale=NDX").get_json()
+    assert body["scale_warning"] and "dérive" in body["scale_warning"]
