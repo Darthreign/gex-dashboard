@@ -328,6 +328,22 @@ def register_api(app) -> None:
             ],
         })
 
+    @server.route("/api/v1/<symbol>/book")
+    def _book(symbol):
+        """GEX/DEX sur book dealer estimé (OI + flux signé du jour, cf.
+        gex/positioning.py), à côté des valeurs naïves, avec la lecture de
+        régime correspondante : une seule hypothèse pour GEX et DEX."""
+        from . import positioning
+        symbol = symbol.upper()
+        s, df = _current_summary(symbol)
+        if s is None or df is None:
+            return jsonify({"error": "indisponible (pas encore de premier pull)"}), 404
+        flow = positioning.daily_taker_flow(symbol, datetime.now(ET).date())
+        b = positioning.book_summary(df, flow, s.spot)
+        r = metrics.regime_read(b["net_gex_book"], b["net_dex_book"])
+        return jsonify({"symbol": symbol, "spot": s.spot, **b,
+                        "regime_book": {k: r[k] for k in ("gex_frein", "dex_sign", "severity")}})
+
     @server.route("/api/v1/<symbol>/regime")
     def _regime(symbol):
         symbol = symbol.upper()

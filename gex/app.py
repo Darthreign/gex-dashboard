@@ -2715,6 +2715,22 @@ def chain_state(symbol: str):
     return STATE.get(symbol)
 
 
+def _book_card(symbol: str, df, spot: float, lang: str) -> list:
+    """Tuile du GEX sur book estimé (OI + flux signé du jour, cf. positioning),
+    seulement quand des prints existent pour ce sous-jacent."""
+    if df is None or df.empty:
+        return []
+    from . import positioning
+    flow = positioning.daily_taker_flow(symbol, datetime.now(ET).date())
+    if flow.empty:
+        return []
+    b = positioning.book_summary(df, flow, spot)
+    v = b["net_gex_book"]
+    return [card(t(lang, "card_gex_book"), f"{v / 1e9:+.1f} $Bn",
+                 t(lang, "card_gex_book_sub", cov=f"{b['flow_coverage']:.0%}"),
+                 accent=C["pos"] if v >= 0 else C["neg"])]
+
+
 def build_cards(symbol: str, lang: str, xf=None, scale: str | None = None) -> list:
     st = chain_state(symbol)
     with STATE.lock:
@@ -2777,6 +2793,7 @@ def build_cards(symbol: str, lang: str, xf=None, scale: str | None = None) -> li
              t(lang, "dex_long") if s.net_dex >= 0 else t(lang, "dex_short"),
              accent=C["pos"] if s.net_dex >= 0 else C["neg"]),
         card(t(lang, "card_zero_gamma"), zg_txt, zg_sub, accent=C["zg"]),
+        *_book_card(symbol, df, s.spot, lang),
         card(t(lang, "card_gex_0dte"), f"{s.net_gex_0dte / 1e9:+.1f} $Bn"),
         card(t(lang, "card_pc_oi"), f"{s.pc_oi:.2f}"),
         card(t(lang, "card_pc_vol"), f"{s.pc_volume:.2f}"),

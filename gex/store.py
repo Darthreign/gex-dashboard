@@ -305,14 +305,16 @@ def append_optprints(symbol: str, rows: list[dict], ts: datetime) -> Path | None
     return path
 
 
-def load_optprints(symbol: str, day: str) -> pd.DataFrame:
+def load_optprints(symbol: str, day: str, columns: list[str] | None = None) -> pd.DataFrame:
     """Tous les prints bruts d'options d'un sous-jacent pour un jour (ET), triés
-    par heure d'échange (tri STABLE : plusieurs prints partagent la même ms)."""
+    par heure d'échange (tri STABLE : plusieurs prints partagent la même ms).
+    `columns` restreint la lecture (un jour de SPX pèse ~1 M de lignes)."""
     root = SETTINGS.data_dir / "optprints" / symbol / day
     files = sorted(root.glob("*.parquet")) if root.exists() else []
     if not files:
         return pd.DataFrame()
-    df = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
+    cols = None if columns is None else sorted(set(columns) | {"ts"})
+    df = pd.concat([pd.read_parquet(f, columns=cols) for f in files], ignore_index=True)
     return df.sort_values("ts", kind="stable").reset_index(drop=True)
 
 
