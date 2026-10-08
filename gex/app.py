@@ -3083,6 +3083,17 @@ def _scale_note(lang: str, symbol: str, scale_key: str | None,
     return t(lang, key, scale=target.label, ratio=f"{ratio:.4f}")
 
 
+def callbacks_fingerprint(app) -> str:
+    """Empreinte des signatures de callbacks (sorties, entrées, états) :
+    change dès qu'un callback est ajouté, retiré ou change d'entrées."""
+    import hashlib
+    sig = sorted(
+        (out, [(i["id"], i["property"]) for i in cb.get("inputs", [])],
+         [(i["id"], i["property"]) for i in cb.get("state", [])])
+        for out, cb in app.callback_map.items())
+    return hashlib.sha1(json.dumps(sig, default=str).encode()).hexdigest()[:12]
+
+
 def card(label: str, value: str, sub: str = "", accent: str | None = None) -> html.Div:
     """Tuile d'indicateur : liseré coloré à gauche quand la valeur porte un signe."""
     return html.Div(
@@ -3957,6 +3968,8 @@ def create_app() -> Dash:
             # au chargement malgré prevent_initial_call). Passé ces 5 s, tout
             # redevient réactif normalement pour une vraie interaction.
             dcc.Store(id="emergency-ready", data=False),
+            # cible inerte du contrôle de version (cf. callback « build »)
+            html.Div(id="build-sink", style={"display": "none"}),
             dcc.Store(id="lang-boot", data=0),
             dcc.Store(id="sc-layout-boot", data=0),
             dcc.Store(id="sc-ergo-boot", data=0),
@@ -5716,6 +5729,32 @@ def create_app() -> Dash:
         return today if today in days else (days[-1] if days else None)
 
     register_api(app)
+
+    # Version des callbacks : un onglet resté ouvert pendant une mise à jour
+    # envoie l'ANCIENNE liste d'entrées de callbacks, que le serveur ne sait
+    # plus lire (IndexError dans Dash, blocs figés). La page compare chaque
+    # minute cette empreinte à celle de son chargement et se recharge seule si
+    # elle a changé. Un simple redémarrage sans changement de code ne
+    # recharge rien (même empreinte).
+    @app.server.route("/api/v1/build")
+    def _build_id():
+        from flask import jsonify
+        return jsonify({"build": callbacks_fingerprint(app)})
+
+    app.clientside_callback(
+        """
+        function(n) {
+            if (!n || n % 12 !== 1) { return window.dash_clientside.no_update; }
+            fetch('/api/v1/build', {cache: 'no-store'}).then(r => r.json()).then(d => {
+                if (!window._gexBuild) { window._gexBuild = d.build; return; }
+                if (d.build && d.build !== window._gexBuild) { window.location.reload(); }
+            }).catch(() => {});
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("build-sink", "title"),
+        Input("rt-tick", "n_intervals"),
+    )
     register_oauth(app)
 
     @app.server.route("/api/v1/<symbol>/chart/<name>.png")

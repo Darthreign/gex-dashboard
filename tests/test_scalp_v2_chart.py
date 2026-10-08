@@ -51,6 +51,27 @@ def _only_today(bars: pd.DataFrame):
     return lambda symbol, day: bars if day == today_cal else pd.DataFrame()
 
 
+_VRAIE_DATETIME = datetime
+
+
+class _Avant18h(datetime):
+    """Horloge figée à 14h00 ET le jour même : la séance CME bascule à 18h ET
+    (bougies d'avant 18h retirées du graphique ensuite), ces tests de
+    construction de bougies ne doivent pas dépendre de l'heure où ils
+    tournent (ils échouaient chaque soir après 18h ET)."""
+    @classmethod
+    def now(cls, tz=None):
+        d = _VRAIE_DATETIME.now(ET).replace(hour=14, minute=0, second=0, microsecond=0)
+        return d if tz else d.replace(tzinfo=None)
+
+
+@pytest.fixture()
+def avant_18h(monkeypatch):
+    import sys
+    monkeypatch.setattr(app, "datetime", _Avant18h)
+    monkeypatch.setattr(sys.modules[__name__], "datetime", _Avant18h)
+
+
 _CTX = {"zg": 29900.0, "hvl": 29950.0, "keys": {"call_wall": 30200.0}, "walls": []}
 
 
@@ -79,7 +100,7 @@ def test_defaut_temps_sans_bougies_renvoie_des_niveaux_sans_candles(monkeypatch)
     assert len(out["levels"]) == 3  # zg, hvl, call_wall
 
 
-def test_defaut_temps_construit_des_bougies_1min(monkeypatch):
+def test_defaut_temps_construit_des_bougies_1min(monkeypatch, avant_18h):
     # day_ticks non vide seulement pour satisfaire le repli éventuel —
     # le chemin "t" ne les utilise pas pour les candles, seulement pour
     # order_flow (vide ici, pas testé).
@@ -106,7 +127,7 @@ def test_defaut_temps_construit_des_bougies_1min(monkeypatch):
     assert out["levels"] and set(out["levels"][0]) == {"name", "price", "color"}
 
 
-def test_tf_temps_calcule_des_pivots_swing(monkeypatch):
+def test_tf_temps_calcule_des_pivots_swing(monkeypatch, avant_18h):
     """Demande explicite (2026-10-05) : les pivots swing (zigzag) ne sont
     plus réservés aux barres-volume — même moteur, mêmes seuils, appliqué
     aux bougies-temps aussi."""

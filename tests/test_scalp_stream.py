@@ -79,3 +79,14 @@ def test_routes_exist():
     assert any("scalp-stream" in str(r) for r in dash_app.server.url_map.iter_rules())
     # plus aucun sondage à la seconde sur les pages scalp
     assert "tape-tick" not in str(dash_app.layout)
+
+
+def test_build_fingerprint_stable_and_sensitive():
+    app1, app2 = A.create_app(), A.create_app()
+    f = A.callbacks_fingerprint(app1)
+    assert f == A.callbacks_fingerprint(app2)                  # même code, même empreinte
+    client = app1.server.test_client()
+    assert client.get("/api/v1/build").get_json()["build"] == f
+    from dash import Input, Output
+    app2.callback(Output("build-sink", "children"), Input("symbol", "value"))(lambda s: s)
+    assert A.callbacks_fingerprint(app2) != f                   # callback changé -> autre empreinte
