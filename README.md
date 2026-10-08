@@ -247,15 +247,34 @@ semaine (`--end` + `--daily-days 7`).
 
 ## Conventions de calcul
 
-- **GEX** ($ par 1 % de move) = γ × OI × 100 × spot² × 0,01 — calls positifs,
-  puts négatifs (convention « naive » SpotGamma : dealers longs calls, courts puts).
+- **GEX** ($ par 1 % de move) = γ × OI × multiplicateur × spot² × 0,01 —
+  multiplicateur 100 (indices, ETF) ou notionnel du future (20 NQ, 50 ES) ;
+  calls positifs, puts négatifs (convention « naive » SpotGamma : dealers longs
+  calls, courts puts). Formule unique : `greeks.gex_dollars`.
+- **Forward et IV** : forward de chaque échéance par parité call-put (il
+  contient dividendes et portage, donc Black-76 sur les options sur future),
+  IV inversée du milieu de fourchette de l'option hors de la monnaie et
+  appliquée au call comme au put. Repli sur l'IV du flux (`iv_feed`) sans
+  cotation exploitable.
+- **GEX sur book estimé** (tuile « flux signé », `/api/v1/<sym>/book`) :
+  inventaire de début de séance selon la convention ci-dessus, moins le flux
+  preneur du jour lu dans les prints ; GEX et DEX y partagent une seule
+  hypothèse.
 - **Zero Gamma** : recalcul du profil de GEX net sur une grille de spots ±8 %
-  (IV et maturités figées), interpolation du passage par zéro le plus proche du spot.
-- **Flux delta** (proxy) = Δvolume entre deux pulls × δ × 100 × spot. Le sens
-  taker n'est pas observable dans ce feed : pression delta-pondérée, pas un
-  vrai order-flow signé.
-- Échéances posées à 16:00 ET ; contrats expirés exclus ; 0DTE gardé en séance
-  avec plancher de 5 min sur t.
+  (élargie à ±15 % puis ±25 % si besoin ; IV et maturités figées),
+  interpolation du passage par zéro le plus proche du spot. Fourchette
+  affichée si le smile suit le spot (sticky moneyness).
+- **Flux delta** (proxy) = Δvolume entre deux pulls × δ × multiplicateur × spot.
+  Le sens taker n'est pas observable dans ce feed : pression delta-pondérée,
+  pas un vrai order-flow signé.
+- **Échéances** : règlement à 16:00 ET, ou à 9:30 ET pour les séries réglées
+  sur la cotation d'ouverture (SPX/NDX/RUT mensuels, trimestrielles CME) ;
+  contrats réglés exclus ; plancher de 5 min sur t.
+- **Charm** : par séance, sur une horloge de variance (séance en U, nuit et
+  week-end allégés).
+- **Buckets** : 0DTE = échéance la plus proche ; « Pondéré » garde toutes les
+  échéances avec un poids exp(−séances restantes / 5).
+- **Max pain** : affiché comme repère d'échéance, heuristique faible.
 
 ## Soutenir le projet
 
@@ -281,8 +300,6 @@ inchangés. Signaler un bug ou proposer une amélioration aide tout autant.
   chaîne.
 - Endpoint CBOE non contractuel : le format peut changer (l'ingestion est
   isolée pour pouvoir brancher une autre source, ex. Tradier).
-- **SPY et QQQ** : ces ETF versent un dividende, or le calcul suppose un
-  rendement nul (q = 0). L'approximation reste faible sur les échéances
-  courtes mais n'est pas nulle — les indices SPX et NDX, eux, n'ont pas ce
-  biais. Ils n'ont par ailleurs pas de future associé, donc le sélecteur
-  Indice/Futures y est inactif.
+- **SPY et QQQ** : leur dividende est pris en compte via le forward par
+  parité dès que la chaîne est cotée (sans cotation, repli sur q = 0). Ils
+  n'ont pas de future associé, donc le sélecteur Indice/Futures y est inactif.
