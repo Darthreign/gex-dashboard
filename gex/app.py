@@ -2244,6 +2244,7 @@ def publish_scalp_indicators() -> None:
 # soit ouvert ou non : les requêtes ne font plus jamais que LIRE un cache
 # déjà chaud.
 SCALP_SCHED_SYMBOLS = ("NQ", "ES")  # les deux seuls symboles de /scalp
+SCALP_INDICATORS_EVERY_S = 20         # cadence du moteur d'indicateurs /scalp
 
 
 PUBLISH_INDICATORS = False
@@ -2404,7 +2405,12 @@ def start_scalp_indicator_scheduler() -> None:
     # instant que flush_ticks/flush_optprints (aussi 60s, gex/scheduler.py)
     # et pull_all — repéré en direct le 2026-10-05, des pics de charge
     # ponctuels coïncidant avec plusieurs jobs 60s qui dérivent en phase.
-    sched.add_job(_refresh_scalp_indicators, "interval", seconds=60,
+    # Redescendu à 20 s le 2026-10-08 : le passage complet est désormais
+    # linéaire (volume_bars, zones non testées et absorptions vectorisés :
+    # 2,6 s à froid pour NQ + ES à 600 000 ticks chacun, mesuré le 2026-10-08,
+    # contre >20 s le 05) et tourne dans le processus moteur en mode GEX_ENGINE. max_instances/coalesce gardent la sécurité :
+    # un cycle trop long saute le suivant au lieu de s'empiler.
+    sched.add_job(_refresh_scalp_indicators, "interval", seconds=SCALP_INDICATORS_EVERY_S,
                  max_instances=1, coalesce=True,
                  next_run_time=datetime.now(ET) + timedelta(seconds=20))
     sched.start()
@@ -3497,12 +3503,12 @@ def create_app() -> Dash:
                         # cf. style.css ; persisté en localStorage (gex-scalp-ergo).
                         dcc.Checklist(
                             id="sc-ergo-options", className="sc-ergo-options",
-                            # Défaut 2026-10-06 (mesure d'urgence, "décoche tt par défaut
-                            # pour tt le monde") : tous les widgets masqués par défaut,
-                            # seul le bandeau reste visible tant que l'utilisateur ne les
-                            # réactive pas lui-même (préférence explicite, cf. clientside
-                            # callback ci-dessous, toujours respectée si déjà enregistrée).
-                            value=["hide_ladder", "hide_price_chart", "hide_hedge_chart", "hide_tape"],
+                            # Tout visible par défaut (2026-10-08) : la mesure
+                            # d'urgence du 06 masquait tout sauf le bandeau. Une
+                            # préférence enregistrée reste respectée, sauf si c'est
+                            # exactement ce défaut d'urgence (cf. callback de
+                            # restauration plus bas).
+                            value=[],
                             options=[
                                 {"label": "Masquer niveaux", "value": "hide_ladder"},
                                 {"label": "Masquer graphique prix", "value": "hide_price_chart"},
@@ -3837,10 +3843,17 @@ def create_app() -> Dash:
             # onglet ne pardonne pas l'écart. Ne pas redescendre sous 1000 ms
             # sans re-mesurer SOUS CHARGE DE MARCHÉ RÉELLE, pas un test solo
             # hors séance — la leçon de cette nuit ne s'est pas généralisée.
-            # Désactivé 2026-10-05 (même mesure d'urgence) : hedge/ladder/
-            # tape/price (refresh_scalp, refresh_tape) ne se recalculent
-            # plus en boucle — seul le bandeau (SSE) reste live.
+            # Désactivé en urgence le 2026-10-05, RÉACTIVÉ le 2026-10-08 : les
+            # callbacks qu'il cadence sont désormais partagés entre onglets
+            # (broadcast.shared, un calcul par seconde quel que soit le nombre
+            # d'onglets) et servis par le serveur ASGI. Il ne tourne que là où
+            # il sert — /scalp, /scalpv1 et l'onglet Tape (cf. callback
+            # `tape_tick_on`) — et refresh_scalp ne calcule pas les blocs
+            # masqués par l'utilisateur.
             dcc.Interval(id="tape-tick", interval=1000, disabled=True),
+            # Onglet Tape de la page principale : sa propre minuterie, pour que
+            # les pages scalp ne réveillent pas ses callbacks (et inversement).
+            dcc.Interval(id="tape-tab-tick", interval=1000, disabled=True),
             # Ticker de prix /scalp : vrai flux poussé (EventSource, cf.
             # clientside_callback plus bas), aucun sondage — donc pas de dcc.Interval
             # ici. Cible inerte requise par Dash pour un callback JS sans Output
@@ -3918,6 +3931,24 @@ def create_app() -> Dash:
 
     # Page /moc : ses propres callbacks (cf. gex/mocpage.py)
     mocpage.register(app)
+
+    # Minuteries à la seconde, seulement là où quelqu'un les lit : tape-tick
+    # sur les pages scalp, tape-tab-tick sur l'onglet Tape de la page
+    # principale (aucune requête par seconde depuis une page qui n'en a pas
+    # besoin).
+    app.clientside_callback(
+        """
+        function(path, tab) {
+            const p = path || '/';
+            const scalp = p === '/scalp' || p.startsWith('/scalp/')
+                || p === '/scalpv1' || p.startsWith('/scalpv1/');
+            const main = !scalp && !(p === '/moc' || p.startsWith('/moc/'));
+            return [!scalp, !(main && tab === 'tape')];
+        }
+        """,
+        [Output("tape-tick", "disabled"), Output("tape-tab-tick", "disabled")],
+        Input("url", "pathname"), Input("tab", "value"),
+    )
 
     # "emergency-ready" (mesure d'urgence 2026-10-06, cf. commentaire sur le
     # Store dans le layout) : bascule à True au premier tick de "rt-tick"
@@ -4734,18 +4765,28 @@ def create_app() -> Dash:
                 .catch(() => ({ email: null, prefs: {} }));
             const data = await window._gexPrefsReady;
             let saved = data.prefs['scalp-ergo'];
-            // Défaut 2026-10-06 (mesure d'urgence) : tt masqué sauf le bandeau,
-            // tant qu'aucune préférence n'a encore été enregistrée (serveur ou
-            // localStorage) — cf. valeur par défaut du Checklist côté Python.
-            const DEFAULT_ERGO = ["hide_ladder", "hide_price_chart", "hide_hedge_chart", "hide_tape"];
+            // Tout visible par défaut (2026-10-08). La mesure d'urgence du 06
+            // masquait tout sauf le bandeau, et ce défaut a été ENREGISTRÉ
+            // comme préférence de chaque visiteur (localStorage + serveur) :
+            // une préférence identique à ce masque d'urgence est donc remise
+            // à zéro une fois par navigateur (marqueur gex-scalp-ergo-v2) ;
+            // tout autre choix de l'utilisateur est respecté.
+            const EMERGENCY = ["hide_hedge_chart", "hide_ladder", "hide_price_chart", "hide_tape"];
             if (saved == null) {
                 try {
                     const raw = window.localStorage.getItem('gex-scalp-ergo');
-                    saved = raw == null ? DEFAULT_ERGO : JSON.parse(raw);
-                } catch (e) { saved = DEFAULT_ERGO; }
-            } else {
-                window.localStorage.setItem('gex-scalp-ergo', JSON.stringify(saved));
+                    saved = raw == null ? [] : JSON.parse(raw);
+                } catch (e) { saved = []; }
             }
+            let migrated = false;
+            try { migrated = window.localStorage.getItem('gex-scalp-ergo-v2') === '1'; } catch (e) {}
+            if (!migrated) {
+                const same = Array.isArray(saved) && saved.length === EMERGENCY.length
+                    && saved.slice().sort().every((v, i) => v === EMERGENCY[i]);
+                if (same) saved = [];
+                try { window.localStorage.setItem('gex-scalp-ergo-v2', '1'); } catch (e) {}
+            }
+            try { window.localStorage.setItem('gex-scalp-ergo', JSON.stringify(saved)); } catch (e) {}
             return saved;
         }
         """,
@@ -5435,7 +5476,7 @@ def create_app() -> Dash:
 
     @app.callback(
         Output("hedge-graph", "figure"),
-        [Input("tape-tick", "n_intervals"), Input("tab", "value"),
+        [Input("tape-tab-tick", "n_intervals"), Input("tab", "value"),
          Input("symbol", "value"), Input("hedge-window", "value"),
          Input("lang", "value")],
     )
@@ -5454,10 +5495,11 @@ def create_app() -> Dash:
          Input("symbol", "value"), Input("lang", "value"),
          Input("scalp-window", "value"), Input("scalp-min", "value"),
          Input("scalp-banner-version", "data")],
-        State("emergency-ready", "data"),
+        [State("emergency-ready", "data"), State("sc-ergo-options", "value")],
     )
     @broadcast.shared(ttl=1.0, skip=(0,))
-    def refresh_scalp(_, path, symbol, lang, window, min_size, banner_version, ready):
+    def refresh_scalp(_, path, symbol, lang, window, min_size, banner_version, ready,
+                      ergo=None):
         if not is_scalp_path(path) or symbol not in ("NQ", "ES"):
             raise PreventUpdate
         # Mesure d'urgence 2026-10-06 : au chargement de page (et pendant
@@ -5500,9 +5542,15 @@ def create_app() -> Dash:
         # d'affichage (scalp-hedge-card visible, scalp-lw-hedge-card masquée,
         # y compris sur /scalp v2 désormais).
         is_v2 = (path or "/") == "/scalp"
-        hedge = cached_hedge_fig(symbol, lang, int(window if window is not None else -1))
-        hedge.update_layout(height=300, uirevision=f"scalp-{symbol}-{window}")
-        prints = tape_table(symbol, lang, min_size=float(min_size or 0), include_combos=False)
+        # blocs masqués par l'utilisateur (Personnalisation) : rien à calculer
+        hidden = set(ergo or ())
+        if "hide_hedge_chart" in hidden:
+            hedge = no_update
+        else:
+            hedge = cached_hedge_fig(symbol, lang, int(window if window is not None else -1))
+            hedge.update_layout(height=300, uirevision=f"scalp-{symbol}-{window}")
+        prints = no_update if "hide_tape" in hidden else \
+            tape_table(symbol, lang, min_size=float(min_size or 0), include_combos=False)
         sctx = scalp_context(symbol)
         if sctx is None:
             wait = html.Div(t(lang, "waiting_native" if symbol in ("NQ", "ES")
@@ -5510,7 +5558,7 @@ def create_app() -> Dash:
             price = no_update if is_v2 else empty_fig(t(lang, "sc_waiting_levels"), symbol)
             return wait, wait, wait, hedge, prints, price
         spot = _scalp_live_spot(symbol, sctx)
-        if is_v2:
+        if is_v2 or "hide_price_chart" in hidden:
             price = no_update
         else:
             price = scalp_price_fig(symbol, sctx, spot)
@@ -5524,7 +5572,8 @@ def create_app() -> Dash:
         return (scalp_banner(symbol, sctx, spot, lang, absorb, swing=is_v2_banner,
                                   edge=is_scalp_v2_page(path)),
                 scalp_head(symbol, lang, sctx, spot),
-                scalp_ladder(symbol, sctx, spot), hedge, prints, price)
+                no_update if "hide_ladder" in hidden else scalp_ladder(symbol, sctx, spot),
+                hedge, prints, price)
 
     # scalp-lw-data : migré du poll tape-tick vers un flux SSE poussé
     # (2026-10-05, ~10h ET lundi, urgence serveur en pleine séance — demande
@@ -5548,7 +5597,7 @@ def create_app() -> Dash:
 
     @app.callback(
         Output("tape-table", "children"),
-        [Input("tape-tick", "n_intervals"), Input("tab", "value"),
+        [Input("tape-tab-tick", "n_intervals"), Input("tab", "value"),
          Input("symbol", "value"), Input("tape-min-size", "value"),
          Input("tape-combos", "value"), Input("lang", "value")],
     )

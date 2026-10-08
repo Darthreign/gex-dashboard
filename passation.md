@@ -25,6 +25,17 @@
 - **L'edge n'est PAS démontré** tant que `python scripts/edge_report.py` n'a pas tourné sur tes données : il rejoue l'historique (ticks live + import Databento, snapshots, historique des métriques, tape), choisit les seuils sur 60 % des séances et les valide sur les 40 % suivantes contre le rejet naïf et le hasard. Le bandeau n'utilise ces seuils que s'ils sont validés (`data/reports/edge_params_<SYM>.json`), sinon il affiche « edge NON validé ».
 - Banc vérifié sur données synthétiques : aucun edge sur marche aléatoire ; edge détecté et filtre de zone utile quand il existe.
 
+## /scalp entièrement rebranché (même session)
+
+Les mesures d'urgence des 05-06/10 sont levées, la charge étant désormais absorbée par l'architecture ci-dessus :
+- `tape-tick` (1 s) réactivé, mais seulement sur /scalp et /scalpv1 ; l'onglet Tape de la page principale a sa propre minuterie `tape-tab-tick` (il était figé lui aussi). Aucune requête par seconde depuis la page principale ou /moc.
+- `refresh_scalp` reste partagé entre onglets (un calcul par seconde au total) et ne calcule plus les blocs masqués via « Personnalisation ».
+- Tous les blocs visibles par défaut. Le masque d'urgence avait été enregistré comme préférence de chaque visiteur : il est remis à zéro une fois par navigateur (marqueur `gex-scalp-ergo-v2`), tout autre choix est respecté.
+- Graphique : flux `chart-stream` actif dès que le graphique est visible, indicateurs tous actifs par défaut.
+- Moteur d'indicateurs repassé de 60 s à 20 s (`SCALP_INDICATORS_EVERY_S`) : 2,6 s à froid pour NQ + ES à 600 000 ticks chacun.
+- Conservé : le délai de 5 s au chargement (`emergency-ready`), utile contre la rafale de callbacks au montage.
+- **Si ça sature à nouveau en séance** : dans le clientside callback qui pilote `tape-tick`/`tape-tab-tick` (gex/app.py), renvoyer `[true, true]` coupe les boucles à la seconde sans toucher au reste (le bandeau reste poussé en SSE).
+
 ## Page /moc (même session)
 
 - **Ce n'est pas l'imbalance officielle** (NOII Nasdaq / NYSE, absente du flux dxFeed ; source payante possible : Databento XNAS.ITCH / XNYS.PILLAR, à vérifier). C'est une estimation des flux MÉCANIQUES de clôture : `gex/moc.py`.
