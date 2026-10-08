@@ -1195,9 +1195,166 @@ def scalp_context(symbol: str) -> dict | None:
            "zg": summary.zero_gamma if summary else None,
            "hvl": metrics.zero_gamma(df, snap.spot, weight_col="volume"),
            "keys": res["keys"], "walls": walls, "gamma": rd["gamma"] if rd else None,
-           "open": open_, "vix": digest._current_vix()}
+           "open": open_, "vix": digest._current_vix(),
+           "gex0": summary.net_gex_0dte if summary else None,
+           "em": _expected_move_pts(symbol, res["keys"])}
     _SCALP_CACHE[symbol] = (now, ctx)
     return ctx
+
+
+def _expected_move_pts(symbol: str, keys: dict) -> float | None:
+    """Mouvement attendu en points : straddle de l'échéance proche (1D Min /
+    Max), sinon 0,5 × la médiane des étendues des 10 séances précédentes —
+    même définition que le backtest (gex/edge_report.py)."""
+    hi, lo = keys.get("d1_max"), keys.get("d1_min")
+    if hi is not None and lo is not None and hi > lo:
+        return (hi - lo) / 2
+    return _realized_em(symbol)
+
+
+_REALIZED_EM: dict[str, tuple[str, float | None]] = {}
+
+
+def _realized_em(symbol: str) -> float | None:
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    hit = _REALIZED_EM.get(symbol)
+    if hit and hit[0] == today:
+        return hit[1]
+    ranges = []
+    for day in [d for d in store.price_days(symbol) if d < today][-10:]:
+        bars = store.load_prices(symbol, day)
+        if bars.empty:
+            continue
+        ts = pd.to_datetime(bars["timestamp"])
+        rth = bars[(ts.dt.hour * 60 + ts.dt.minute >= 570) & (ts.dt.hour < 16)]
+        if not rth.empty:
+            ranges.append(float(rth["high"].max() - rth["low"].min()))
+    em = 0.5 * float(np.median(ranges)) if ranges else None
+    _REALIZED_EM[symbol] = (today, em)
+    return em
+
+
+_EDGE_PARAMS: dict[str, tuple[float, object, bool, str]] = {}
+
+
+def _edge_params(symbol: str):
+    """(paramètres, validés ?, période de test) — ceux du rapport
+    scripts/edge_report.py s'ils sont VALIDÉS hors échantillon, sinon les
+    défauts. Relu au plus toutes les 60 s."""
+    from . import edge, edge_report
+    now = time.time()
+    hit = _EDGE_PARAMS.get(symbol)
+    if hit and now - hit[0] < 60:
+        return hit[1], hit[2], hit[3]
+    path = edge_report.params_path(symbol)
+    p, ok = edge.load_params(path)
+    validated, days = False, ""
+    if ok:
+        try:
+            meta = json.loads(path.read_text())
+            validated, days = bool(meta.get("validated")), meta.get("test_days", "")
+        except (OSError, ValueError):
+            pass
+    if not validated:
+        p = edge.EdgeParams()
+    _EDGE_PARAMS[symbol] = (now, p, validated, days)
+    return p, validated, days
+
+
+def _absorption_events(symbol: str) -> list[dict]:
+    """Absorptions de la séance (calcul planifié) + fenêtre live, sans doublon."""
+    try:
+        events = scalp_absorptions(symbol, _scalp_day_ticks(symbol, sides_only=False))
+    except Exception:  # noqa: BLE001 — un indicateur raté ne casse rien
+        log.exception("Absorptions de séance indisponibles (%s)", symbol)
+        events = []
+    try:
+        live = scalp_absorption_recent(symbol) or []
+    except Exception:  # noqa: BLE001
+        live = []
+    seen, merged = set(), []
+    for e in list(events) + [{"ts": a["ts"], "price": a["price"], "side": a["side"],
+                              "total": a["total"], "ratio": a.get("ratio"),
+                              "n_prints": a.get("n_prints")} for a in live]:
+        key = (round(float(e["ts"]), 3), e["price"], e["side"])
+        if key not in seen:
+            seen.add(key)
+            merged.append(e)
+    return merged
+
+
+def scalp_edge_reading(symbol: str, ctx: dict, spot: float,
+                       net: float | None, gross: float | None) -> dict:
+    """Lecture normalisée de /scalp v2 (cf. gex/edge.py), avec les seuils
+    validés par le rapport s'il y en a."""
+    from . import edge
+    p, validated, days = _edge_params(symbol)
+    r = edge.reading(spot, ctx.get("open"), ctx.get("em"), ctx.get("zg"), ctx.get("gex0"),
+                     _absorption_events(symbol), time.time(), net, gross, p)
+    r.update(validated=validated, test_days=days, params=p)
+    return r
+
+
+def scalp_edge_line(r: dict, lang: str) -> html.Div:
+    zone = t(lang, f"sc_zone_{r['zone']}")
+    if r["ext_em"] is None:
+        txt, cls = t(lang, "sc_edge_na"), "na"
+    elif r["setup"] == "fade":
+        conf = ", ".join(t(lang, f"sc_conf_{c}") for c in r["confirmations"])
+        side = t(lang, "sc_edge_side_up" if r["fade_dir"] > 0 else "sc_edge_side_down")
+        txt, cls = t(lang, "sc_edge_fade", side=side, ext=_sc_fmt(r["ext_em"], 2),
+                     zone=zone, conf=conf), "fade"
+    elif r["setup"] == "avoid":
+        txt, cls = t(lang, "sc_edge_avoid", ext=_sc_fmt(r["ext_em"], 2)), "avoid"
+    elif r["excess_dir"]:
+        txt, cls = t(lang, "sc_edge_watch", ext=_sc_fmt(r["ext_em"], 2), zone=zone), "watch"
+    else:
+        txt, cls = t(lang, "sc_edge_none", ext=_sc_fmt(r["ext_em"], 2), zone=zone), "none"
+    status = (t(lang, "sc_edge_validated", days=r["test_days"]) if r["validated"]
+              else t(lang, "sc_edge_unvalidated"))
+    title = (t(lang, "sc_edge_tooltip", em=f"{r['em']:.1f}",
+               dflip=_sc_fmt(r["dist_flip_em"], 2) if r["dist_flip_em"] is not None else "—")
+             if r.get("em") else "")
+    return html.Div([html.Span(txt, className="sc-edge-text"),
+                     html.Span(status, className="sc-edge-status"
+                               + (" sc-edge-ok" if r["validated"] else ""))],
+                    className=f"sc-edge sc-edge-{cls}", title=title)
+
+
+_EDGE_SEEN: dict[str, tuple[str, int]] = {}
+_EDGE_LAST_LOGGED: dict[str, tuple[str, int, float]] = {}
+
+
+def log_scalp_setup(symbol: str, r: dict, spot: float) -> None:
+    """Journalise une TRANSITION vers « rejet » ou « à éviter » — jamais à
+    chaque cycle, et pas de nouvelle ligne si la même lecture revient moins
+    de 2 min après sa dernière écriture (même garde que les signaux)."""
+    from . import edge
+    key = (r["setup"], r["fade_dir"])
+    prev = _EDGE_SEEN.get(symbol)
+    _EDGE_SEEN[symbol] = key
+    now_epoch = time.time()
+    if r["setup"] not in ("fade", "avoid") or prev == key:
+        return
+    last = _EDGE_LAST_LOGGED.get(symbol)
+    if last and last[:2] == key and now_epoch - last[2] < scalp.SIGNAL_COOLDOWN_S:
+        return
+    _EDGE_LAST_LOGGED[symbol] = (*key, now_epoch)
+    conn = _journal()
+    if conn is None:
+        return
+    try:
+        import journal
+        now = datetime.now(LOCAL_TZ)
+        with _JOURNAL_LOCK:
+            journal.record_scalp_setup(
+                conn, date=now.date().isoformat(), ts=now.isoformat(), symbol=symbol,
+                setup=r["setup"], fade_dir=r["fade_dir"], spot=spot, ext_em=r["ext_em"],
+                zone=r["zone"], dist_flip_em=r["dist_flip_em"], em=r["em"],
+                confirmations=",".join(r["confirmations"]),
+                params_version=edge.PARAMS_VERSION, validated=r["validated"])
+    except Exception:  # noqa: BLE001 — ne doit jamais casser le bandeau
+        log.exception("Écriture du setup /scalp échouée (%s)", symbol)
 
 
 def _sc_fmt(v: float, dec: int = 0) -> str:
@@ -1305,6 +1462,12 @@ def is_scalp_path(path: str | None) -> bool:
     return p == "/scalp" or p.startswith("/scalp/") or p == "/scalpv1" or p.startswith("/scalpv1/")
 
 
+def is_scalp_v2_page(path: str | None) -> bool:
+    """`/scalp` (page v2), pas `/scalpv1`."""
+    p = path or "/"
+    return p == "/scalp" or p.startswith("/scalp/")
+
+
 def scalp_inputs(symbol: str, spot: float) -> tuple[float | None, float, float]:
     """(mouvement sur 5 min en points, flux net M$, flux brut M$) pour le bandeau.
 
@@ -1355,7 +1518,8 @@ def scalp_inputs_swing(symbol: str, spot: float) -> tuple[float | None, float, f
 
 
 def scalp_banner(symbol: str, ctx: dict, spot: float, lang: str,
-                 absorb: dict | None = None, *, swing: bool = False) -> html.Div:
+                 absorb: dict | None = None, *, swing: bool = False,
+                 edge: bool = False) -> html.Div:
     """`swing=True` (réservé à `/scalp` v2, cf. `refresh_scalp`) : mouvement
     ancré-structure (`scalp_inputs_swing`) au lieu de la fenêtre fixe 5 min —
     `/scalpv1` appelle toujours cette fonction avec `swing=False` (défaut),
@@ -1372,12 +1536,21 @@ def scalp_banner(symbol: str, ctx: dict, spot: float, lang: str,
     voyants = [html.Span(f"{'●' if on else '○'} {t(lang, f'sc_light_{name}')}",
                          className="sc-light" + (" on" if on else ""))
                for name, on in a["lights"].items()]
-    return html.Div([
-        html.Div([
-            html.Div(a["title"], className="sc-banner-title"),
+    main = [html.Div(a["title"], className="sc-banner-title"),
             html.Div(a["detail"], className="sc-banner-detail"),
-            html.Div(voyants, className="sc-lights"),
-        ], className="sc-banner-main"),
+            html.Div(voyants, className="sc-lights")]
+    if edge:
+        # page /scalp (pas /scalpv1), quelle que soit la version du bandeau :
+        # lecture normalisée (excès en mouvement attendu depuis l'ouverture,
+        # zone de régime, confirmations d'épuisement), cf. gex/edge.py
+        try:
+            er = scalp_edge_reading(symbol, ctx, spot, net, gross)
+            log_scalp_setup(symbol, er, spot)
+            main.append(scalp_edge_line(er, lang))
+        except Exception:  # noqa: BLE001 — la lecture ne doit jamais casser le bandeau
+            log.exception("Lecture normalisée /scalp v2 indisponible (%s)", symbol)
+    return html.Div([
+        html.Div(main, className="sc-banner-main"),
         # à droite du bandeau (passe en dessous si la place manque) : la place
         # vide de la bannière était l'endroit naturel plutôt qu'un bloc de plus
         html.Div(scalp_absorb_panel(symbol, recent, absorb, lang), className="sc-banner-side"),
@@ -1710,23 +1883,7 @@ def _absorption_marks(symbol: str, candle_times: list[int]) -> list[dict]:
     Lightweight Charts ne place un marqueur que sur le temps d'une bougie."""
     if not candle_times:
         return []
-    try:
-        events = scalp_absorptions(symbol, _scalp_day_ticks(symbol, sides_only=False))
-    except Exception:  # noqa: BLE001 — un indicateur raté ne casse pas le graphique
-        log.exception("Absorptions de séance indisponibles (%s)", symbol)
-        events = []
-    try:
-        live = scalp_absorption_recent(symbol)
-    except Exception:  # noqa: BLE001
-        live = []
-    seen, merged = set(), []
-    for e in list(events) + [{"ts": a["ts"], "price": a["price"], "side": a["side"],
-                              "total": a["total"], "ratio": a.get("ratio"),
-                              "n_prints": a.get("n_prints")} for a in live or []]:
-        key = (round(float(e["ts"]), 3), e["price"], e["side"])
-        if key not in seen:
-            seen.add(key)
-            merged.append(e)
+    merged = _absorption_events(symbol)
     times = np.asarray(sorted(candle_times))
     out = []
     for e in merged:
@@ -2157,7 +2314,8 @@ def scalp_indicators_channel(symbol: str, lang: str, swing: bool) -> broadcast.C
             last["banner_sig"] = banner_sig
             # `default=` rappelle to_plotly_json() sur chaque composant Dash
             # imbriqué (le niveau supérieur seul ne suffit pas)
-            snap = {"banner": scalp_banner(symbol, ctx, spot, lang, absorb, swing=swing)}
+            snap = {"banner": scalp_banner(symbol, ctx, spot, lang, absorb, swing=swing,
+                                           edge=True)}
             return ("data: " + json.dumps(
                 snap, default=lambda o: getattr(o, "to_plotly_json", lambda: str(o))())
                 + "\n\n")
@@ -5312,7 +5470,8 @@ def create_app() -> Dash:
             spot = _scalp_live_spot(symbol, sctx)
             absorb = scalp_absorption(symbol)
             is_v2_banner = (path or "/") == "/scalp" and (banner_version or "v2") != "v1"
-            banner = scalp_banner(symbol, sctx, spot, lang, absorb, swing=is_v2_banner)
+            banner = scalp_banner(symbol, sctx, spot, lang, absorb, swing=is_v2_banner,
+                                  edge=is_scalp_v2_page(path))
             return banner, no_update, no_update, no_update, no_update, no_update
         # /scalp v2 affiche le graphique de PRIX en Lightweight Charts
         # (scalp-lw-card) ; scalp-price (Plotly) reste dans le DOM mais
@@ -5354,7 +5513,8 @@ def create_app() -> Dash:
         # que vaille le store scalp-banner-version (bouton V1/V2, absent du
         # DOM /scalpv1 de toute façon, mais la garde reste explicite ici).
         is_v2_banner = (path or "/") == "/scalp" and (banner_version or "v2") != "v1"
-        return (scalp_banner(symbol, sctx, spot, lang, absorb, swing=is_v2_banner),
+        return (scalp_banner(symbol, sctx, spot, lang, absorb, swing=is_v2_banner,
+                                  edge=is_scalp_v2_page(path)),
                 scalp_head(symbol, lang, sctx, spot),
                 scalp_ladder(symbol, sctx, spot), hedge, prints, price)
 

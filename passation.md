@@ -19,6 +19,12 @@
 
 **Retour arrière, par étage :** `GEX_SERVER=waitress` (ancien serveur), retirer `GEX_ENGINE` (le dashboard recalcule lui-même comme avant). Les étages 1 et 2 n'ont pas d'interrupteur : ce sont des changements de code testés à résultat identique.
 
+## Lecture normalisée /scalp et mesure d'edge (même session)
+
+- `gex/edge.py` : excès = (prix − ouverture) en mouvements attendus (EM, straddle de l'échéance proche, sinon étendue réalisée) ; zone frein / transition / accélération selon la distance au Gamma Flip en EM et le GEX 0DTE ; confirmations d'épuisement (gamma frein, absorption opposée, flux qui freine). Affiché sur `/scalp` (V1 comme V2 du bandeau), jamais sur `/scalpv1` ; transitions journalisées dans `scalp_setups`.
+- **L'edge n'est PAS démontré** tant que `python scripts/edge_report.py` n'a pas tourné sur tes données : il rejoue l'historique (ticks live + import Databento, snapshots, historique des métriques, tape), choisit les seuils sur 60 % des séances et les valide sur les 40 % suivantes contre le rejet naïf et le hasard. Le bandeau n'utilise ces seuils que s'ils sont validés (`data/reports/edge_params_<SYM>.json`), sinon il affiche « edge NON validé ».
+- Banc vérifié sur données synthétiques : aucun edge sur marche aléatoire ; edge détecté et filtre de zone utile quand il existe.
+
 ## Conventions de calcul (même session)
 
 Voir README « Conventions de calcul ». Points à surveiller en séance : l'IV est désormais inversée du mid (comparer `iv` et `iv_feed`) ; les séries AM (SPX/NDX mensuels, NQ/ES trimestriels) disparaissent à 9h30 le jour de l'opex ; les recalculs NQ/ES utilisent le vrai multiplicateur (montants ÷5 / ÷2 par rapport à avant). Relancer le backfill pour régénérer les snapshots historiques.

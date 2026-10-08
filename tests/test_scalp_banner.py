@@ -426,3 +426,26 @@ def test_log_absorption_levels_sans_journal_marque_vu_quand_meme(monkeypatch):
     a = {"side": "SELL", "price": 1.0, "ratio": 1.0, "total": 1.0, "n_prints": 1, "ts": 1.0}
     app.log_absorption_levels("NQ", [a])          # ne doit pas lever
     assert 1.0 in app._ABSORB_LOGGED["NQ"]
+
+
+def test_bandeau_v2_affiche_la_lecture_normalisee(monkeypatch):
+    """Excès de +1 EM au-dessus du flip, absorption d'acheteurs au prix :
+    setup de rejet baissier, avec le statut « non validé » sans rapport."""
+    import time as _t
+    from gex import app as app_mod
+    monkeypatch.setattr(app_mod, "scalp_inputs_swing", lambda s, spot: (30.0, 0.0, 0.0))
+    monkeypatch.setattr(app_mod, "scalp_absorption_recent", lambda s: [])
+    monkeypatch.setattr(app_mod, "_absorption_events",
+                        lambda s: [{"ts": _t.time() - 30, "price": 30050.0, "side": "BUY"}])
+    monkeypatch.setattr(app_mod, "_edge_params",
+                        lambda s: (__import__("gex.edge").edge.EdgeParams(), False, ""))
+    monkeypatch.setattr(app_mod, "_journal", lambda: None)
+    ctx = {"zg": 29900.0, "gamma": "Gamma Positif", "open": 30000.0, "em": 50.0,
+           "gex0": 1e9, "keys": {}, "walls": [], "hvl": None, "vix": None}
+    out = str(app_mod.scalp_banner("NQ", ctx, 30050.0, "fr", None, edge=True).to_plotly_json())
+    assert "Setup rejet baissier" in out and "absorption opposée" in out
+    assert "edge NON validé" in out
+    # /scalpv1 (edge=False) : inchangé, pas de lecture normalisée
+    monkeypatch.setattr(app_mod, "scalp_inputs", lambda s, spot: (30.0, 0.0, 0.0))
+    v1 = str(app_mod.scalp_banner("NQ", ctx, 30050.0, "fr", None).to_plotly_json())
+    assert "sc-edge" not in v1

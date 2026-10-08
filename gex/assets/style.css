@@ -854,6 +854,25 @@ body.scalp-v2-page #scalp-lw-card { display: flex; flex-direction: column; }
 .sc-tone-neutral { border-color: var(--line); }
 .sc-tone-neutral .sc-banner-title { color: var(--ink2); font-weight: 600; }
 
+/* Lecture normalisée /scalp v2 (cf. gex/edge.py) : excès en mouvement
+   attendu, zone de régime, confirmations. Le statut à droite dit si les
+   seuils sont validés hors échantillon (scripts/edge_report.py). */
+.sc-edge {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px;
+  margin-top: 8px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line);
+  font-size: 13px; font-variant-numeric: tabular-nums;
+}
+.sc-edge-text { font-weight: 600; color: var(--ink); }
+.sc-edge-status { font-size: 11px; color: var(--warn); }
+.sc-edge-status.sc-edge-ok { color: var(--ok); }
+.sc-edge-fade { border-color: var(--ok); background: rgba(25,158,112,.10); }
+.sc-edge-fade .sc-edge-text { color: var(--ok); }
+.sc-edge-avoid { border-color: var(--neg); background: rgba(230,103,103,.10); }
+.sc-edge-avoid .sc-edge-text { color: var(--neg); }
+.sc-edge-watch .sc-edge-text { color: var(--warn); }
+.sc-edge-none .sc-edge-text, .sc-edge-na .sc-edge-text { color: var(--muted); font-weight: 500; }
+body.sc-keywords-only .sc-edge-status { display: none; }
+
 /* Zone d'absorption (candidats iceberg, page /scalp) — TOUJOURS visible : les
    derniers niveaux détectés (cf. TickCapture.absorption_recent), la plus
    récente en tête. Elle seule clignote tant qu'elle est fraîche (gex/iceberg.py). */

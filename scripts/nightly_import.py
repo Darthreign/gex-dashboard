@@ -187,7 +187,8 @@ def _databento_session(day: str) -> pd.DataFrame:
     ts = pd.to_datetime(d["ts_event"], utc=True)
     side_map = {"B": "BUY", "A": "SELL", "N": None}
     out = pd.DataFrame({
-        "ts": ts.astype("int64") / 1e9,
+        # résolution réelle de la série (ns, ou µs selon la version de pandas)
+        "ts": ts.astype("int64") / {"s": 1, "ms": 1e3, "us": 1e6, "ns": 1e9}[ts.dt.unit],
         "price": d["price"].astype(float),
         "volume": d["size"].astype("int64"),
         "side": d["side"].map(side_map),
