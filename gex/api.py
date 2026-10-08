@@ -54,6 +54,31 @@ def _futures_last_price(symbol: str) -> float | None:
     return px
 
 
+def price_channel(symbol: str) -> broadcast.Channel:
+    """Canal du flux /stream (dernier prix NQ/ES), partagé par les serveurs
+    WSGI et asynchrone (cf. gex/asgi.py)."""
+    from . import scalp
+    # UN producteur par symbole (canal partagé, cf. gex/broadcast.py) : le
+    # prix est lu ~10 fois/s une seule fois, quel que soit le nombre
+    # d'onglets, et poussé à chaque changement. Le keepalive (15 s) garde
+    # la détection rapide des connexions mortes.
+    def factory():
+        last = {"v": None}
+
+        def produce():
+            px = _futures_last_price(symbol)
+            if px is None:
+                return None
+            rounded = scalp.round_to_tick(symbol, float(px))
+            if rounded == last["v"]:
+                return None
+            last["v"] = rounded
+            return f"data: {rounded}\n\n"
+        return produce
+
+    return broadcast.channel(("price", symbol), factory, 0.1)
+
+
 def _summary_dict(symbol: str, s) -> dict:
     return {
         "symbol": symbol,
@@ -491,25 +516,7 @@ def register_api(app) -> None:
         if symbol not in ("NQ", "ES"):
             return jsonify({"error": "symbole non couvert (NQ/ES seulement)"}), 404
 
-        # UN producteur par symbole (canal partagé, cf. gex/broadcast.py) : le
-        # prix est lu ~10 fois/s une seule fois, quel que soit le nombre
-        # d'onglets, et poussé à chaque changement. Le keepalive (15 s) garde
-        # la détection rapide des connexions mortes.
-        def factory():
-            last = {"v": None}
-
-            def produce():
-                px = _futures_last_price(symbol)
-                if px is None:
-                    return None
-                rounded = scalp.round_to_tick(symbol, float(px))
-                if rounded == last["v"]:
-                    return None
-                last["v"] = rounded
-                return f"data: {rounded}\n\n"
-            return produce
-
-        ch = broadcast.channel(("price", symbol), factory, 0.1)
+        ch = price_channel(symbol)
         return Response(broadcast.sse_events(ch), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache",
                                  "X-Accel-Buffering": "no"})

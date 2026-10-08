@@ -17,7 +17,7 @@ from gex.app import create_app, start_scalp_indicator_scheduler
 from gex.capturebus import RemoteTape, remote_url
 from gex.flowtape import TAPE
 from gex.logsetup import setup_logging
-from gex.rtquote import PUBLIC_QUOTES, QUOTES
+from gex.rtquote import PUBLIC_QUOTES, QUOTES, _env
 from gex.scheduler import start_scheduler
 from gex.tickcapture import CAPTURE
 
@@ -146,9 +146,27 @@ def main(host: str = "127.0.0.1", port: int = 8050) -> None:
     # écarté. connection_limit relevé en proportion (300->500). Stopgap
     # immédiat : la vraie solution reste la migration gevent (cf. passation),
     # pas encore assez éprouvée pour la production ce soir-là.
-    from waitress import serve
-    serve(create_app().server, host=host, port=port, threads=256,
-         channel_timeout=90, connection_limit=500)
+    #
+    # 2026-10-08 : serveur ASGI (uvicorn) par défaut, cf. gex/asgi.py — les
+    # flux SSE n'occupent plus de thread (boucle asyncio), Dash garde un pool
+    # borné via a2wsgi, et les canaux partagés (gex/broadcast.py) font qu'un
+    # onglet de plus ne coûte plus de calcul. Tout l'historique ci-dessus
+    # (threads 8 -> 256, connection_limit) ne concerne plus que le repli
+    # waitress, conservé : GEX_SERVER=waitress.
+    dash_app = create_app()
+    if (_env("GEX_SERVER") or "uvicorn").strip().lower() == "waitress":
+        from waitress import serve
+        serve(dash_app.server, host=host, port=port, threads=256,
+              channel_timeout=90, connection_limit=500)
+        return
+    import uvicorn
+
+    from gex.asgi import build
+    # timeout_keep_alive : connexions HTTP inactives entre deux requêtes. Une
+    # connexion SSE morte est détectée par l'échec d'écriture du keepalive
+    # (15 s, cf. broadcast.KEEPALIVE_S), plus besoin de channel_timeout.
+    uvicorn.run(build(dash_app), host=host, port=port, log_level="warning",
+                timeout_keep_alive=30, access_log=False)
 
 
 if __name__ == "__main__":

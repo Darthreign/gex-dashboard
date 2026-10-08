@@ -2073,6 +2073,70 @@ def _refresh_scalp_indicators() -> None:
         publish_scalp_indicators()
 
 
+def scalp_indicators_channel(symbol: str, lang: str, swing: bool) -> broadcast.Channel:
+    """Canal du flux /scalp-indicators-stream, partagé par les serveurs WSGI
+    et asynchrone (cf. gex/asgi.py) : un seul producteur par clé."""
+    # Canal partagé par (symbole, langue, swing) — cf. gex/broadcast.py : le
+    # bandeau est calculé UNE fois par seconde pour tous les onglets
+    # abonnés, poussé seulement quand il change (signature spot +
+    # absorption), au lieu d'une boucle de calcul par connexion. Un cycle
+    # de calcul raté ne ferme jamais le flux (géré par le canal) ; une
+    # erreur d'écriture libère la connexion (générateur arrêté).
+    def factory():
+        last = {"banner_sig": None}
+
+        def produce():
+            ctx = scalp_context(symbol)
+            if ctx is None:
+                return None
+            spot = _scalp_live_spot(symbol, ctx)
+            absorb = scalp_absorption(symbol)
+            banner_sig = (round(spot, 2), json.dumps(absorb, sort_keys=True, default=str))
+            if banner_sig == last["banner_sig"]:
+                return None
+            last["banner_sig"] = banner_sig
+            # `default=` rappelle to_plotly_json() sur chaque composant Dash
+            # imbriqué (le niveau supérieur seul ne suffit pas)
+            snap = {"banner": scalp_banner(symbol, ctx, spot, lang, absorb, swing=swing)}
+            return ("data: " + json.dumps(
+                snap, default=lambda o: getattr(o, "to_plotly_json", lambda: str(o))())
+                + "\n\n")
+        return produce
+
+    return broadcast.channel(("scalp-ind", symbol, lang, swing), factory, 1.0)
+
+
+def scalp_chart_channel(symbol: str, tf: str) -> broadcast.Channel:
+    """Canal du flux /chart-stream (cf. scalp_indicators_channel)."""
+    # Canal partagé par (symbole, tf). Pré-filtre conservé : les bougies et
+    # niveaux ne changent pas sans que le spot bouge, sinon revérification
+    # toutes les 5 s ; poussé seulement si la signature change.
+    def factory():
+        last = {"sig": None, "spot": None, "check": 0.0}
+
+        def produce():
+            ctx = scalp_context(symbol)
+            if ctx is None:
+                return None
+            spot = _scalp_live_spot(symbol, ctx)
+            now_mono = time.monotonic()
+            if spot == last["spot"] and now_mono - last["check"] < 5.0:
+                return None
+            last["spot"], last["check"] = spot, now_mono
+            data = scalp_v2_chart_data(symbol, ctx, spot, tf=tf)
+            candles = data.get("candles") or []
+            markers = data.get("markers") or []
+            tail = candles[-1] if candles else None
+            sig = (len(candles), len(markers), tail and (tail["time"], tail["close"]))
+            if sig == last["sig"]:
+                return None
+            last["sig"] = sig
+            return f"data: {json.dumps(data)}\n\n"
+        return produce
+
+    return broadcast.channel(("scalp-chart", symbol, tf), factory, 1.0)
+
+
 _SCALP_INDICATOR_SCHED = None
 
 
@@ -5343,34 +5407,7 @@ def create_app() -> Dash:
         lang = request.args.get("lang", "fr")
         swing = request.args.get("swing") == "1"
 
-        # Canal partagé par (symbole, langue, swing) — cf. gex/broadcast.py : le
-        # bandeau est calculé UNE fois par seconde pour tous les onglets
-        # abonnés, poussé seulement quand il change (signature spot +
-        # absorption), au lieu d'une boucle de calcul par connexion. Un cycle
-        # de calcul raté ne ferme jamais le flux (géré par le canal) ; une
-        # erreur d'écriture libère la connexion (générateur arrêté).
-        def factory():
-            last = {"banner_sig": None}
-
-            def produce():
-                ctx = scalp_context(symbol)
-                if ctx is None:
-                    return None
-                spot = _scalp_live_spot(symbol, ctx)
-                absorb = scalp_absorption(symbol)
-                banner_sig = (round(spot, 2), json.dumps(absorb, sort_keys=True, default=str))
-                if banner_sig == last["banner_sig"]:
-                    return None
-                last["banner_sig"] = banner_sig
-                # `default=` rappelle to_plotly_json() sur chaque composant Dash
-                # imbriqué (le niveau supérieur seul ne suffit pas)
-                snap = {"banner": scalp_banner(symbol, ctx, spot, lang, absorb, swing=swing)}
-                return ("data: " + json.dumps(
-                    snap, default=lambda o: getattr(o, "to_plotly_json", lambda: str(o))())
-                    + "\n\n")
-            return produce
-
-        ch = broadcast.channel(("scalp-ind", symbol, lang, swing), factory, 1.0)
+        ch = scalp_indicators_channel(symbol, lang, swing)
         return Response(broadcast.sse_events(ch), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -5389,33 +5426,7 @@ def create_app() -> Dash:
             return Response("symbole non couvert (NQ/ES seulement)", status=404)
         tf = request.args.get("tf") or CHART_TF_DEFAULT
 
-        # Canal partagé par (symbole, tf). Pré-filtre conservé : les bougies et
-        # niveaux ne changent pas sans que le spot bouge, sinon revérification
-        # toutes les 5 s ; poussé seulement si la signature change.
-        def factory():
-            last = {"sig": None, "spot": None, "check": 0.0}
-
-            def produce():
-                ctx = scalp_context(symbol)
-                if ctx is None:
-                    return None
-                spot = _scalp_live_spot(symbol, ctx)
-                now_mono = time.monotonic()
-                if spot == last["spot"] and now_mono - last["check"] < 5.0:
-                    return None
-                last["spot"], last["check"] = spot, now_mono
-                data = scalp_v2_chart_data(symbol, ctx, spot, tf=tf)
-                candles = data.get("candles") or []
-                markers = data.get("markers") or []
-                tail = candles[-1] if candles else None
-                sig = (len(candles), len(markers), tail and (tail["time"], tail["close"]))
-                if sig == last["sig"]:
-                    return None
-                last["sig"] = sig
-                return f"data: {json.dumps(data)}\n\n"
-            return produce
-
-        ch = broadcast.channel(("scalp-chart", symbol, tf), factory, 1.0)
+        ch = scalp_chart_channel(symbol, tf)
         return Response(broadcast.sse_events(ch), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 

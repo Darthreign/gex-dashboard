@@ -10,3 +10,6 @@ mcp>=1.0
 pytest>=8.3
 websockets>=13.0
 waitress>=3.0
+uvicorn>=0.30
+starlette>=0.38
+a2wsgi>=1.10
