@@ -312,7 +312,7 @@ def build_flows(minute_df: pd.DataFrame, deltas: pd.DataFrame, spot: float,
                 symbol: str, day: date) -> pd.DataFrame:
     m = minute_df.merge(deltas, on="instrument_id", how="inner")
     signed = m["volume"] * m["delta_bs"] * CONTRACT_MULTIPLIER * spot
-    m = m.assign(signed=signed, is_0dte=m["expiry"] == day)
+    m = m.assign(signed=signed, is_0dte=metrics.bucket_mask(m, "0DTE", day))
     grouped = m.groupby("minute").agg(
         flow_total=("signed", "sum"),
         contracts_traded=("volume", "sum"),

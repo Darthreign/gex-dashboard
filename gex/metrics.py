@@ -702,6 +702,7 @@ def flow_delta(prev: pd.DataFrame, cur: pd.DataFrame, spot: float) -> dict[str, 
     signed = dvol * m["delta_bs"] * CONTRACT_MULTIPLIER * spot
     is_call = m["type"] == "C"
     today = datetime.now(ET).date()
+    is_0dte = bucket_mask(m, "0DTE", today)
 
     # Gamma échangé sur l'intervalle : même formule que le GEX, mais pondérée
     # par le volume du pas de temps au lieu de l'open interest. Cumulé sur la
@@ -713,12 +714,12 @@ def flow_delta(prev: pd.DataFrame, cur: pd.DataFrame, spot: float) -> dict[str, 
         "flow_total": float(signed.sum()),
         "flow_calls": float(signed[is_call].sum()),
         "flow_puts": float(signed[~is_call].sum()),
-        "flow_0dte": float(signed[m["expiry"] == today].sum()),
+        "flow_0dte": float(signed[is_0dte].sum()),
         # gflow_calls est positif, gflow_puts négatif : leur somme est le net
         "gflow_total": float(gsigned.sum()),
         "gflow_calls": float(gsigned[is_call].sum()),
         "gflow_puts": float(gsigned[~is_call].sum()),
-        "gflow_0dte": float(gsigned[m["expiry"] == today].sum()),
+        "gflow_0dte": float(gsigned[is_0dte].sum()),
         "contracts_traded": float(dvol.sum()),
         "source": "cboe",   # collecté en direct sur la source publique
     }
