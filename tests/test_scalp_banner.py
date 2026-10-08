@@ -206,7 +206,11 @@ def test_graphe_sous_jacent_comble_le_trou_si_le_disque_a_du_retard(monkeypatch)
     ctx = {"zg": None, "hvl": None, "keys": {}, "walls": []}
     now_et = datetime.now(ET)
     # la minute qui vient de se terminer (now - 1 min) a déjà été vue en direct...
-    app._update_live_bar("NQ", 30040.0, now_et - timedelta(minutes=1, seconds=5))
+    # milieu de la minute précédente, quelle que soit la seconde d'exécution
+    # (à now - 1 min 05 s, un test lancé dans les 5 premières secondes d'une
+    # minute tombait deux minutes en arrière et créait lui-même le trou)
+    prev_minute = now_et.replace(second=0, microsecond=0) - timedelta(minutes=1)
+    app._update_live_bar("NQ", 30040.0, prev_minute + timedelta(seconds=30))
     # ...puis l'horloge avance d'une minute avant que le disque n'ait rattrapé
     fig = app.scalp_price_fig("NQ", ctx, 30050.0)
     xs = list(fig.data[0].x)

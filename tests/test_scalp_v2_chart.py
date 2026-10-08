@@ -167,3 +167,50 @@ def test_tf_volume_pas_de_jour_de_repli_disponible_reste_vide(monkeypatch):
     monkeypatch.setattr(tickcapture, "_session_day", lambda ts: "2026-10-03")
     out = app.scalp_v2_chart_data("NQ", _CTX, 30040.0, tf="v60")
     assert out["candles"] == [] and out["markers"] == []
+
+
+def test_ticks_du_jour_relus_seulement_quand_le_fichier_change(tmp_path, monkeypatch):
+    from datetime import datetime
+    from gex import app as app_mod
+    from gex.config import SETTINGS
+    monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
+    app_mod._TICKS_CACHE.clear()
+    lectures = []
+    vraie = store.load_ticks
+    monkeypatch.setattr(store, "load_ticks", lambda s, d: lectures.append(d) or vraie(s, d))
+    store.append_ticks("NQ", [{"ts": 1.0, "price": 1.0, "volume": 1.0, "side": "BUY"}],
+                       datetime(2026, 10, 8))
+    a = app_mod._ticks_cached("NQ", "2026-10-08")
+    b = app_mod._ticks_cached("NQ", "2026-10-08")
+    assert a is b and len(lectures) == 1
+    store.append_ticks("NQ", [{"ts": 2.0, "price": 1.0, "volume": 1.0, "side": "SELL"}],
+                       datetime(2026, 10, 8))
+    assert len(app_mod._ticks_cached("NQ", "2026-10-08")) == 2 and len(lectures) == 2
+
+
+def test_volume_bars_vectorise_egal_a_la_boucle_de_reference():
+    import numpy as np
+    from gex import bars
+
+    def reference(ticks, bv):
+        df = bars._clean_ticks(ticks)
+        out, cur, acc = [], [], 0.0
+        for row in df.to_dict("records"):
+            cur.append(row)
+            acc += row["volume"]
+            if acc >= bv:
+                out.append(bars._finish_bar(cur))
+                cur, acc = [], 0.0
+        if cur:
+            out.append(bars._finish_bar(cur))
+        return pd.DataFrame(out)
+
+    rng = np.random.default_rng(1)
+    n = 5000
+    ticks = pd.DataFrame({"ts": np.sort(rng.uniform(0, 1e4, n)),
+                          "price": 100 + np.cumsum(rng.choice([-0.25, 0.25], n)),
+                          "volume": rng.integers(1, 30, n).astype(float),
+                          "side": rng.choice(["BUY", "SELL", "UNDEFINED"], n)})
+    for bv in (1.0, 7.0, 60.0, 10_000.0):
+        pd.testing.assert_frame_equal(bars.volume_bars(ticks, bv), reference(ticks, bv),
+                                      check_dtype=False)

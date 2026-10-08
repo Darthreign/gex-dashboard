@@ -1777,6 +1777,22 @@ def _volume_profile(leg_ticks: pd.DataFrame, symbol: str) -> dict | None:
            "buckets": buckets}
 
 
+def _leg_poc_lvn(kidx: np.ndarray, vols: np.ndarray, size: float) -> tuple[float, float] | None:
+    """(POC, palier le moins traité) d'une jambe, à partir des paliers entiers
+    de ses ticks — mêmes résultats que `_volume_profile` (égalités tranchées
+    au premier prix croissant), sans groupby pandas par jambe."""
+    if len(kidx) == 0:
+        return None
+    base = int(kidx.min())
+    per = np.bincount(kidx - base, weights=vols)
+    present = np.bincount(kidx - base) > 0
+    if per.sum() <= 0:
+        return None
+    poc = int(np.argmax(per))
+    lvn = int(np.argmin(np.where(present, per, np.inf)))
+    return float((base + poc) * size), float((base + lvn) * size)
+
+
 def _scalp_swing_legs(day_ticks: pd.DataFrame, symbol: str) -> pd.DataFrame:
     """Pivots swing CONFIRMÉS (cf. gex/bars.py::zigzag), même moteur que le
     bandeau (bar_volume=60, min_move=`scalp.move_threshold * 0.6`) — factorisé
@@ -1887,14 +1903,24 @@ def scalp_orderflow_untested(symbol: str, day_ticks: pd.DataFrame) -> list[dict]
     # à la dernière confirmée — plus de plafond à 4 jambes maintenant que ce
     # scan tourne à part, en arrière-plan, sur son propre cache 60s.
     untested = []
+    # tranches par recherche dichotomique sur les horodatages triés : chaque
+    # jambe coûte O(log N), au lieu d'un filtre sur toute la séance (O(N) par
+    # jambe, donc quadratique au fil de la journée)
+    sorted_ticks = day_ticks.sort_values("ts", kind="stable")
+    tss = sorted_ticks["ts"].to_numpy()
+    piv = confirmed["ts"].to_numpy(dtype=float)
+    # palier de chaque tick calculé une fois (même arrondi que _volume_profile)
+    size = _orderflow_vp_bucket(symbol)
+    kidx = np.round(sorted_ticks["price"].to_numpy(dtype=float) / size).astype(np.int64)
+    vols = sorted_ticks["volume"].to_numpy(dtype=float)
     for i in range(0, len(confirmed) - 2):
-        t0, t1 = float(confirmed.iloc[i]["ts"]), float(confirmed.iloc[i + 1]["ts"])
-        leg_ticks = day_ticks[(day_ticks["ts"] >= t0) & (day_ticks["ts"] <= t1)]
-        prof = _volume_profile(leg_ticks, symbol)
-        if not prof or not prof["buckets"]:
+        t0, t1 = float(piv[i]), float(piv[i + 1])
+        lo = int(np.searchsorted(tss, t0, side="left"))
+        hi = int(np.searchsorted(tss, t1, side="right"))
+        nodes = _leg_poc_lvn(kidx[lo:hi], vols[lo:hi], size)
+        if nodes is None:
             continue
-        lvn_price = min(prof["buckets"], key=lambda b: b["vol"])["price"]
-        for price, kind in ((prof["poc"], "hvn"), (lvn_price, "lvn")):
+        for price, kind in zip(nodes, ("hvn", "lvn")):
             revisited = (lo_touched is not None and lo_touched <= price <= hi_touched)
             if not revisited:
                 untested.append({"price": price, "kind": kind})
@@ -2081,18 +2107,42 @@ def _scalp_day_ticks(symbol: str) -> pd.DataFrame:
     logique de repli qui pourraient diverger."""
     from .tickcapture import _session_day
     day = _session_day(time.time())
-    day_ticks = store.load_ticks(symbol, day)
-    if not day_ticks.empty:
-        day_ticks = day_ticks[day_ticks["side"].isin(("BUY", "SELL"))]
+    day_ticks = _ticks_cached(symbol, day)
     if day_ticks.empty:
         # Repli : séance en cours encore vide — dernier jour avec des ticks,
         # même principe que `scalp_price_fig` pour les bougies Plotly.
         days = store.tick_days(symbol)
         if days:
-            day_ticks = store.load_ticks(symbol, days[-1])
-            if not day_ticks.empty:
-                day_ticks = day_ticks[day_ticks["side"].isin(("BUY", "SELL"))]
+            day_ticks = _ticks_cached(symbol, days[-1])
     return day_ticks
+
+
+_TICKS_CACHE: dict[tuple[str, str], tuple[tuple, pd.DataFrame]] = {}
+_TICKS_LOCK = threading.Lock()
+
+
+def _ticks_cached(symbol: str, day: str) -> pd.DataFrame:
+    """Ticks BUY/SELL d'un jour, relus seulement quand le fichier change (le
+    process capture le réécrit ~1 fois/min) : tous les appelants partagent
+    UNE lecture par écriture au lieu d'une par appel. Lecture seule."""
+    path = store.SETTINGS.data_dir / "ticks" / symbol / f"{day}.parquet"
+    try:
+        st = path.stat()
+        sig = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        sig = None                 # pas de fichier : lecture directe, sans cache
+    if sig is None:
+        df = store.load_ticks(symbol, day)
+        return df[df["side"].isin(("BUY", "SELL"))] if not df.empty else df
+    with _TICKS_LOCK:
+        hit = _TICKS_CACHE.get((symbol, day))
+        if hit and hit[0] == sig:
+            return hit[1]
+        df = store.load_ticks(symbol, day)
+        if not df.empty:
+            df = df[df["side"].isin(("BUY", "SELL"))]
+        _TICKS_CACHE[(symbol, day)] = (sig, df)
+        return df
 
 
 def _scalp_indicator_snapshot(symbol: str, ctx: dict, spot: float,
