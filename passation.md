@@ -1,3 +1,28 @@
+# Passation — 2026-10-08 (conventions de calcul + architecture de charge)
+
+**État à l'écriture : tout commité/poussé sur `claude/sleepy-knuth-y3b4d2` (non fusionné dans `main`). Jamais testé sous charge réelle ni avec les flux CBOE/dxFeed (réseau bloqué dans l'environnement de développement) : déployer HORS séance.**
+
+## Architecture de charge (nouvelle)
+
+1. **Calcul unique, diffusion à tous** (`gex/broadcast.py`) : un seul producteur par flux SSE et par clé (symbole, langue, tf), et un cache partagé single-flight pour 10 callbacks Dash périodiques. Un onglet de plus ne coûte plus de calcul.
+2. **Moteur d'indicateurs linéaire** : `volume_bars` vectorisé (3,5 s -> 0,16 s sur 600 000 ticks), `scalp_orderflow_untested` sans boucle quadratique (7,6 s -> 0,15 s, résultats identiques), ticks du jour relus seulement quand le fichier change.
+3. **Processus moteur séparé** (`GEX_ENGINE=1`, `gex/livestate.py`) : `gex.capture` récupère et calcule AUSSI les chaînes et les indicateurs /scalp, publie dans `data/live/` ; le dashboard ne fait que lire.
+4. **Serveur ASGI par défaut** (`gex/asgi.py`, uvicorn) : flux SSE en asyncio (aucun thread par connexion), Dash/API via a2wsgi dans un pool de 32 threads.
+
+## Déploiement (Windows, hors séance)
+
+1. Arrêter les tâches « GEX dashboard » puis « GEX capture » (cibler les PID, PAS `Stop-Process -Name python,pythonw`).
+2. `git pull` sur la branche, puis dans le venv : `pip install -r requirements.txt` (ajoute uvicorn, starlette, a2wsgi).
+3. Définir `GEX_ENGINE=1` pour les DEUX tâches (variable d'environnement utilisateur, comme `GEX_CAPTURE_URL`).
+4. Démarrer « GEX capture » (devient le moteur ; attend jusqu'à 20 s le spot temps réel avant ses premiers pulls), vérifier `data/live/*.json` qui apparaissent, puis démarrer « GEX dashboard ».
+5. Contrôles : `logs/capture.log` montre « démarrage (mode MOTEUR) » et les pulls ; `logs/gex.log` du dashboard ne montre plus de pull.
+
+**Retour arrière, par étage :** `GEX_SERVER=waitress` (ancien serveur), retirer `GEX_ENGINE` (le dashboard recalcule lui-même comme avant). Les étages 1 et 2 n'ont pas d'interrupteur : ce sont des changements de code testés à résultat identique.
+
+## Conventions de calcul (même session)
+
+Voir README « Conventions de calcul ». Points à surveiller en séance : l'IV est désormais inversée du mid (comparer `iv` et `iv_feed`) ; les séries AM (SPX/NDX mensuels, NQ/ES trimestriels) disparaissent à 9h30 le jour de l'opex ; les recalculs NQ/ES utilisent le vrai multiplicateur (montants ÷5 / ÷2 par rapport à avant). Relancer le backfill pour régénérer les snapshots historiques.
+
 # Passation — 2026-10-06 nuit (suite de la séance du 05, mesure d'urgence /scalp)
 
 **État à l'écriture : `/scalp` en mode dégradé volontaire (bandeau seul, SSE) pour le reste de la semaine ; dashboard principal INCHANGÉ, fonctionnement normal.** Commité/poussé jusqu'à `205cd5c`.
