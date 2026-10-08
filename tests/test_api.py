@@ -287,20 +287,25 @@ def test_stream_route_refuse_les_symboles_hors_nq_es():
 
 
 def test_stream_route_emet_un_evenement_sse_par_changement(monkeypatch):
-    """Le flux SSE n'émet qu'au changement de prix, jamais à un rythme fixe :
-    trois valeurs successives dont un doublon -> deux événements seulement."""
-    from gex import api, capturebus
+    """Le flux SSE ne publie qu'au changement de prix, jamais à un rythme fixe :
+    trois valeurs successives dont un doublon -> deux publications seulement,
+    faites par UN producteur partagé (cf. gex/broadcast.py). Un abonné reçoit
+    le dernier prix publié."""
+    import time as _t
+    from gex import api, broadcast, capturebus
+    broadcast._channels.pop(("price", "NQ"), None)
     monkeypatch.setattr(capturebus, "remote_url", lambda: None)
     valeurs = iter([30500.0, 30500.0, 30500.25])
     monkeypatch.setattr(api, "_futures_last_price", lambda s: next(valeurs, 30500.25))
-    monkeypatch.setattr(api.time, "sleep", lambda s: None)   # la boucle ne doit pas dormir en test
 
     resp = _client().get("/api/v1/NQ/stream")
     assert resp.mimetype == "text/event-stream"
     gen = resp.response
-    first = next(gen)
-    second = next(gen)
-    assert first == b"data: 30500.0\n\n" and second == b"data: 30500.25\n\n"
+    assert next(gen) in (b"data: 30500.0\n\n", b"data: 30500.25\n\n")
+    _t.sleep(0.5)
+    ch = broadcast._channels[("price", "NQ")]
+    assert ch._version == 2 and ch._payload == "data: 30500.25\n\n"
+    gen.close()
 
 
 def test_levels_expose_statut_du_flip_et_book():

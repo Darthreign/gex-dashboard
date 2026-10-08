@@ -22,7 +22,7 @@ from dash import Dash, ctx, dcc, html, no_update
 from dash.dependencies import Input, Output, State
 from dash.exceptions import PreventUpdate
 
-from . import digest, metrics, scales, scalp, store
+from . import broadcast, digest, metrics, scales, scalp, store
 from .bars import swing_move, volume_bars, zigzag
 from .api import _futures_last_price, register_api
 from .tt_web import connection_status, register_oauth
@@ -4751,6 +4751,7 @@ def create_app() -> Dash:
         [Input("rt-tick", "n_intervals"), Input("symbol", "value"),
          Input("lang", "value"), Input("unit", "value")],
     )
+    @broadcast.shared(ttl=2.0, skip=(0,))
     def refresh_cards(_, symbol, lang, unit):
         """Tuiles au rythme du flux (5 s) et non des pulls (60 s).
 
@@ -4776,6 +4777,7 @@ def create_app() -> Dash:
          Input("lang", "value"), Input("unit", "value"),
          Input("gflow-series", "value"), Input("tape-series", "value")],
     )
+    @broadcast.shared(ttl=10.0, skip=(0,))
     def refresh(_, symbol, bucket, window, majors, flow_day, lang, unit, gflow_series,
                 tape_series):
         st = chain_state(symbol)
@@ -4866,6 +4868,7 @@ def create_app() -> Dash:
         [Input("tick", "n_intervals"), Input("tab", "value"), Input("symbol", "value"),
          Input("window", "value"), Input("lang", "value"), Input("unit", "value")],
     )
+    @broadcast.shared(ttl=10.0, skip=(0,))
     def refresh_profile(_, tab, symbol, window, lang, unit):
         if tab != "profile":   # onglet masqué : rien à recalculer
             raise PreventUpdate
@@ -4890,6 +4893,7 @@ def create_app() -> Dash:
          Input("bucket", "value"), Input("window", "value"),
          Input("lang", "value"), Input("unit", "value")],
     )
+    @broadcast.shared(ttl=10.0, skip=(0,))
     def refresh_greeks2(_, tab, symbol, bucket, window, lang, unit):
         if tab != "greeks2":
             raise PreventUpdate
@@ -4947,6 +4951,7 @@ def create_app() -> Dash:
          Input("heat-day", "value"), Input("heat-levels", "value")],
         State("heatmap", "relayoutData"),
     )
+    @broadcast.shared(ttl=2.0, skip=(0,))
     def refresh_heatmap(_, tab, symbol, window, lang, unit, day, levels_shown, relayout):
         # onglet masqué : ne pas relire une quarantaine de fichiers pour rien
         if tab != "heat":
@@ -4966,6 +4971,7 @@ def create_app() -> Dash:
         [Input("tick", "n_intervals"), Input("tab", "value"), Input("symbol", "value"),
          Input("window", "value"), Input("lang", "value"), Input("unit", "value")],
     )
+    @broadcast.shared(ttl=10.0, skip=(0,))
     def refresh_positioning(_, tab, symbol, window, lang, unit):
         if tab != "pos":
             raise PreventUpdate
@@ -4991,6 +4997,7 @@ def create_app() -> Dash:
          Input("symbol", "value"), Input("hedge-window", "value"),
          Input("lang", "value")],
     )
+    @broadcast.shared(ttl=1.0, skip=(0,))
     def refresh_hedge(_, tab, symbol, window, lang):
         if tab != "tape":
             raise PreventUpdate
@@ -5007,6 +5014,7 @@ def create_app() -> Dash:
          Input("scalp-banner-version", "data")],
         State("emergency-ready", "data"),
     )
+    @broadcast.shared(ttl=1.0, skip=(0,))
     def refresh_scalp(_, path, symbol, lang, window, min_size, banner_version, ready):
         if not is_scalp_path(path) or symbol not in ("NQ", "ES"):
             raise PreventUpdate
@@ -5100,6 +5108,7 @@ def create_app() -> Dash:
          Input("symbol", "value"), Input("tape-min-size", "value"),
          Input("tape-combos", "value"), Input("lang", "value")],
     )
+    @broadcast.shared(ttl=1.0, skip=(0,))
     def refresh_tape(_, tab, symbol, min_size, combos, lang):
         # ne se recalcule que lorsque l'onglet est ouvert : inutile de
         # reconstruire 60 lignes toutes les 2 s en arrière-plan
@@ -5113,6 +5122,7 @@ def create_app() -> Dash:
         [Input("symbol", "value"), Input("tick", "n_intervals")],
         State("flow-day", "value"),
     )
+    @broadcast.shared(ttl=10.0, skip=(1,))
     def update_flow_days(symbol, _, current):
         days = available_flow_days(symbol)
         opts = [{"label": d, "value": d} for d in days]
@@ -5223,80 +5233,35 @@ def create_app() -> Dash:
         lang = request.args.get("lang", "fr")
         swing = request.args.get("swing") == "1"
 
-        def gen():
-            last_sig = None
-            last_banner_sig = None
-            last_heartbeat = time.monotonic()
-            # Mesure d'urgence 2026-10-05 (tape-tick désactivé) : le bandeau
-            # (scalp_banner) est maintenant poussé PAR CE FLUX plutôt que
-            # recalculé à chaque cycle `tape-tick` côté Dash — seule partie
-            # du calcul qui doit vraiment rester "live" (1 Hz) pendant que le
-            # reste (hedge/ladder/tape/price) est figé. `.to_plotly_json()`
-            # sérialise le composant Dash tel quel : `set_props` côté client
-            # l'assigne directement à `children`, sans round-trip Dash.
-            # Bug corrigé (2026-10-05) : le yield était à l'intérieur du
-            # try/except ci-dessous — une erreur d'ÉCRITURE (client parti,
-            # connexion morte) était donc AVALÉE comme un simple échec de
-            # calcul, et la boucle continuait pour toujours. Le thread
-            # waitress qui sert cette connexion ne se libérait alors JAMAIS,
-            # même après la déconnexion réelle du client — cause probable des
-            # threads orphelins observés ce soir. Le calcul reste protégé
-            # (un cycle raté ne doit pas fermer le flux), mais le yield est
-            # maintenant HORS du try : une erreur d'écriture doit pouvoir
-            # arrêter le générateur et libérer le thread.
-            #
-            # Heartbeat toutes les ~15s si rien de neuf : même raison que
-            # _last_trade_stream (cf. gex/api.py) — force une écriture
-            # régulière pour détecter vite une connexion morte, et éviter que
-            # channel_timeout (waitress) coupe à tort une connexion vivante
-            # mais silencieuse (rien ne change sur l'indicateur).
-            while True:
-                payload = None
-                try:
-                    ctx = scalp_context(symbol)
-                    if ctx is not None:
-                        spot = _scalp_live_spot(symbol, ctx)
-                        snap = {}
-                        # Bloc confluence/gex_profile/order_flow/orderflow_profile
-                        # désactivé 2026-10-06 (mesure d'urgence) : ne sert qu'au
-                        # graphique /scalp v2, lui-même désactivé par défaut (cf.
-                        # clientside_callback chart-stream ci-dessus) — inutile de
-                        # le recalculer tant que rien ne le consomme. Remettre ce
-                        # bloc en place en même temps que le chart-stream.
-                        # if sig != last_sig: ...
-                        absorb = scalp_absorption(symbol)
-                        banner_sig = (round(spot, 2), json.dumps(absorb, sort_keys=True, default=str))
-                        if banner_sig != last_banner_sig:
-                            last_banner_sig = banner_sig
-                            # Bug corrigé (2026-10-06) : `.to_plotly_json()` ne
-                            # sérialise que le NIVEAU SUPÉRIEUR du composant —
-                            # ses enfants (sc-banner-main, sc-banner-side…)
-                            # restent des objets Dash (html.Div, html.Span…),
-                            # que `json.dumps` seul ne sait pas encoder
-                            # (TypeError "Object of type Div is not JSON
-                            # serializable", EN BOUCLE, chaque seconde — le
-                            # flux repartait toujours en erreur avant le
-                            # moindre yield, bandeau jamais mis à jour côté
-                            # client). `default=` ci-dessous rappelle
-                            # `to_plotly_json()` sur CHAQUE objet non
-                            # sérialisable rencontré, y compris imbriqué —
-                            # exactement ce que fait le sérialiseur interne
-                            # de Dash.
-                            snap["banner"] = scalp_banner(symbol, ctx, spot, lang, absorb, swing=swing)
-                        if snap:
-                            payload = f"data: {json.dumps(snap, default=lambda o: getattr(o, 'to_plotly_json', lambda: str(o))())}\n\n"
-                except Exception:  # noqa: BLE001 — un cycle de CALCUL raté ne doit jamais fermer le flux
-                    log.exception("Flux SSE indicateurs /scalp échoué (%s)", symbol)
-                now = time.monotonic()
-                if payload is not None:
-                    yield payload
-                    last_heartbeat = now
-                elif now - last_heartbeat >= 15.0:
-                    yield ": keepalive\n\n"
-                    last_heartbeat = now
-                time.sleep(1.0)
+        # Canal partagé par (symbole, langue, swing) — cf. gex/broadcast.py : le
+        # bandeau est calculé UNE fois par seconde pour tous les onglets
+        # abonnés, poussé seulement quand il change (signature spot +
+        # absorption), au lieu d'une boucle de calcul par connexion. Un cycle
+        # de calcul raté ne ferme jamais le flux (géré par le canal) ; une
+        # erreur d'écriture libère la connexion (générateur arrêté).
+        def factory():
+            last = {"banner_sig": None}
 
-        return Response(gen(), mimetype="text/event-stream",
+            def produce():
+                ctx = scalp_context(symbol)
+                if ctx is None:
+                    return None
+                spot = _scalp_live_spot(symbol, ctx)
+                absorb = scalp_absorption(symbol)
+                banner_sig = (round(spot, 2), json.dumps(absorb, sort_keys=True, default=str))
+                if banner_sig == last["banner_sig"]:
+                    return None
+                last["banner_sig"] = banner_sig
+                # `default=` rappelle to_plotly_json() sur chaque composant Dash
+                # imbriqué (le niveau supérieur seul ne suffit pas)
+                snap = {"banner": scalp_banner(symbol, ctx, spot, lang, absorb, swing=swing)}
+                return ("data: " + json.dumps(
+                    snap, default=lambda o: getattr(o, "to_plotly_json", lambda: str(o))())
+                    + "\n\n")
+            return produce
+
+        ch = broadcast.channel(("scalp-ind", symbol, lang, swing), factory, 1.0)
+        return Response(broadcast.sse_events(ch), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     # Graphique /scalp v2 (bougies + niveaux + indicateurs) — flux poussé,
@@ -5314,57 +5279,34 @@ def create_app() -> Dash:
             return Response("symbole non couvert (NQ/ES seulement)", status=404)
         tf = request.args.get("tf") or CHART_TF_DEFAULT
 
-        def gen():
-            last_sig = None
-            last_spot = None
-            last_full_check = 0.0
-            last_heartbeat = time.monotonic()
-            # scalp_v2_chart_data (bougies + zigzag + niveaux) est la plus
-            # chère des 3 fonctions poussées par SSE — contrairement au flux
-            # indicateurs ci-dessus (qui compare les horodatages des caches
-            # AVANT de recalculer), cette boucle appelait la fonction complète
-            # à CHAQUE itération, résultat jeté ensuite si inchangé (repéré
-            # en direct, 2026-10-05 ~16h40 ET, contention GIL généralisée —
-            # même les jobs planifiés sans rapport sautaient leur cycle).
-            # Pré-filtre bon marché : les bougies/niveaux ne peuvent pas
-            # changer sans que `spot` bouge — ne recalculer que si le spot a
-            # changé, ou au pire toutes les 5s (changement de minute, niveaux
-            # recalculés par le moteur planifié, etc., qui ne bougent pas
-            # forcément le spot).
-            while True:
-                payload = None
-                try:
-                    ctx = scalp_context(symbol)
-                    if ctx is not None:
-                        spot = _scalp_live_spot(symbol, ctx)
-                        now_mono = time.monotonic()
-                        if spot != last_spot or now_mono - last_full_check >= 5.0:
-                            last_spot = spot
-                            last_full_check = now_mono
-                            data = scalp_v2_chart_data(symbol, ctx, spot, tf=tf)
-                            candles = data.get("candles") or []
-                            markers = data.get("markers") or []
-                            # signature bon marché : nombre de bougies/marqueurs +
-                            # OHLC de la dernière bougie (la seule qui bouge entre
-                            # deux clôtures) — pas tout le payload à chaque cycle
-                            last = candles[-1] if candles else None
-                            sig = (len(candles), len(markers),
-                                  last and (last["time"], last["close"]))
-                            if sig != last_sig:
-                                last_sig = sig
-                                payload = f"data: {json.dumps(data)}\n\n"
-                except Exception:  # noqa: BLE001 — un cycle de CALCUL raté ne doit jamais fermer le flux
-                    log.exception("Flux SSE graphique /scalp échoué (%s, tf=%s)", symbol, tf)
-                now = time.monotonic()
-                if payload is not None:
-                    yield payload
-                    last_heartbeat = now
-                elif now - last_heartbeat >= 15.0:
-                    yield ": keepalive\n\n"
-                    last_heartbeat = now
-                time.sleep(1.0)
+        # Canal partagé par (symbole, tf). Pré-filtre conservé : les bougies et
+        # niveaux ne changent pas sans que le spot bouge, sinon revérification
+        # toutes les 5 s ; poussé seulement si la signature change.
+        def factory():
+            last = {"sig": None, "spot": None, "check": 0.0}
 
-        return Response(gen(), mimetype="text/event-stream",
+            def produce():
+                ctx = scalp_context(symbol)
+                if ctx is None:
+                    return None
+                spot = _scalp_live_spot(symbol, ctx)
+                now_mono = time.monotonic()
+                if spot == last["spot"] and now_mono - last["check"] < 5.0:
+                    return None
+                last["spot"], last["check"] = spot, now_mono
+                data = scalp_v2_chart_data(symbol, ctx, spot, tf=tf)
+                candles = data.get("candles") or []
+                markers = data.get("markers") or []
+                tail = candles[-1] if candles else None
+                sig = (len(candles), len(markers), tail and (tail["time"], tail["close"]))
+                if sig == last["sig"]:
+                    return None
+                last["sig"] = sig
+                return f"data: {json.dumps(data)}\n\n"
+            return produce
+
+        ch = broadcast.channel(("scalp-chart", symbol, tf), factory, 1.0)
+        return Response(broadcast.sse_events(ch), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     return app
