@@ -641,3 +641,17 @@ def test_sticky_moneyness_deplace_le_flip_avec_un_skew():
     df = metrics.enrich(make_chain(100.0, skew))
     a, b = metrics.zero_gamma_band(df, 100.0)
     assert a is not None and b is not None and abs(a - b) > 0.1
+
+
+def test_max_pain_minimise_la_valeur_versee():
+    exp = far_expiry()
+    snap = make_chain(100.0, [
+        {"expiry": exp, "type": "C", "strike": 95.0, "open_interest": 500.0},
+        {"expiry": exp, "type": "C", "strike": 100.0, "open_interest": 100.0},
+        {"expiry": exp, "type": "P", "strike": 105.0, "open_interest": 500.0},
+        {"expiry": exp, "type": "P", "strike": 100.0, "open_interest": 100.0},
+    ])
+    df = metrics.enrich(snap)
+    assert metrics.max_pain(df) == 100.0
+    res = metrics.compute_levels(df, 100.0, 100.0, bucket="Tout")
+    assert res["keys"]["max_pain"] == 100.0

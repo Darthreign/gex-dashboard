@@ -809,6 +809,28 @@ def key_levels(df: pd.DataFrame, spot: float,
     return out
 
 
+def max_pain(df: pd.DataFrame) -> float | None:
+    """Prix de règlement de l'échéance la plus proche qui minimise la valeur
+    totale versée aux détenteurs : Σ OI_call·(X−K)⁺ + Σ OI_put·(K−X)⁺.
+
+    ⚠ Heuristique faible : elle suppose que les vendeurs d'options pilotent
+    le règlement à leur avantage, ce qui n'est pas un modèle de couverture.
+    Utile comme repère d'aimantation le jour de l'échéance, sans plus.
+    """
+    if df.empty:
+        return None
+    e = df[df["expiry"] == df["expiry"].min()]
+    e = e[e["open_interest"] > 0]
+    if e.empty:
+        return None
+    k = e["strike"].to_numpy(dtype=float)
+    oi = e["open_interest"].to_numpy(dtype=float)
+    is_call = (e["type"] == "C").to_numpy()
+    x = np.unique(k)[:, None]
+    pay = np.where(is_call, np.maximum(x - k, 0.0), np.maximum(k - x, 0.0)) * oi
+    return float(x[np.argmin(pay.sum(axis=1)), 0])
+
+
 def compute_levels(chain: pd.DataFrame, structural_spot: float, live_spot: float,
                    bucket: str = "0DTE", today: date | None = None,
                    n: int = 5) -> dict:
@@ -828,9 +850,11 @@ def compute_levels(chain: pd.DataFrame, structural_spot: float, live_spot: float
     """
     today = today or datetime.now(ET).date()
     sub = select_bucket(chain, bucket, today)
+    keys = key_levels(sub, live_spot, ref_spot=structural_spot, all_expiries=True)
+    keys["max_pain"] = max_pain(sub)
     return {
         "levels": top_gex_levels(sub, n=n, ref_spot=structural_spot, all_expiries=True),
-        "keys": key_levels(sub, live_spot, ref_spot=structural_spot, all_expiries=True),
+        "keys": keys,
     }
 
 

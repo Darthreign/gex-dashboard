@@ -782,6 +782,7 @@ async def niveaux(ctx: commands.Context, symbole: str | None = None,
         f"Gamma Flip {flip} · HVL {_fmt(d.get('hvl'))}",
         f"Call Wall {_fmt(k.get('call_wall'))} · Put Support {_fmt(k.get('put_support'))}",
         f"1D min/max : {_fmt(k.get('d1_min'))} – {_fmt(k.get('d1_max'))}",
+        f"Max pain {_fmt(k.get('max_pain'))} (heuristique faible, repère d'échéance)",
         f"Murs GEX : {murs}",
     ]
     if d.get("scale_warning"):
