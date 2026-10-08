@@ -187,6 +187,8 @@ class Settings:
     # Grille de recherche du zero gamma autour du spot (fraction, pas).
     zg_range: float = 0.08
     zg_steps: int = 161
+    # Horizon (en séances) du bucket "Pondéré" : poids exp(-séances / τ).
+    weighted_tau_sessions: float = 5.0
     # Ne puller que pendant les heures de marché US (ET).
     market_hours_only: bool = True
     # Commit+push automatique du repo git data/ (historique+flux) après la

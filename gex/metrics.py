@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
 YEAR_SECONDS = 365.0 * 24 * 3600
 
-EXPIRY_BUCKETS = ["0DTE", "Semaine", "Mois", "Tout"]
+EXPIRY_BUCKETS = ["0DTE", "Semaine", "Mois", "Tout", "Pondéré"]
 
 
 # Racines réglées sur la cotation d'ouverture (SOQ) du jour d'échéance : leur
@@ -368,6 +368,34 @@ def bucket_mask(df: pd.DataFrame, bucket: str, today: date) -> pd.Series:
     if bucket == "Mois":
         return df["expiry"] <= today + timedelta(days=35)
     return pd.Series(True, index=df.index)
+
+
+def expiry_weights(df: pd.DataFrame) -> np.ndarray:
+    """Poids continu par échéance : exp(−séances restantes / τ).
+
+    Alternative aux paliers 0DTE/Semaine/Mois, qui comptent à égalité un
+    contrat à 1 jour et un à 6 jours. τ (SETTINGS.weighted_tau_sessions, 5 par
+    défaut) fixe l'horizon : à 1 séance un contrat pèse ~82 %, à 5 ~37 %, à
+    un mois ~1,5 %. Séances mesurées sur l'horloge de variance si disponible."""
+    if "t_var" in df:
+        sessions = df["t_var"].to_numpy(dtype=float) * TRADING_DAYS
+    else:
+        sessions = df["t_years"].to_numpy(dtype=float) * TRADING_DAYS
+    return np.exp(-sessions / SETTINGS.weighted_tau_sessions)
+
+
+def select_bucket(df: pd.DataFrame, bucket: str, today: date) -> pd.DataFrame:
+    """Périmètre d'échéances affiché. Pour "Pondéré", toutes les échéances
+    restent mais leur open interest et volume (les poids de tous les calculs
+    en aval : murs, profils, flip) sont multipliés par `expiry_weights`."""
+    if bucket != "Pondéré" or df.empty:
+        return df[bucket_mask(df, bucket, today)]
+    w = expiry_weights(df)
+    out = df.copy()
+    for col in ("open_interest", "volume", "gex", "dex"):
+        if col in out:
+            out[col] = out[col].to_numpy(dtype=float) * w
+    return out
 
 
 def exposure_by_strike(df: pd.DataFrame, col: str) -> pd.DataFrame:
@@ -754,7 +782,7 @@ def compute_levels(chain: pd.DataFrame, structural_spot: float, live_spot: float
     Renvoie {"levels": DataFrame GEX1-n, "keys": dict call_wall/put_support/1D}.
     """
     today = today or datetime.now(ET).date()
-    sub = chain[bucket_mask(chain, bucket, today)] if not chain.empty else chain
+    sub = select_bucket(chain, bucket, today)
     return {
         "levels": top_gex_levels(sub, n=n, ref_spot=structural_spot, all_expiries=True),
         "keys": key_levels(sub, live_spot, ref_spot=structural_spot, all_expiries=True),

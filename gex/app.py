@@ -75,7 +75,8 @@ FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif'
 LOCAL_TZ = datetime.now().astimezone().tzinfo
 
 BUCKET_KEYS = {"0DTE": "bucket_0DTE", "Semaine": "bucket_week",
-               "Mois": "bucket_month", "Tout": "bucket_all"}
+               "Mois": "bucket_month", "Tout": "bucket_all",
+               "Pondéré": "bucket_weighted"}
 
 TAB_STYLE = {"backgroundColor": "#0d0d0d", "color": "#898781",
              "border": "1px solid #2c2c2a", "padding": "8px 14px", "fontSize": "13px"}
@@ -2438,8 +2439,9 @@ def profile_by_expiry_fig(df: pd.DataFrame, spot: float, lang: str,
     today = datetime.now(ET).date()
     fig = go.Figure()
     drawn = 0
-    for i, bucket in enumerate(EXPIRY_BUCKETS):
-        sub = df[metrics.bucket_mask(df, bucket, today)]
+    # décomposition en paliers : la vue pondérée n'en est pas un
+    for i, bucket in enumerate(b for b in EXPIRY_BUCKETS if b != "Pondéré"):
+        sub = metrics.select_bucket(df, bucket, today)
         res = metrics.gamma_profile(sub, spot, range_pct=window, steps=201)
         if res is None:
             continue
@@ -2821,7 +2823,7 @@ def _figure_for(symbol: str, name: str, lang: str = "fr", bucket: str = "Tout",
         return None
     spot = snap.spot
     zg = metrics.zero_gamma(df, spot)
-    sel = df[metrics.bucket_mask(df, bucket, today_d)]
+    sel = metrics.select_bucket(df, bucket, today_d)
     b_lbl = t(lang, BUCKET_KEYS[bucket])
     # Mêmes murs que le dashboard : structural = clôture veille (magnitude),
     # live = spot courant en séance (côté), périmètre = bucket affiché.
@@ -4770,7 +4772,7 @@ def create_app() -> Dash:
                 "", t(lang, "tv_copy_title", scale=unit),
             )
         today = datetime.now(ET).date()
-        sel = df[metrics.bucket_mask(df, bucket, today)]
+        sel = metrics.select_bucket(df, bucket, today)
         zg = summary.zero_gamma if summary else None
 
         # uirevision : tant que la révision ne change pas, Plotly conserve le
@@ -4871,7 +4873,7 @@ def create_app() -> Dash:
             return e, e, [], t(lang, "vex_hint")
         xf, _, _ = _transform_for(symbol, unit)
         today = datetime.now(ET).date()
-        sel = metrics.add_second_order(df[metrics.bucket_mask(df, bucket, today)], snap.spot)
+        sel = metrics.add_second_order(metrics.select_bucket(df, bucket, today), snap.spot)
         cards = [
             card(t(lang, "vex_card"), f"{sel['vex'].sum() / 1e9:+.2f} $Bn",
                  t(lang, "vex_title").split("(")[-1].rstrip(")")),

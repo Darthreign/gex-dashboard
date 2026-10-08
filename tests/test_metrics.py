@@ -604,3 +604,21 @@ def test_futures_basis_aberrant_renvoie_none_sans_lever():
                  {"expiry": exp, "type": "P", "strike": float(k), "bid": 1.0, "ask": 1.2}]
     df = metrics.enrich(make_chain(100.0, rows))
     assert metrics.futures_basis(df, 100.0) is None
+
+
+def test_bucket_pondere_decroit_avec_l_echeance():
+    now = datetime.now(ET)
+    proche = (now + timedelta(days=1)).date()
+    loin = (now + timedelta(days=40)).date()
+    snap = make_chain(100.0, [
+        {"expiry": proche, "type": "C", "strike": 101.0},
+        {"expiry": loin, "type": "C", "strike": 101.0},
+    ])
+    df = metrics.enrich(snap)
+    w = metrics.select_bucket(df, "Pondéré", now.date())
+    assert len(w) == 2   # toutes les échéances restent
+    ratio = (w["open_interest"] / df["open_interest"]).to_numpy()
+    assert ratio[0] > 0.5 and ratio[1] < 0.05
+    assert w["gex"].to_numpy() == pytest.approx(df["gex"].to_numpy() * ratio)
+    res = metrics.compute_levels(df, 100.0, 100.0, bucket="Pondéré", today=now.date())
+    assert not res["levels"].empty

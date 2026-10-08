@@ -348,7 +348,7 @@ def register_api(app) -> None:
             return jsonify({"error": "indisponible (pas encore de premier pull)"}), 404
         if bucket in EXPIRY_BUCKETS:
             today = datetime.now(ET).date()
-            df = df[metrics.bucket_mask(df, bucket, today)]
+            df = metrics.select_bucket(df, bucket, today)
         cols = ["strike", "type", "expiry", "open_interest", "gex", "dex"]
         rows = df[cols].copy()
         rows["expiry"] = rows["expiry"].astype(str)
