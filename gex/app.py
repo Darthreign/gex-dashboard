@@ -2768,6 +2768,9 @@ def build_cards(symbol: str, lang: str, xf=None, scale: str | None = None) -> li
 
     zg_txt = f"{xf(s.zero_gamma):.0f}" if s.zero_gamma else "n/a"
     zg_sub = ""
+    if s.zero_gamma is None and df is not None and \
+            metrics.zero_gamma_info(df, s.spot)["status"] == "no_flip":
+        zg_sub = t(lang, "card_zg_none")
     if s.zero_gamma:
         d = spot - s.zero_gamma  # écart natif, non transposé
         zg_sub = t(lang, "card_zg_sub", sign="+" if d >= 0 else "",
