@@ -293,6 +293,7 @@ def register_api(app) -> None:
         res = metrics.compute_levels(df, structural, live, bucket=bucket)
         levels, keys = res["levels"], res["keys"]
         hvl = metrics.zero_gamma(df, s.spot, weight_col="volume")
+        zg_info = metrics.zero_gamma_info(df, s.spot)
 
         # Transposition d'échelle optionnelle : ?scale=NQ exprime les niveaux
         # NDX en prix NQ (cf. app._transform_for / le sélecteur d'unité). Utile
@@ -311,6 +312,10 @@ def register_api(app) -> None:
             "scale": (scale.upper() if scale else symbol),
             "spot": _t(s.spot),
             "zero_gamma": _t(s.zero_gamma),
+            # "ok" | "no_flip" (régime franc jusqu'à ±25 %) | "no_data"
+            "zero_gamma_status": zg_info["status"],
+            # $ de GEX net par point d'indice au flip (non transposé)
+            "zero_gamma_slope": zg_info["slope"],
             "hvl": _t(hvl),
             "key_levels": {k: _t(v) for k, v in keys.items()},
             "gex_walls": [

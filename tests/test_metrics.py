@@ -561,3 +561,44 @@ def test_settle_am_explicite_prime_sur_la_racine():
     df = pd.DataFrame({"root": ["SPX", "SPXW"], "settle_am": [False, True]})
     assert list(metrics.am_settled(df)) == [False, True]
     assert list(metrics.am_settled(pd.DataFrame({"underlying_symbol": ["NDX", "NDXP"]}))) == [True, False]
+
+
+def test_zero_gamma_info_statut_et_pente():
+    exp = far_expiry()
+    snap = make_chain(100.0, [
+        {"expiry": exp, "type": "C", "strike": 93.0, "open_interest": 100.0},
+        {"expiry": exp, "type": "P", "strike": 107.0, "open_interest": 100.0},
+    ])
+    info = metrics.zero_gamma_info(metrics.enrich(snap), 100.0)
+    assert info["status"] == "ok"
+    assert info["level"] == pytest.approx(metrics.zero_gamma(metrics.enrich(snap), 100.0))
+    assert info["slope"] < 0   # GEX positif sous le flip, négatif au-dessus
+
+    seul = make_chain(100.0, [{"expiry": exp, "type": "C", "strike": 100.0}])
+    assert metrics.zero_gamma_info(metrics.enrich(seul), 100.0)["status"] == "no_flip"
+    vide = metrics.enrich(make_chain(100.0, [{"expiry": exp, "type": "C", "strike": 100.0,
+                                              "open_interest": 0.0}]))
+    assert metrics.zero_gamma_info(vide, 100.0)["status"] == "no_data"
+
+
+def test_zero_gamma_elargit_la_fenetre_si_le_flip_est_loin():
+    """Flip vers ~112 : hors de ±8 %, retrouvé dans la fenêtre élargie."""
+    exp = far_expiry()
+    snap = make_chain(100.0, [
+        {"expiry": exp, "type": "C", "strike": 104.0, "open_interest": 100.0},
+        {"expiry": exp, "type": "P", "strike": 120.0, "open_interest": 100.0},
+    ])
+    df = metrics.enrich(snap)
+    info = metrics.zero_gamma_info(df, 100.0)
+    assert info["status"] == "ok" and info["range"] > 0.08
+    assert info["level"] > 108.0
+
+
+def test_futures_basis_aberrant_renvoie_none_sans_lever():
+    exp = metrics.front_futures_expiry(datetime.now(ET).date())
+    rows = []
+    for k in np.arange(97.0, 103.5, 0.5):
+        rows += [{"expiry": exp, "type": "C", "strike": float(k), "bid": 20.0, "ask": 20.2},
+                 {"expiry": exp, "type": "P", "strike": float(k), "bid": 1.0, "ask": 1.2}]
+    df = metrics.enrich(make_chain(100.0, rows))
+    assert metrics.futures_basis(df, 100.0) is None

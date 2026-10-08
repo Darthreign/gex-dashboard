@@ -8,6 +8,7 @@ Convention GEX (SpotGamma "naive") :
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, date, time, timedelta
 from zoneinfo import ZoneInfo
@@ -18,6 +19,8 @@ import pandas as pd
 from . import greeks, rates
 from .config import CONTRACT_MULTIPLIER, SETTINGS
 from .ingest import ChainSnapshot
+
+log = logging.getLogger(__name__)
 
 ET = ZoneInfo("America/New_York")
 YEAR_SECONDS = 365.0 * 24 * 3600
@@ -277,19 +280,58 @@ def zero_gamma(df: pd.DataFrame, spot: float, weight_col: str = "open_interest")
     weight_col="open_interest" : le flip structurel (zero gamma classique).
     weight_col="volume"        : le HVL façon volatility trigger — bascule du
     profil pondéré par ce qui se traite (et donc se hedge) aujourd'hui.
+
+    Détail du résultat (statut, pente, fenêtre) : `zero_gamma_info`.
     """
-    res = gamma_profile(df, spot, weight_col)
-    if res is None:
-        return None
-    grid, profile = res
+    return zero_gamma_info(df, spot, weight_col)["level"]
+
+
+# Fenêtres successives de recherche du flip : la première est celle du
+# réglage (±8 % par défaut) ; un marché qui a dérivé loin de son flip le
+# retrouve dans les suivantes au lieu de renvoyer « rien » sans explication.
+ZG_FALLBACK_RANGES = (0.15, 0.25)
+
+
+def _nearest_crossing(grid: np.ndarray, profile: np.ndarray,
+                      spot: float) -> tuple[float, float] | None:
+    """(niveau interpolé, pente $/pt) du passage par zéro le plus proche du spot."""
     crossings = np.where(np.diff(np.sign(profile)) != 0)[0]
     if len(crossings) == 0:
         return None
-    # passage par zéro le plus proche du spot
     idx = crossings[np.argmin(np.abs(grid[crossings] - spot))]
     x0, x1 = grid[idx], grid[idx + 1]
     y0, y1 = profile[idx], profile[idx + 1]
-    return float(x0 - y0 * (x1 - x0) / (y1 - y0))
+    return float(x0 - y0 * (x1 - x0) / (y1 - y0)), float((y1 - y0) / (x1 - x0))
+
+
+def zero_gamma_info(df: pd.DataFrame, spot: float,
+                    weight_col: str = "open_interest") -> dict:
+    """Zero gamma avec son contexte :
+
+    - `status` : "ok", "no_flip" (profil d'un seul signe jusqu'à ±25 % — le
+      régime est franc, ce n'est pas une panne) ou "no_data" (aucun contrat
+      exploitable) ;
+    - `slope`  : pente du GEX net au flip, en $ par point. Une pente faible
+      veut dire un flip mal défini, qu'un petit changement d'OI déplace loin ;
+    - `range`  : demi-largeur de la fenêtre (fraction du spot) où il a été trouvé.
+    """
+    out = {"level": None, "status": "no_data", "slope": None, "range": None}
+    base = SETTINGS.zg_range
+    for rng in (base, *[r for r in ZG_FALLBACK_RANGES if r > base]):
+        # pas de grille constant quelle que soit la fenêtre
+        steps = max(SETTINGS.zg_steps, int(round(SETTINGS.zg_steps * rng / base)))
+        res = gamma_profile(df, spot, weight_col, range_pct=rng, steps=steps)
+        if res is None:
+            return out
+        out["status"], out["range"] = "no_flip", rng
+        hit = _nearest_crossing(*res, spot)
+        if hit is not None:
+            out["level"], out["slope"] = hit
+            out["status"] = "ok"
+            return out
+    log.info("Zero gamma (%s) : aucun flip à ±%.0f %% du spot %.2f",
+             weight_col, out["range"] * 100, spot)
+    return out
 
 
 def vanna_profile(df: pd.DataFrame, spot: float, weight_col: str = "open_interest",
@@ -327,14 +369,8 @@ def zero_vanna(df: pd.DataFrame, spot: float, weight_col: str = "open_interest")
     res = vanna_profile(df, spot, weight_col)
     if res is None:
         return None
-    grid, profile = res
-    crossings = np.where(np.diff(np.sign(profile)) != 0)[0]
-    if len(crossings) == 0:
-        return None
-    idx = crossings[np.argmin(np.abs(grid[crossings] - spot))]
-    x0, x1 = grid[idx], grid[idx + 1]
-    y0, y1 = profile[idx], profile[idx + 1]
-    return float(x0 - y0 * (x1 - x0) / (y1 - y0))
+    hit = _nearest_crossing(*res, spot)
+    return None if hit is None else hit[0]
 
 
 def third_friday(year: int, month: int) -> date:
