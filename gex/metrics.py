@@ -141,6 +141,9 @@ def quote_price(df: pd.DataFrame) -> np.ndarray:
     return mid
 
 
+MAX_DIV_YIELD = 0.02   # rendement de dividende annuel toléré au-delà du portage
+
+
 def implied_forwards(df: pd.DataFrame, spot: float, r: float,
                      window: float = 0.05, min_pairs: int = 3,
                      max_basis: float = 0.03) -> dict:
@@ -150,8 +153,9 @@ def implied_forwards(df: pd.DataFrame, spot: float, r: float,
     Le forward contient tout ce que le marché price entre spot et échéance :
     dividendes (SPX, SPY, QQQ), portage, ou l'écart au future de livraison
     (options sur future). Une échéance sans assez de paires cotées, ou dont
-    le forward s'écarte de plus de `max_basis` du spot (quotes aberrantes),
-    est laissée de côté plutôt que devinée.
+    le forward s'écarte à la fois du spot (`max_basis`) et du forward de
+    portage S·e^(rT) (tolérance élargie avec l'échéance) — quotes aberrantes
+    ou spot figé —, est laissée de côté plutôt que devinée.
     """
     if df.empty:
         return {}
@@ -173,8 +177,17 @@ def implied_forwards(df: pd.DataFrame, spot: float, r: float,
         k = np.asarray(common, dtype=float)
         f = float(np.median(k + np.exp(r * t) * (calls.loc[common, "_px"].to_numpy()
                                                   - puts.loc[common, "_px"].to_numpy())))
-        if abs(f / spot - 1) > max_basis:
-            log.warning("Forward %s aberrant ignoré : %.2f pour spot %.2f", exp, f, spot)
+        # Référence = le spot (options sur future) OU le forward de portage
+        # S·e^(rT) (indices, ETF, actions) : sur 1 à 4 ans, le portage écarte
+        # légitimement le forward du spot de 5 à 20 %. La tolérance s'élargit
+        # avec l'échéance (dividendes jusqu'à ~2 %/an) ; un écart à court
+        # terme reste suspect (spot figé ou quotes aberrantes).
+        t_med = float(np.median(t))
+        carry_fwd = spot * np.exp(r * t_med)
+        if (abs(f / spot - 1) > max_basis
+                and abs(f / carry_fwd - 1) > max_basis + MAX_DIV_YIELD * t_med):
+            log.warning("Forward %s aberrant ignoré : %.2f pour spot %.2f (portage %.2f)",
+                        exp, f, spot, carry_fwd)
             continue
         out[exp] = f
     return out

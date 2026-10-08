@@ -66,3 +66,19 @@ def test_fourchette_trop_large_ignoree():
     cal = metrics.calibrate_chain(df, 100.0, R)
     otm_loin = cal[(cal["strike"] == 90.0) & (cal["type"] == "P")]
     assert otm_loin["iv_source"].iloc[0] == "feed"
+
+
+def test_forward_lointain_accepte_grace_au_portage():
+    """LEAPS à 3 ans : F = S·e^((r−q)T) ≈ +9 % du spot, légitime (portage),
+    ne doit plus être rejeté comme « aberrant »."""
+    spot, q, t = 100.0, 0.01, 3.0
+    df = _chain(spot, q, t)
+    fwd = metrics.implied_forwards(df, spot, R)
+    assert fwd[date(2026, 11, 20)] == pytest.approx(spot * np.exp((R - q) * t), rel=0.005)
+
+
+def test_forward_court_terme_incoherent_rejete():
+    """Échéance à 30 jours dont le forward s'écarte de 7 % du spot : spot figé
+    ou quotes aberrantes, l'échéance est laissée de côté."""
+    df = _chain(spot=100.0, q=0.0, t=30 / 365)
+    assert metrics.implied_forwards(df, 93.0, R, window=0.12) == {}

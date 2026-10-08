@@ -75,6 +75,10 @@ Les mesures d'urgence des 05-06/10 sont levées et la page scalp n'a plus AUCUN 
 - Moteur d'indicateurs repassé de 60 s à 20 s (`SCALP_INDICATORS_EVERY_S`) : 2,6 s à froid pour NQ + ES à 600 000 ticks chacun.
 - **Si ça sature en séance** : `STATS`/logs d'abord ; chaque flux est un canal par réglages, son coût ne dépend pas du nombre d'onglets. Repli serveur : `GEX_SERVER=waitress` (les routes Flask des flux existent aussi).
 
+## Forwards des échéances lointaines (même session, vu dans capture.log du 08/10)
+
+`metrics.implied_forwards` rejetait comme « aberrant » tout forward à plus de 3 % du spot, donc toutes les LEAPS (portage légitime de +5 à +20 % sur 1-4 ans) : ces échéances retombaient sur un forward = spot, IV faussée. La référence est désormais aussi le forward de portage S·e^(rT), tolérance 3 % + 2 %/an. Un écart à court terme reste rejeté et signalé : au 08/10, TMUS (spot 159,42 contre un forward de ~171 sur toutes les échéances) indique un spot figé ou faux pour ce titre.
+
 ## Encours des ETF à levier automatiques (même session)
 
 - `gex/letf_aum.py` récupère chaque soir de semaine (18h10 ET, scheduler d'ingestion) l'encours de chaque ETF à levier. Il passe par Yahoo Finance (`yfinance` si installé, sinon accès direct), puis par la page ProShares, et écrit `data/moc_letf.json`. Il tourne aussi au démarrage si les valeurs ont plus de 7 jours.
