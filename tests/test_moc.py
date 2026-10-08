@@ -147,3 +147,14 @@ def test_at_the_strike_intrinsic_is_half():
     b = _chain([(100.0, "C", TODAY, 1), (100.0, "P", TODAY, 1)])
     _, d_close, _ = moc.close_deltas(b, 100.0, NOW)
     assert list(d_close) == [0.5, -0.5]
+
+
+def test_series_reglees_le_matin_retirees_l_apres_midi():
+    from datetime import date as _date
+    from gex.moc import live_contracts
+    df = pd.DataFrame({"expiry": [_date(2026, 9, 18)] * 3 + [_date(2026, 9, 17)],
+                       "root": ["SPX", "SPXW", "SPX", "SPXW"], "strike": [1.0] * 4})
+    soir = datetime(2026, 9, 18, 15, 45, tzinfo=ET)
+    assert list(live_contracts(df, soir)["root"]) == ["SPXW"]           # PM du jour seul
+    matin = datetime(2026, 9, 18, 9, 0, tzinfo=ET)
+    assert len(live_contracts(df, matin)) == 3                           # AM pas encore réglé

@@ -76,10 +76,19 @@ def flow_until(symbol: str, day: str, until: datetime) -> pd.Series:
     return positioning.taker_flow(p[p["ts"] < until.timestamp()])
 
 
-def _price_at(ticks: pd.DataFrame, when: datetime) -> float | None:
-    """Dernier prix échangé avant `when`."""
+PRICE_MAX_AGE_S = 120
+
+
+def _price_at(ticks: pd.DataFrame, when: datetime,
+              max_age_s: float = PRICE_MAX_AGE_S) -> float | None:
+    """Dernier prix échangé avant `when`, s'il date de moins de `max_age_s`.
+    Sans cette borne, un jour sans ticks en fin de séance (jour férié comme le
+    Labor Day, trou de capture) donnait un prix figé et un « mouvement » de 0
+    compté comme une vraie séance (07, 08 et 18/09/2026)."""
     before = ticks[ticks["ts"] < when.timestamp()]
-    return float(before["price"].iloc[-1]) if not before.empty else None
+    if before.empty or when.timestamp() - float(before["ts"].iloc[-1]) > max_age_s:
+        return None
+    return float(before["price"].iloc[-1])
 
 
 def _ticks(symbol: str, day: str) -> pd.DataFrame:

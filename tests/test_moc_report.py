@@ -26,7 +26,7 @@ def _chain(day: str, spot: float, strike: float) -> pd.DataFrame:
 
 def _ticks(day: str, p50: float, p00: float) -> pd.DataFrame:
     d0 = datetime.fromisoformat(day).replace(tzinfo=ET)
-    ts = [d0.replace(hour=15, minute=40).timestamp(), d0.replace(hour=15, minute=49).timestamp(),
+    ts = [d0.replace(hour=15, minute=44).timestamp(), d0.replace(hour=15, minute=49).timestamp(),
           d0.replace(hour=15, minute=59, second=59).timestamp(),
           d0.replace(hour=16, minute=5).timestamp()]
     return pd.DataFrame({"ts": ts, "price": [p50, p50, p00, p00 + 50], "volume": 1.0,
@@ -91,3 +91,12 @@ def test_report_writes_history_and_finds_the_planted_relation(donnees):
 def test_too_few_sessions(donnees):
     r = moc_report.report("NQ", max_days=3)
     assert "error" in r
+
+
+def test_prix_fige_exclu():
+    from gex.moc_report import _price_at
+    d = datetime(2026, 9, 7, tzinfo=ET)
+    ticks = pd.DataFrame({"ts": [d.replace(hour=13).timestamp()], "price": [100.0]})
+    assert _price_at(ticks, d.replace(hour=15, minute=50)) is None      # 2 h50 sans tick
+    ticks = pd.DataFrame({"ts": [d.replace(hour=15, minute=49).timestamp()], "price": [101.0]})
+    assert _price_at(ticks, d.replace(hour=15, minute=50)) == 101.0

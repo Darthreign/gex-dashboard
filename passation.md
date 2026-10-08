@@ -99,6 +99,11 @@ Règle demandée : **OPRA = données live, CBOE = toutes les minutes** (CBOE est
 - Pas branchés (restent sur la salve) : l'API `/api/v1/...`, le digest et le bot Discord.
 - Vérifié dans Chromium sur une chaîne NQ synthétique au spot mouvant : 12 mises à jour GEX/DEX en ~18 s, tuiles au spot live, aucune erreur. **À vérifier en séance réelle** : charge CPU du dashboard avec plusieurs symboles ouverts.
 
+## Rapport MOC : deux corrections après les premiers résultats (08/10)
+
+- Séances à prix figé (aucun tick dans les 2 min avant 15h45/15h50/16h00 : Labor Day 07/09, trous de capture 08/09 et 18/09) : exclues au lieu d'être comptées « mouvement 0 » (`moc_report._price_at`).
+- Échéances réglées à l'ouverture (mensuels SPX/NDX, trimestriels ES/NQ) : retirées du book l'après-midi de leur échéance (`moc.live_contracts`). Avant, les snapshots CBOE (sans colonne `settle_am`) les comptaient comme expirant à la clôture : −4 millions de contrats ES le 18/09. Relancer `python scripts/moc_report.py` pour régénérer l'historique.
+
 ## « pts depuis l'open » pendant la séance ETH (même session)
 
 Sur /scalp, l'écart était toujours mesuré depuis l'ouverture RTH 9h30 du jour calendaire : après la réouverture Globex (18h00 New York), il comparait au 9h30 de la veille. Désormais (`scalp.session_start`) : ouverture RTH de 9h30 à 18h00, puis ouverture ETH de 18h00 jusqu'au lendemain 9h30 (dimanche 18h00 pour le lundi matin), pour NQ et ES.

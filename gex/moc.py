@@ -44,6 +44,7 @@ import pandas as pd
 from . import greeks, rates
 from .config import SETTINGS
 from .metrics import ET, YEAR_SECONDS, carry, multiplier, variance_time_years
+from .metrics import am_settled as metrics_am_settled
 
 log = logging.getLogger(__name__)
 
@@ -93,6 +94,21 @@ def letf_rebalance(day_return: float | None, cfg: dict[str, tuple[float, float]]
     return {"total": float(sum(by.values())), "by_etf": by}
 
 
+def live_contracts(df: pd.DataFrame, now_et: datetime) -> pd.DataFrame:
+    """Contrats encore vivants à `now_et` : sans les échéances passées ni
+    celles réglées à l'ouverture du jour (mensuels SPX/NDX, trimestriels
+    ES/NQ). Sans ce filtre, un snapshot de l'après-midi d'un 3e vendredi
+    comptait ces séries comme expirant à la clôture : le 18/09/2026 (quatre
+    sorcières), −4 millions de contrats ES estimés."""
+    if df is None or df.empty or "expiry" not in df:
+        return df
+    exp = pd.to_datetime(df["expiry"]).dt.date.to_numpy()
+    today = now_et.date()
+    settled = (exp < today) | ((exp == today) & metrics_am_settled(df)
+                                & (now_et.time() >= time(9, 30)))
+    return df[~settled] if settled.any() else df
+
+
 def _close_dt(now_et: datetime) -> datetime:
     return datetime.combine(now_et.date(), CLOSE, ET)
 
@@ -126,9 +142,7 @@ def close_deltas(df: pd.DataFrame, spot: float,
     r = rates.current_rate()
     t = df["t_years"].to_numpy(dtype=float)
     exp_day = pd.to_datetime(df["expiry"]).dt.date.to_numpy() == now_et.date()
-    am = df["settle_am"].fillna(False).astype(bool).to_numpy() if "settle_am" in df \
-        else np.zeros(n, dtype=bool)
-    expiring = exp_day & ~am
+    expiring = exp_day & ~metrics_am_settled(df)
 
     # ½ pile sur le strike : l'issue y est indécise, et 0 créerait un saut
     # artificiel dans le profil (calls ET puts à zéro au même point)
@@ -219,7 +233,8 @@ def estimate(symbol: str, chains: list[ChainInput], flows: dict[str, pd.Series],
     for c in chains:
         if c.df is None or c.df.empty or not c.spot:
             continue
-        book = positioning.dealer_book(c.df, flows.get(c.symbol, pd.Series(dtype=float)), c.spot)
+        book = positioning.dealer_book(live_contracts(c.df, now_et),
+                                       flows.get(c.symbol, pd.Series(dtype=float)), c.spot)
         cash = c.symbol in CASH_SETTLED
         parts[c.symbol] = hedge_flow(book, c.spot, now_et, cash)
         if with_profile:
