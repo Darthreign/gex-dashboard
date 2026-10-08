@@ -159,7 +159,7 @@ TR: dict[str, dict[str, str]] = {
         "slope_card": "Pente au spot",
         "slope_unit": "$Bn par 1% de move",
         "vex_title": "Vanna Exposure par strike ($M par point de vol)",
-        "cex_title": "Charm Exposure par strike ($M de delta par jour)",
+        "cex_title": "Charm Exposure par strike ($M de delta par séance)",
         "vex_card": "Vanna Exposure nette",
         "cex_card": "Charm Exposure nette",
         "vex_hint": "Vanna : re-hedging quand l'IV bouge d'un point. "
@@ -401,7 +401,7 @@ TR: dict[str, dict[str, str]] = {
         "slope_card": "Slope at spot",
         "slope_unit": "$Bn per 1% move",
         "vex_title": "Vanna Exposure by strike ($M per vol point)",
-        "cex_title": "Charm Exposure by strike ($M of delta per day)",
+        "cex_title": "Charm Exposure by strike ($M of delta per session)",
         "vex_card": "Net Vanna Exposure",
         "cex_card": "Net Charm Exposure",
         "vex_hint": "Vanna: re-hedging when IV moves one point. "

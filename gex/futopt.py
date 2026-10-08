@@ -38,7 +38,8 @@ import requests
 
 from . import greeks, store
 from . import rates
-from .metrics import ET, YEAR_SECONDS, am_settled, calibrate_chain, seconds_to_expiry
+from .metrics import (ET, YEAR_SECONDS, am_settled, calibrate_chain, seconds_to_expiry,
+                      t_var_years)
 from .rtquote import QUOTES, decode_compact_feed_data, feed_setup_message, quote_token
 
 log = logging.getLogger(__name__)
@@ -418,6 +419,7 @@ def enrich_native(chain: pd.DataFrame, raw: dict[str, dict], spot: float,
     secs = secs[secs > 0]
     t = np.maximum(secs, 300.0) / YEAR_SECONDS
     df["t_years"] = t
+    df["t_var"] = t_var_years(now_et, df["expiry"], am_settled(df))
     r = rates.current_rate()
     # Forward par parité et IV inversée du mid, comme metrics.enrich. Pour une
     # option sur future, le forward est le future de livraison : q ≈ r, soit

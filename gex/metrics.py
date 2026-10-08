@@ -52,7 +52,8 @@ def expiry_datetimes(expiries: pd.Series, am: np.ndarray | None = None) -> pd.Se
     base = pd.to_datetime(pd.Series(expiries).reset_index(drop=True)).dt.tz_localize(ET)
     if am is None:
         return base + PM_SETTLE
-    return base + pd.Series(np.where(am, AM_SETTLE, PM_SETTLE))
+    minutes = np.where(am, AM_SETTLE.total_seconds(), PM_SETTLE.total_seconds()) / 60
+    return base + pd.to_timedelta(pd.Series(minutes), unit="min")
 
 
 def seconds_to_expiry(expiries: pd.Series, now_et: datetime,
@@ -63,6 +64,68 @@ def seconds_to_expiry(expiries: pd.Series, now_et: datetime,
     l'ouverture le jour de l'opex) — à exclure.
     """
     return (expiry_datetimes(expiries, am) - now_et).dt.total_seconds().to_numpy()
+
+
+# Horloge de variance : la variance ne s'écoule pas au rythme du calendrier.
+# Une journée de bourse (16:00 → 16:00) vaut 1 unité : la séance en porte
+# RTH_SHARE, en U (ouverture et clôture plus actives), la nuit le reste ;
+# un jour de week-end vaut WEEKEND_FACTOR d'une heure de nuit. 252 unités par
+# an. Jours fériés non modélisés (traités comme des jours ouvrés).
+TRADING_DAYS = 252
+RTH_SHARE = 0.80
+WEEKEND_FACTOR = 0.25
+U_SHAPE = 1.0
+VAR_CLOCK_HORIZON_DAYS = 60
+_RTH_OPEN_MIN, _RTH_LEN_MIN = 9 * 60 + 30, 390
+_OVN_RATE = (1 - RTH_SHARE) / ((24 * 60) - _RTH_LEN_MIN)
+_RTH_BASE = RTH_SHARE / (_RTH_LEN_MIN * (1 + U_SHAPE / 3))
+
+
+def _variance_per_minute(start: pd.Timestamp, n: int) -> np.ndarray:
+    m = start + pd.to_timedelta(np.arange(n), unit="min")
+    mins = (m.hour * 60 + m.minute).to_numpy()
+    weekday = (m.weekday < 5)
+    x = (mins - _RTH_OPEN_MIN) / _RTH_LEN_MIN
+    rth = weekday & (x >= 0) & (x < 1)
+    return np.where(rth, _RTH_BASE * (1 + U_SHAPE * (2 * x - 1) ** 2),
+                    np.where(weekday, _OVN_RATE, _OVN_RATE * WEEKEND_FACTOR))
+
+
+def variance_time_years(now_et: datetime, settle: pd.Series) -> np.ndarray:
+    """Temps restant mesuré en variance (années de 252 séances), pas en
+    calendrier : la dernière heure de séance pèse bien plus qu'une nuit ou
+    qu'un week-end. Au-delà de VAR_CLOCK_HORIZON_DAYS, le reliquat est
+    converti au prorata 252/365."""
+    if len(settle) == 0:
+        return np.zeros(0)
+    secs = (settle - now_et).dt.total_seconds().to_numpy()
+    horizon = VAR_CLOCK_HORIZON_DAYS * 86400.0
+    n = int(np.ceil(min(max(secs.max(initial=0.0), 0.0), horizon) / 60.0)) + 1
+    cum = np.concatenate([[0.0], np.cumsum(_variance_per_minute(pd.Timestamp(now_et), n))])
+    units = np.interp(np.clip(secs, 0.0, horizon) / 60.0, np.arange(n + 1), cum)
+    units += np.maximum(secs - horizon, 0.0) / 86400.0 * TRADING_DAYS / 365.0
+    return units / TRADING_DAYS
+
+
+def t_var_years(now_et: datetime, expiries: pd.Series, am: np.ndarray | None) -> np.ndarray:
+    """`variance_time_years` jusqu'au règlement, plancher de 5 min de séance
+    (même rôle que le plancher calendaire de 300 s sur t_years)."""
+    tv = variance_time_years(now_et, expiry_datetimes(expiries, am))
+    return np.maximum(tv, 5 * _RTH_BASE / TRADING_DAYS)
+
+
+def variance_clock(df: pd.DataFrame) -> tuple:
+    """(t_var, sigma, r, q) équivalents sur l'horloge de variance, avec
+    σ_eff²·t_var = σ²·t et les mêmes facteurs d'actualisation : prix, delta et
+    gamma au spot sont inchangés, seules les dérivées par rapport au temps
+    (charm) changent d'horloge. None si la chaîne n'a pas de `t_var`."""
+    if "t_var" not in df:
+        return None
+    t = df["t_years"].to_numpy(dtype=float)
+    tv = df["t_var"].to_numpy(dtype=float)
+    ratio = t / tv
+    iv = df["iv"].to_numpy(dtype=float)
+    return tv, iv * np.sqrt(ratio), rates.current_rate() * ratio, np.asarray(carry(df)) * ratio
 
 
 def quote_price(df: pd.DataFrame) -> np.ndarray:
@@ -204,6 +267,7 @@ def enrich(snapshot: ChainSnapshot, now_et: datetime | None = None) -> pd.DataFr
     # plancher 5 min pour éviter les gammas explosifs à la cloche
     t = np.maximum(secs[secs > 0], 300.0) / YEAR_SECONDS
     df["t_years"] = t
+    df["t_var"] = t_var_years(now_et, df["expiry"], am_settled(df))
     r = rates.current_rate()
     df = calibrate_chain(df, s, r)
     iv = df["iv"].to_numpy()
@@ -272,7 +336,14 @@ def add_second_order(df: pd.DataFrame, spot: float) -> pd.DataFrame:
     q = carry(d)
     is_call = (d["type"] == "C").to_numpy()
     v = greeks.vanna(spot, k, t, r, iv, q)
-    c = greeks.charm_per_day(spot, k, t, r, iv, q, is_call)
+    clock = variance_clock(d)
+    if clock is None:
+        c = greeks.charm_per_day(spot, k, t, r, iv, q, is_call)
+    else:
+        # par SÉANCE de variance (1/252 d'année sur l'horloge de variance) :
+        # le delta qui fond d'ici la prochaine clôture, nuit et week-end compris
+        tv, sv, rv, qv = clock
+        c = greeks.charm(spot, k, tv, rv, np.where(valid, sv, 1.0), qv, is_call) / TRADING_DAYS
     v = np.where(valid, v, 0.0)
     c = np.where(valid, c, 0.0)
     sign = np.where((d["type"] == "C").to_numpy(), 1.0, -1.0)

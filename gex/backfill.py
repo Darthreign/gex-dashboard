@@ -259,7 +259,9 @@ def build_day(chain: pd.DataFrame, symbol: str, day: date,
     # monnaie) sur les prix de clôture ; sans IV de flux, pas de repli.
     cal = metrics.calibrate_chain(
         chain.drop(columns=["iv"], errors="ignore").assign(
-            t_years=_t_years(chain["expiry"], day, am)), spot, RISK_FREE_RATE)
+            t_years=_t_years(chain["expiry"], day, am),
+            t_var=metrics.t_var_years(datetime.combine(day, time(16, 0), tzinfo=ET),
+                                      chain["expiry"], am)), spot, RISK_FREE_RATE)
     valid = (cal["iv"] > 1e-4).to_numpy()
     full = cal.loc[valid].copy()
     q = full["carry_q"].to_numpy()
