@@ -254,25 +254,26 @@ def build_day(chain: pd.DataFrame, symbol: str, day: date,
                     symbol, day)
         return None
     am = metrics.am_settled(chain)
-    t = _t_years(chain["expiry"], day, am)
-    iv = greeks.implied_vol(
-        chain["close"].to_numpy(), spot, chain["strike"].to_numpy(),
-        t, RISK_FREE_RATE, (chain["type"] == "C").to_numpy(),
-    )
-    valid = np.isfinite(iv)
     alive = _seconds_at_close(chain["expiry"], day, am) > 0
-    full = chain.loc[valid].copy()
-    full["iv"] = iv[valid]
-    full["t_years"] = t[valid]
-    dc = greeks.call_delta(spot, full["strike"], full["t_years"], RISK_FREE_RATE, full["iv"])
-    full["delta_bs"] = np.where((full["type"] == "C").to_numpy(), dc, dc - 1.0)
+    # Même calibration que le live (forward par parité, IV du côté hors de la
+    # monnaie) sur les prix de clôture ; sans IV de flux, pas de repli.
+    cal = metrics.calibrate_chain(
+        chain.drop(columns=["iv"], errors="ignore").assign(
+            t_years=_t_years(chain["expiry"], day, am)), spot, RISK_FREE_RATE)
+    valid = (cal["iv"] > 1e-4).to_numpy()
+    full = cal.loc[valid].copy()
+    q = full["carry_q"].to_numpy()
+    args = (spot, full["strike"], full["t_years"], RISK_FREE_RATE, full["iv"], q)
+    full["delta_bs"] = np.where((full["type"] == "C").to_numpy(),
+                                greeks.call_delta(*args), greeks.put_delta(*args))
     # Les flux intraday (_deltas) gardent les contrats du jour, qui se
     # traitaient en séance. Le GEX et le snapshot, eux, décrivent la structure
     # à 16:00, comme le live (metrics.enrich) : un contrat déjà réglé — 0DTE PM
     # du jour, ou série AM réglée à l'ouverture — n'a plus de gamma.
     d = full.loc[alive[valid]].copy()
     is_call = (d["type"] == "C").to_numpy()
-    g = greeks.gamma(spot, d["strike"], d["t_years"], RISK_FREE_RATE, d["iv"])
+    g = greeks.gamma(spot, d["strike"], d["t_years"], RISK_FREE_RATE, d["iv"],
+                     d["carry_q"].to_numpy())
     d["gamma_bs"] = g
     sign = np.where(is_call, 1.0, -1.0)
     d["gex"] = greeks.gex_dollars(sign, g, d["open_interest"], CONTRACT_MULTIPLIER, spot)

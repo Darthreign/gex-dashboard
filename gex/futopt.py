@@ -38,7 +38,7 @@ import requests
 
 from . import greeks, store
 from . import rates
-from .metrics import ET, YEAR_SECONDS, am_settled, seconds_to_expiry
+from .metrics import ET, YEAR_SECONDS, am_settled, calibrate_chain, seconds_to_expiry
 from .rtquote import QUOTES, decode_compact_feed_data, feed_setup_message, quote_token
 
 log = logging.getLogger(__name__)
@@ -418,14 +418,20 @@ def enrich_native(chain: pd.DataFrame, raw: dict[str, dict], spot: float,
     secs = secs[secs > 0]
     t = np.maximum(secs, 300.0) / YEAR_SECONDS
     df["t_years"] = t
+    r = rates.current_rate()
+    # Forward par parité et IV inversée du mid, comme metrics.enrich. Pour une
+    # option sur future, le forward est le future de livraison : q ≈ r, soit
+    # du Black-76 — que l'ancien BS à q=0 ignorait.
+    df = calibrate_chain(df, spot, r)
 
     valid = df["iv"].to_numpy() > 1e-4
     iv = np.where(valid, df["iv"].to_numpy(), 1.0)
+    q = df["carry_q"].to_numpy()
     is_call = (df["type"] == "C").to_numpy()
-    r = rates.current_rate()
-    g = np.where(valid, greeks.gamma(spot, df["strike"].to_numpy(), t, r, iv), 0.0)
-    dcall = greeks.call_delta(spot, df["strike"].to_numpy(), t, r, iv)
-    d = np.where(valid, np.where(is_call, dcall, dcall - 1.0), 0.0)
+    k = df["strike"].to_numpy()
+    g = np.where(valid, greeks.gamma(spot, k, t, r, iv, q), 0.0)
+    d = np.where(valid, np.where(is_call, greeks.call_delta(spot, k, t, r, iv, q),
+                                 greeks.put_delta(spot, k, t, r, iv, q)), 0.0)
 
     df["gamma_bs"] = g
     df["delta_bs"] = d

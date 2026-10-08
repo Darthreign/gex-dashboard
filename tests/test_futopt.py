@@ -27,15 +27,18 @@ def _chain(spot: float = 28700.0) -> pd.DataFrame:
 
 
 def _raw(chain: pd.DataFrame, iv: float = 0.15, oi_call: float = 80.0,
-         oi_put: float = 120.0, spread: float = 1.0) -> dict:
+         oi_put: float = 120.0, spread: float | None = None) -> dict:
     """OI asymétrique call/put : à parts égales, le net s'annule exactement à
     chaque strike (même |gamma| des deux côtés) et le classement n'a plus de
     sens — c'est le cas dégénéré rencontré sur les tests de metrics.py."""
     out = {}
     for _, r in chain.iterrows():
         oi = oi_call if r["type"] == "C" else oi_put
-        out[r["streamer_symbol"]] = {"iv": iv, "oi": oi, "volume": 50.0,
-                                     "bidPrice": 10.0, "askPrice": 10.0 + spread}
+        out[r["streamer_symbol"]] = {"iv": iv, "oi": oi, "volume": 50.0}
+        # sans `spread`, pas de fourchette : l'IV du flux fait foi (une
+        # fourchette identique à tous les strikes donnerait des IV absurdes)
+        if spread is not None:
+            out[r["streamer_symbol"]].update(bidPrice=10.0, askPrice=10.0 + spread)
     return out
 
 
@@ -139,7 +142,7 @@ def test_iv_manquante_traitee_comme_gamma_nul():
     gamma indéfini qui polluerait la somme."""
     chain = _chain(28700.0).iloc[:4].reset_index(drop=True)
     raw = _raw(chain)
-    # une IV manquante sur un contrat
+    # une IV manquante sur un contrat sans fourchette
     raw[chain["streamer_symbol"].iloc[0]].pop("iv")
     now = datetime(2026, 7, 27, 10, 0, tzinfo=ET)
     df = futopt.enrich_native(chain, raw, 28700.0, 20.0, now_et=now)

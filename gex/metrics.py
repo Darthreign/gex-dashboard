@@ -65,11 +65,134 @@ def seconds_to_expiry(expiries: pd.Series, now_et: datetime,
     return (expiry_datetimes(expiries, am) - now_et).dt.total_seconds().to_numpy()
 
 
-def enrich(snapshot: ChainSnapshot, now_et: datetime | None = None) -> pd.DataFrame:
-    """Ajoute t, greeks calculés (BS sur l'IV du feed) et les colonnes GEX/DEX.
+def quote_price(df: pd.DataFrame) -> np.ndarray:
+    """Prix de marché exploitable : milieu de fourchette si bid ET ask sont
+    cotés, à défaut le close (chaînes Databento, sans bid/ask). NaN sinon."""
+    n = len(df)
+    bid = df["bid"].to_numpy(dtype=float) if "bid" in df else np.full(n, np.nan)
+    ask = df["ask"].to_numpy(dtype=float) if "ask" in df else np.full(n, np.nan)
+    mid = np.where((bid > 0) & (ask >= bid), (bid + ask) / 2, np.nan)
+    if "close" in df:
+        close = df["close"].to_numpy(dtype=float)
+        mid = np.where(np.isnan(mid) & (close > 0), close, mid)
+    return mid
 
-    Quand l'IV du feed est nulle/absente (deep ITM sans quote), on retombe
-    sur les Greeks CBOE — leur gamma est ~0 sur ces contrats de toute façon.
+
+def implied_forwards(df: pd.DataFrame, spot: float, r: float,
+                     window: float = 0.05, min_pairs: int = 3,
+                     max_basis: float = 0.03) -> dict:
+    """Forward implicite de chaque échéance par parité call-put :
+    F = K + e^(rT)·(C − P), médiane sur les strikes à ±`window` du spot.
+
+    Le forward contient tout ce que le marché price entre spot et échéance :
+    dividendes (SPX, SPY, QQQ), portage, ou l'écart au future de livraison
+    (options sur future). Une échéance sans assez de paires cotées, ou dont
+    le forward s'écarte de plus de `max_basis` du spot (quotes aberrantes),
+    est laissée de côté plutôt que devinée.
+    """
+    if df.empty:
+        return {}
+    d = df.assign(_px=quote_price(df))
+    d = d[d["_px"] > 0]
+    if "volume" in d:
+        # racines multiples (SPX/SPXW) sur une même échéance : la plus traitée
+        d = d.sort_values("volume")
+    d = d.drop_duplicates(["expiry", "type", "strike"], keep="last")
+    out = {}
+    for exp, e in d.groupby("expiry"):
+        calls = e[e["type"] == "C"].set_index("strike")
+        puts = e[e["type"] == "P"].set_index("strike")
+        common = [k for k in calls.index.intersection(puts.index)
+                  if abs(k - spot) / spot < window]
+        if len(common) < min_pairs:
+            continue
+        t = calls.loc[common, "t_years"].to_numpy()
+        k = np.asarray(common, dtype=float)
+        f = float(np.median(k + np.exp(r * t) * (calls.loc[common, "_px"].to_numpy()
+                                                  - puts.loc[common, "_px"].to_numpy())))
+        if abs(f / spot - 1) > max_basis:
+            log.warning("Forward %s aberrant ignoré : %.2f pour spot %.2f", exp, f, spot)
+            continue
+        out[exp] = f
+    return out
+
+
+def carry_rates(df: pd.DataFrame, spot: float, r: float,
+                forwards: dict) -> tuple[np.ndarray, np.ndarray]:
+    """(forward, q) par contrat, avec F = S·e^((r−q)t).
+
+    Une échéance sans forward mesuré reprend le q médian des échéances d'au
+    moins 2 jours (un q de 0DTE, très bruité ramené à l'année, ne se
+    transpose pas), ou 0 s'il n'y en a aucune.
+    """
+    t = df["t_years"].to_numpy(dtype=float)
+    f = df["expiry"].map(forwards).to_numpy(dtype=float)
+    q = r - np.log(f / spot) / t
+    ref = q[np.isfinite(q) & (t >= 2 / 365)]
+    fallback = float(np.median(ref)) if len(ref) else 0.0
+    q = np.where(np.isfinite(q), q, fallback)
+    return spot * np.exp((r - q) * t), q
+
+
+def calibrate_chain(df: pd.DataFrame, spot: float, r: float,
+                    max_rel_spread: float = 0.5) -> pd.DataFrame:
+    """Forward, portage q et IV propres à l'outil, à partir des prix de la chaîne.
+
+    L'IV n'est plus reprise telle quelle du fournisseur : elle est inversée
+    depuis le milieu de fourchette avec le MÊME forward (donc les mêmes
+    dividendes et le même taux) que celui qui sert ensuite au gamma. Mélanger
+    l'IV d'un modèle tiers avec nos propres r et q faussait le gamma.
+
+    À chaque strike, c'est l'option HORS de la monnaie qui fixe l'IV, appliquée
+    au call comme au put (la parité garantit la même vol aux deux) : l'option
+    dans la monnaie a un prix dominé par sa valeur intrinsèque, son IV inversée
+    est bruitée. Repli sur l'IV du flux (`iv_feed`, conservée pour comparaison)
+    quand aucun prix exploitable n'existe. Colonnes ajoutées : forward,
+    carry_q, iv_feed, iv (recalibrée), iv_source.
+    """
+    d = df.copy()
+    feed = d["iv"].to_numpy(dtype=float) if "iv" in d else np.zeros(len(d))
+    d["iv_feed"] = feed
+    fwd, q = carry_rates(d, spot, r, implied_forwards(d, spot, r))
+    d["forward"], d["carry_q"] = fwd, q
+
+    px = quote_price(d)
+    if "bid" in d and "ask" in d:
+        spread = (d["ask"] - d["bid"]).to_numpy(dtype=float)
+        px = np.where(spread <= max_rel_spread * px, px, np.nan)
+    k = d["strike"].to_numpy(dtype=float)
+    t = d["t_years"].to_numpy(dtype=float)
+    is_call = (d["type"] == "C").to_numpy()
+    inv = np.full(len(d), np.nan)
+    ok = np.isfinite(px)
+    if ok.any():
+        inv[ok] = greeks.implied_vol(px[ok], spot, k[ok], t[ok], r, is_call[ok], q=q[ok])
+
+    otm = np.where(is_call, k >= fwd, k < fwd) & np.isfinite(inv)
+    keys = ["expiry", "strike", "t_years"]
+    otm_iv = d.loc[otm, keys].assign(_v=inv[otm]).drop_duplicates(keys)
+    by_strike = d[keys].merge(otm_iv, on=keys, how="left")["_v"].to_numpy()
+
+    iv = np.where(np.isfinite(by_strike), by_strike,
+                  np.where(np.isfinite(inv), inv, np.where(feed > 1e-4, feed, 0.0)))
+    d["iv"] = iv
+    d["iv_source"] = np.where(np.isfinite(by_strike), "otm",
+                              np.where(np.isfinite(inv), "quote",
+                                       np.where(feed > 1e-4, "feed", "none")))
+    return d
+
+
+def carry(df: pd.DataFrame):
+    """q par contrat pour les recalculs de greeks (0 sur les snapshots
+    antérieurs à la calibration)."""
+    return df["carry_q"].to_numpy(dtype=float) if "carry_q" in df else 0.0
+
+
+def enrich(snapshot: ChainSnapshot, now_et: datetime | None = None) -> pd.DataFrame:
+    """Ajoute t, forward/IV calibrés (`calibrate_chain`), greeks et GEX/DEX.
+
+    Quand aucune IV n'est disponible (deep ITM sans quote ni IV feed), on
+    retombe sur les Greeks CBOE — leur gamma est ~0 sur ces contrats.
     """
     now_et = now_et or datetime.now(ET)
     df = snapshot.options.copy()
@@ -80,16 +203,20 @@ def enrich(snapshot: ChainSnapshot, now_et: datetime | None = None) -> pd.DataFr
     s = snapshot.spot
     # plancher 5 min pour éviter les gammas explosifs à la cloche
     t = np.maximum(secs[secs > 0], 300.0) / YEAR_SECONDS
+    df["t_years"] = t
+    r = rates.current_rate()
+    df = calibrate_chain(df, s, r)
     iv = df["iv"].to_numpy()
     valid = iv > 1e-4
+    q = carry(df)
 
-    r = rates.current_rate()
-    g = np.where(valid, greeks.gamma(s, df["strike"], t, r, np.where(valid, iv, 1.0)), df["gamma_cboe"])
-    d_call = greeks.call_delta(s, df["strike"], t, r, np.where(valid, iv, 1.0))
+    g = np.where(valid, greeks.gamma(s, df["strike"], t, r, np.where(valid, iv, 1.0), q),
+                 df["gamma_cboe"])
     is_call = (df["type"] == "C").to_numpy()
-    d = np.where(valid, np.where(is_call, d_call, d_call - 1.0), df["delta_cboe"])
+    d_call = greeks.call_delta(s, df["strike"], t, r, np.where(valid, iv, 1.0), q)
+    d_put = greeks.put_delta(s, df["strike"], t, r, np.where(valid, iv, 1.0), q)
+    d = np.where(valid, np.where(is_call, d_call, d_put), df["delta_cboe"])
 
-    df["t_years"] = t
     df["gamma_bs"] = g
     df["delta_bs"] = d
 
@@ -142,8 +269,10 @@ def add_second_order(df: pd.DataFrame, spot: float) -> pd.DataFrame:
     t = d["t_years"].to_numpy()
     k = d["strike"].to_numpy()
     r = rates.current_rate()
-    v = greeks.vanna(spot, k, t, r, iv)
-    c = greeks.charm_per_day(spot, k, t, r, iv)
+    q = carry(d)
+    is_call = (d["type"] == "C").to_numpy()
+    v = greeks.vanna(spot, k, t, r, iv, q)
+    c = greeks.charm_per_day(spot, k, t, r, iv, q, is_call)
     v = np.where(valid, v, 0.0)
     c = np.where(valid, c, 0.0)
     sign = np.where((d["type"] == "C").to_numpy(), 1.0, -1.0)
@@ -203,7 +332,9 @@ def gamma_profile(df: pd.DataFrame, spot: float, weight_col: str = "open_interes
     iv = d["iv"].to_numpy()[:, None]
     oi = d[weight_col].to_numpy()[:, None]
     sign = np.where((d["type"] == "C").to_numpy()[:, None], 1.0, -1.0)
-    g = greeks.gamma(grid[None, :], k, t, rates.current_rate(), iv)
+    q = np.asarray(carry(d))
+    q = q[:, None] if q.ndim else q
+    g = greeks.gamma(grid[None, :], k, t, rates.current_rate(), iv, q)
     profile = greeks.gex_dollars(sign, g, oi, CONTRACT_MULTIPLIER, grid[None, :]).sum(axis=0)
     return grid, profile
 
@@ -230,7 +361,7 @@ def gex_at_spot(df: pd.DataFrame, ref_spot: float,
     if d.empty:
         return pd.Series(dtype=float)
     g = greeks.gamma(ref_spot, d["strike"].to_numpy(), d["t_years"].to_numpy(),
-                     rates.current_rate(), d["iv"].to_numpy())
+                     rates.current_rate(), d["iv"].to_numpy(), carry(d))
     sign = np.where((d["type"] == "C").to_numpy(), 1.0, -1.0)
     gex = greeks.gex_dollars(sign, g, d[weight_col].to_numpy(),
                              CONTRACT_MULTIPLIER, ref_spot)
@@ -358,7 +489,9 @@ def vanna_profile(df: pd.DataFrame, spot: float, weight_col: str = "open_interes
     iv = d["iv"].to_numpy()[:, None]
     oi = d[weight_col].to_numpy()[:, None]
     sign = np.where((d["type"] == "C").to_numpy()[:, None], 1.0, -1.0)
-    v = greeks.vanna(grid[None, :], k, t, rates.current_rate(), iv)
+    q = np.asarray(carry(d))
+    q = q[:, None] if q.ndim else q
+    v = greeks.vanna(grid[None, :], k, t, rates.current_rate(), iv, q)
     profile = (sign * v * 0.01 * oi * CONTRACT_MULTIPLIER * grid[None, :]).sum(axis=0)
     return grid, profile
 
@@ -408,32 +541,12 @@ def futures_basis(df: pd.DataFrame, spot: float, today: date | None = None) -> f
         return None
     target = min(exps, key=lambda e: abs((e - target_exp).days))
 
-    e = df[df["expiry"] == target]
-    # racines multiples (SPX/SPXW) sur une même échéance : garder le plus traité
-    e = e.sort_values("volume").drop_duplicates(["type", "strike"], keep="last")
-    calls = e[e["type"] == "C"].set_index("strike")
-    puts = e[e["type"] == "P"].set_index("strike")
-    common = [k for k in calls.index.intersection(puts.index)
-              if abs(k - spot) / spot < 0.05]
-    fwds = []
-    for k in common:
-        cmid = (calls.loc[k, "bid"] + calls.loc[k, "ask"]) / 2
-        pmid = (puts.loc[k, "bid"] + puts.loc[k, "ask"]) / 2
-        if cmid <= 0 or pmid <= 0:
-            continue
-        t = calls.loc[k, "t_years"]
-        fwds.append((cmid - pmid) * np.exp(rates.current_rate() * t) + k)
-    if len(fwds) < 5:
-        return None
-    basis = float(np.median(fwds)) - spot
-    # garde-fou : le basis d'un future index reste sous ~2 % du spot (portage
-    # taux - dividendes sur < 1 an). Au-delà, les quotes sont aberrantes et une
-    # conversion silencieuse fausserait tous les niveaux.
-    if abs(basis) > 0.02 * spot:
-        log.warning("Basis aberrant ignoré : %+.1f pts sur spot %.0f (%d paires)",
-                    basis, spot, len(fwds))
-        return None
-    return basis
+    fwd = implied_forwards(df[df["expiry"] == target], spot, rates.current_rate(),
+                           window=0.05, min_pairs=5, max_basis=0.02)
+    # garde-fou max_basis : le basis d'un future index reste sous ~2 % du spot
+    # (portage taux - dividendes sur < 1 an). Au-delà, les quotes sont
+    # aberrantes et une conversion silencieuse fausserait tous les niveaux.
+    return fwd[target] - spot if target in fwd else None
 
 
 def top_gex_levels(df: pd.DataFrame, n: int = 5,
