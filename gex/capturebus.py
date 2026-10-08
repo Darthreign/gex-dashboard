@@ -164,6 +164,8 @@ class RemoteTape:
         self._absorption: dict[str, dict] = {}
         self._absorption_recent: dict[str, list] = {}
         self._status: tuple[str, int] = ("connecting", 0)
+        self._vol: dict[str, float] = {}
+        self._vol_day = ""
         self._last_msg = 0.0
         self._started = False
 
@@ -218,6 +220,12 @@ class RemoteTape:
                 self._rows = {
                     s: [{**r, "timestamp": datetime.fromisoformat(r["timestamp"])}
                         for r in lst] for s, lst in rows.items()}
+            if "vol" in msg:
+                day = msg.get("vol_day") or ""
+                if msg.get("snapshot") or day != self._vol_day:
+                    self._vol = {}
+                    self._vol_day = day
+                self._vol.update(msg["vol"] or {})
             st = msg.get("status")
             if st:
                 self._status = (st[0], int(st[1]))
@@ -260,6 +268,10 @@ class RemoteTape:
     def live_rows(self, symbol: str) -> list[dict]:
         with self.lock:
             return [dict(r) for r in self._rows.get(symbol, ())]
+
+    def contract_volumes(self) -> dict[str, float]:
+        with self.lock:
+            return dict(self._vol) if self._online() else {}
 
     def live_points(self, symbol: str, window_s: int = 300,
                     now: float | None = None) -> list[tuple[float, float, int]]:

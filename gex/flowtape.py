@@ -303,6 +303,13 @@ class FlowTape:
     # figé au spot de construction, `_center` l'est délibérément — c'est le
     # point de référence de la fenêtre, pas une estimation du prix courant.
     _center: dict[str, float] = field(default_factory=dict)
+    # Contrats échangés par contrat (streamer) depuis le début de la séance
+    # CME en cours (bascule à 18h00 ET), tous prints confondus : complète le
+    # volume des salves de chaîne entre deux collectes (cf. futopt.reprice_native).
+    _vol: dict[str, float] = field(default_factory=dict)
+    _vol_day: str = ""
+    _vol_seq: int = 0
+    _vol_changed: dict[str, int] = field(default_factory=dict)
     _started: bool = False
     _state: str = "off"
 
@@ -338,6 +345,7 @@ class FlowTape:
 
         minute = int(now // 60) * 60
         with self.lock:
+            self._count_volume(stream, float(size), now)
             bar = self.bars.get(symbol)
             if bar is None:
                 self.bars[symbol] = bar = FlowBar(minute)
@@ -452,6 +460,23 @@ class FlowTape:
                     bar.net_gamma_calls += g
                 elif typ == "P":
                     bar.net_gamma_puts += g
+
+    def _count_volume(self, stream: str, size: float, now: float) -> None:
+        """Cumul de séance par contrat (appelé sous `self.lock`)."""
+        from .tickcapture import _session_day
+        day = _session_day(now)
+        if day != self._vol_day:
+            self._vol_day = day
+            self._vol = {}
+            self._vol_changed = {}
+        self._vol[stream] = self._vol.get(stream, 0.0) + size
+        self._vol_seq += 1
+        self._vol_changed[stream] = self._vol_seq
+
+    def contract_volumes(self) -> dict[str, float]:
+        """streamer -> contrats échangés depuis le début de la séance."""
+        with self.lock:
+            return dict(self._vol)
 
     def _record_print(self, symbol: str, stream: str, item: dict,
                       price, size: float, now: float) -> None:
@@ -650,14 +675,19 @@ class FlowTape:
                      else min(len(q), self._seq_pts.get(s, 0) - mt.get(s, 0)))
                 if m > 0:
                     pts[s] = [list(q[i]) for i in range(len(q) - m, len(q))]
-            new_marks = {"prints": dict(self._seq_prints), "pts": dict(self._seq_pts)}
+            mv = -1 if snap else marks.get("vol", -1)
+            vol = {k: v for k, v in self._vol.items()
+                   if snap or self._vol_changed.get(k, 0) > mv}
+            vol_day = self._vol_day
+            new_marks = {"prints": dict(self._seq_prints), "pts": dict(self._seq_pts),
+                         "vol": self._vol_seq}
         rows = {}
         for s in symbols:
             rows[s] = [{**r, "timestamp": r["timestamp"].isoformat()}
                        for r in self.live_rows(s)]
         state, n = self.status()
         return ({"snapshot": snap, "prints": prints, "pts": pts, "rows": rows,
-                 "status": [state, n]}, new_marks)
+                 "status": [state, n], "vol": vol, "vol_day": vol_day}, new_marks)
 
     def live_rows(self, symbol: str) -> list[dict]:
         """Barres de `symbol` pas encore écrites sur disque : les achevées en

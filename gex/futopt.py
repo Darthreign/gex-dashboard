@@ -426,6 +426,17 @@ def enrich_native(chain: pd.DataFrame, raw: dict[str, dict], spot: float,
     # du Black-76 — que l'ancien BS à q=0 ignorait.
     df = calibrate_chain(df, spot, r)
 
+    df["multiplier"] = float(multiplier)
+    return apply_greeks(df, spot, r)
+
+
+def apply_greeks(df: pd.DataFrame, spot: float, r: float) -> pd.DataFrame:
+    """Gamma/delta Black-Scholes, GEX et DEX de chaque contrat au `spot` donné
+    (sur place, renvoie `df`). L'IV, le portage `carry_q`, `t_years` et le
+    multiplicateur sont lus dans `df` : c'est ce qui permet de réévaluer une
+    chaîne déjà calibrée à un autre spot (cf. `reprice_native`)."""
+    multiplier = df["multiplier"].to_numpy(dtype=float)
+    t = df["t_years"].to_numpy(dtype=float)
     valid = df["iv"].to_numpy() > 1e-4
     iv = np.where(valid, df["iv"].to_numpy(), 1.0)
     q = df["carry_q"].to_numpy()
@@ -439,7 +450,6 @@ def enrich_native(chain: pd.DataFrame, raw: dict[str, dict], spot: float,
     df["delta_bs"] = d
     sign = np.where(is_call, 1.0, -1.0)
     oi = df["open_interest"].to_numpy()
-    df["multiplier"] = float(multiplier)
     df["gex"] = greeks.gex_dollars(sign, g, oi, multiplier, spot)
     # cf. metrics.enrich pour la justification complète (revue le 2026-07-28,
     # après un premier correctif erroné le 2026-07-27) : le DEX suit une
@@ -451,6 +461,33 @@ def enrich_native(chain: pd.DataFrame, raw: dict[str, dict], spot: float,
     df["dex"] = -1.0 * d * oi * multiplier * spot
     df["spot"] = float(spot)
     return df
+
+
+def reprice_native(df: pd.DataFrame, spot: float, now_et: datetime | None = None,
+                   volume: dict[str, float] | None = None) -> pd.DataFrame:
+    """Chaîne native réévaluée au spot temps réel, entre deux salves dxFeed.
+
+    Seul ce qui dépend du spot et de l'horloge est recalculé : temps restant,
+    gamma, delta, GEX, DEX. L'open interest (fixe en séance) et l'IV
+    (« sticky strike ») restent ceux de la dernière salve, recalée toutes les
+    quelques minutes. `volume` (streamer -> contrats échangés depuis le début
+    de la séance, compté sur les prints OPRA) complète le volume de la salve :
+    on garde le plus grand des deux, le flux ne couvrant qu'une fenêtre autour
+    du spot et pouvant avoir démarré en cours de séance."""
+    now_et = now_et or datetime.now(ET)
+    out = df.copy()
+    secs = np.asarray(seconds_to_expiry(pd.Series(out["expiry"]), now_et, am_settled(out)),
+                      dtype=float)
+    keep = secs > 0
+    if not keep.all():
+        out = out[keep].reset_index(drop=True)
+        secs = secs[keep]
+    out["t_years"] = np.maximum(secs, 300.0) / YEAR_SECONDS
+    out["t_var"] = t_var_years(now_et, out["expiry"], am_settled(out))
+    if volume and "streamer_symbol" in out.columns:
+        live = out["streamer_symbol"].map(volume).fillna(0.0).to_numpy(dtype=float)
+        out["volume"] = np.maximum(out["volume"].to_numpy(dtype=float), live)
+    return apply_greeks(out, spot, rates.current_rate())
 
 
 def _reference_spot(product_code: str, access_token: str) -> float | None:

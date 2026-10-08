@@ -22,7 +22,7 @@ from dash import Dash, ctx, dcc, html, no_update
 from dash.dependencies import Input, Output, State
 from dash.exceptions import PreventUpdate
 
-from . import broadcast, digest, metrics, mocpage, scales, scalp, store
+from . import broadcast, digest, livechain, metrics, mocpage, scales, scalp, store
 from .bars import swing_move, volume_bars, zigzag
 from .api import _futures_last_price, register_api
 from .tt_web import connection_status, register_oauth
@@ -768,6 +768,25 @@ def gamma_flow_fig(symbol: str, lang: str, day: str | None = None,
     return fig
 
 
+def tape_day(symbol: str, day: str) -> pd.DataFrame:
+    """Barres 1 min du flux OPRA d'une journée : le disque (barres achevées,
+    vidé toutes les 30 s) plus, pour la journée en cours, les barres encore en
+    mémoire et la minute EN COURS (TAPE.live_rows). C'est ce qui rend les
+    graphiques de flux vivants à la seconde au lieu d'attendre le flush."""
+    from .flowtape import TAPE
+    disk = store.load_tape(symbol, day)
+    live = pd.DataFrame(TAPE.live_rows(symbol))
+    if not live.empty:
+        live = live[pd.to_datetime(live["timestamp"]).dt.strftime("%Y-%m-%d") == day]
+    if not live.empty:
+        # la minute en cours (et celles en attente de flush) écrasent le disque
+        disk = live if disk.empty else pd.concat([disk, live], ignore_index=True)
+    if disk.empty:
+        return disk
+    return (disk.drop_duplicates(subset="timestamp", keep="last")
+            .sort_values("timestamp").reset_index(drop=True))
+
+
 def flow_source(symbol: str, day: str, dx_cols: tuple[str, ...]):
     """(données, source) pour les graphiques de flux, selon UNE règle unique :
     dxFeed s'il est disponible, CBOE sinon.
@@ -791,9 +810,9 @@ def flow_source(symbol: str, day: str, dx_cols: tuple[str, ...]):
     source à l'autre — d'où la source rendue avec les données, pour que le
     titre du graphique le dise au lieu de le laisser deviner.
     """
-    tape = store.load_tape(symbol, day)
+    tape = tape_day(symbol, day)
     if not tape.empty and all(c in tape.columns for c in dx_cols):
-        return tape.sort_values("timestamp"), "dxfeed"
+        return tape, "dxfeed"
     return store.load_flows(symbol, day), "cboe"
 
 
@@ -875,7 +894,7 @@ def tape_fig(symbol: str, lang: str, day: str | None = None,
     et les prints sont pondérés par leur taille, jamais comptés à l'unité.
     """
     day = day or datetime.now(ET).strftime("%Y-%m-%d")
-    tape = store.load_tape(symbol, day)
+    tape = tape_day(symbol, day)
     title = guided(t(lang, "tape_title"), "tape")
     if tape.empty:
         return empty_fig(t(lang, "no_tape_day", day=day), title)
@@ -945,15 +964,10 @@ def hedge_frame(symbol: str, day: str, window_min: int = 15) -> pd.DataFrame:
     """Barres 1 min de couverture dealers du jour : disque + minute en cours
     (mémoire). Les journées écrites avant l'ajout des colonnes `hedge_*` donnent
     des zéros plutôt qu'une erreur. `window_min` = 0 : toute la séance."""
-    from .flowtape import TAPE
-    disk = store.load_tape(symbol, day)
-    live = pd.DataFrame(TAPE.live_rows(symbol))
-    if not live.empty:
-        # la minute en cours (et celles en attente de flush) écrasent le disque
-        disk = live if disk.empty else pd.concat([disk, live], ignore_index=True)
+    disk = tape_day(symbol, day)
     if disk.empty:
         return disk
-    df = disk.drop_duplicates(subset="timestamp", keep="last").sort_values("timestamp")
+    df = disk.copy()
     for c in HEDGE_COLS:
         if c not in df.columns:
             df[c] = 0.0
@@ -2559,20 +2573,35 @@ def _lw_fig(builder):
 
 
 LW_CHARTS = {
-    "flow": (_lw_fig(lambda a: flow_fig(a["symbol"], a["lang"], a.get("day") or None)), 10.0),
+    # flux OPRA : minute en cours comprise (tape_day), d'où la cadence de 2 s
+    "flow": (_lw_fig(lambda a: flow_fig(a["symbol"], a["lang"], a.get("day") or None)), 2.0),
     "gflow": (_lw_fig(lambda a: gamma_flow_fig(a["symbol"], a["lang"], a.get("day") or None,
-                                               _lw_list(a.get("series")))), 10.0),
+                                               _lw_list(a.get("series")))), 2.0),
     "tape": (_lw_fig(lambda a: tape_fig(a["symbol"], a["lang"], a.get("day") or None,
-                                        _lw_list(a.get("series")))), 10.0),
+                                        _lw_list(a.get("series")))), 2.0),
     "history": (_lw_fig(lambda a: history_fig(a["symbol"], a["lang"])), 30.0),
     "spotzg": (_lw_fig(lambda a: spot_zg_fig(a["symbol"], a["lang"])), 30.0),
     "hedge": (_lw_hedge, 1.0),
     "heatmap": (lambda a: heatmap_spec(
         a["symbol"], a["lang"], a.get("day") or None,
         float(a.get("window") or 0.04), a.get("unit") or None,
-        _lw_list(a.get("levels")) if "levels" in a else None), 5.0),
+        _lw_list(a.get("levels")) if "levels" in a else None), 2.0),
+    # pas un graphique : la version de la chaîne affichée (cf. dcc.Store
+    # « chain-ver »), poussée à chaque changement
+    "chainver": (lambda a: {"v": chain_version(a["symbol"])}, 1.0),
 }
 LW_ARGS = ("symbol", "lang", "day", "series", "window", "unit", "levels", "h")
+
+
+def chain_version(symbol: str) -> str:
+    """Identifiant de la chaîne affichée pour `symbol` : change à chaque
+    réévaluation OPRA (gex/livechain.py) ou nouveau pull CBOE."""
+    st = chain_state(symbol)
+    with STATE.lock:
+        snap, df = st.snapshot, st.enriched
+    if snap is None or df is None:
+        return "none"
+    return f"{snap.feed_timestamp}|{id(df)}"
 
 
 def lw_params(args) -> tuple | None:
@@ -2582,6 +2611,27 @@ def lw_params(args) -> tuple | None:
         return None
     a.setdefault("lang", "fr")
     return tuple(sorted(a.items()))
+
+
+LW_MULTI_MAX = 12
+
+
+def lw_multi_channels(raw: str | None) -> dict[str, broadcast.Channel]:
+    """Canaux d'un flux multiplexé : `raw` = JSON [{"id", "name", "args"}].
+    Entrées invalides ignorées ; au plus LW_MULTI_MAX graphiques."""
+    try:
+        items = json.loads(raw or "[]")
+    except ValueError:
+        return {}
+    out: dict[str, broadcast.Channel] = {}
+    for it in items[:LW_MULTI_MAX] if isinstance(items, list) else ():
+        if not isinstance(it, dict):
+            continue
+        name, tag = it.get("name"), it.get("id")
+        params = lw_params(it.get("args") or {})
+        if name in LW_CHARTS and isinstance(tag, str) and params is not None:
+            out[tag] = lw_channel(name, params)
+    return out
 
 
 def lw_channel(name: str, params: tuple) -> broadcast.Channel:
@@ -3356,11 +3406,9 @@ def chain_state(symbol: str):
 
     Quand un compte courtier est configuré, SPX et NDX ont une chaîne native
     dxFeed sans les 15 min de retard de CBOE (cf. gex/idxopt.py) : c'est elle
-    qui porte les niveaux, les tuiles et les graphes de structure. La chaîne
-    CBOE continue de tourner en parallèle à 60 s, mais seulement pour le flux
-    delta, qui a besoin d'une clé `contract` stable entre deux pulls et d'une
-    cadence qu'une collecte native ne tient pas — ces graphiques-là lisent le
-    disque, pas cet état, donc rien ne les perturbe.
+    qui porte les niveaux, les tuiles et les graphes de structure, réévaluée
+    au spot temps réel entre deux salves (gex/livechain.py). La chaîne CBOE
+    continue de tourner en parallèle à 60 s, en secours.
 
     Repli sur CBOE si le natif est absent ou dormant depuis plus de
     `NATIVE_STALE_S` : une donnée délayée mais vivante vaut mieux qu'une
@@ -3373,8 +3421,12 @@ def chain_state(symbol: str):
         if s is not None and ts is not None:
             age = (datetime.now(ET).replace(tzinfo=None) - ts).total_seconds()
             if 0 <= age < NATIVE_STALE_S:
-                return native
-    return STATE.get(symbol)
+                return livechain.view(scheduler_native_key(symbol), symbol, native,
+                                      STATE.lock)
+    st = STATE.get(symbol)
+    # NQ/ES : la chaîne native (CME via dxFeed) est rangée sous le symbole
+    # lui-même ; réévaluée au spot live comme les indices (cf. gex/livechain.py)
+    return livechain.view(symbol, symbol, st, STATE.lock)
 
 
 def _book_card(symbol: str, df, spot: float, lang: str) -> list:
@@ -4060,6 +4112,11 @@ def create_app() -> Dash:
             # gamma, couverture des dealers : graphiques Lightweight Charts en
             # flux poussé (SSE, /api/v1/lw/<nom>), cf. callback « lw-streams ».
             html.Div(id="lw-stream-sink", style={"display": "none"}),
+            # Version de la chaîne affichée, poussée par le flux « chainver » :
+            # chaque changement (réévaluation OPRA au spot live toutes les ~2 s,
+            # ou nouveau pull CBOE chaque minute) relance les graphiques par
+            # strike, niveaux et tuiles — à la place du tick de 60 s.
+            dcc.Store(id="chain-ver", data=""),
             # 250 ms MESURÉ et ÉCARTÉ le 2026-10-01 : à l'époque le serveur de
             # dev Werkzeug (MONO-THREAD) saturait à ce rythme — curl direct sur
             # /api/v1/NQ/last (lecture triviale en mémoire) à 2-6 s au lieu de
@@ -4182,10 +4239,11 @@ def create_app() -> Dash:
         Input("url", "pathname"), Input("tab", "value"),
     )
 
-    # « lw-streams » : graphiques Lightweight Charts de la page principale,
-    # chacun alimenté par son flux SSE (LW_CHARTS). Un flux n'est ouvert que
-    # si son onglet est affiché ; changer un réglage remplace le flux (même
-    # URL = rien à faire, cf. GexLW.stream). Hors page principale : tout fermé.
+    # « lw-streams » : graphiques Lightweight Charts de la page principale
+    # (LW_CHARTS), tous sur UNE connexion SSE multiplexée (/api/v1/lw-multi,
+    # cf. GexLW.streams). Un graphique n'y figure que si son onglet est
+    # affiché ; changer un réglage rouvre la connexion (même liste = rien à
+    # faire). Hors page principale : tout fermé.
     app.clientside_callback(
         """
         function(path, tab, symbol, lang, unit, win, flowDay, gflow, tapeSeries,
@@ -4194,23 +4252,31 @@ def create_app() -> Dash:
             if (!G) return window.dash_clientside.no_update;
             const p = path || '/';
             const main = !(p.startsWith('/scalp') || p.startsWith('/moc'));
-            const url = (name, on, extra) => {
-                if (!main || !on || !symbol) return null;
-                const q = new URLSearchParams(Object.assign({symbol: symbol, lang: lang || 'fr'}, extra));
-                return '/api/v1/lw/' + name + '?' + q.toString();
+            const list = [];
+            const add = (id, name, on, extra) => {
+                if (!main || !on || !symbol) return;
+                list.push({id: id, name: name,
+                           args: Object.assign({symbol: symbol, lang: lang || 'fr'}, extra)});
             };
             const day = flowDay || '';
             const onMain = tab === 'main';
-            G.stream('flow', url('flow', onMain, {day: day}));
-            G.stream('gflow', url('gflow', onMain, {day: day, series: (gflow || []).join(',')}));
-            G.stream('tape', url('tape', onMain, {day: day, series: (tapeSeries || []).join(',')}));
-            G.stream('gex-history', url('history', onMain, {}));
-            G.stream('spot-zg', url('spotzg', onMain, {}));
-            G.stream('heatmap', url('heatmap', tab === 'heat', {
-                day: heatDay || '', window: win || 0.04, unit: unit || '',
-                levels: (heatLevels || []).join(',')}));
-            G.stream('hedge-graph', url('hedge', tab === 'tape',
-                                        {window: hedgeWin == null ? 15 : hedgeWin}));
+            add('flow', 'flow', onMain, {day: day});
+            add('gflow', 'gflow', onMain, {day: day, series: (gflow || []).join(',')});
+            add('tape', 'tape', onMain, {day: day, series: (tapeSeries || []).join(',')});
+            add('gex-history', 'history', onMain, {});
+            add('spot-zg', 'spotzg', onMain, {});
+            add('heatmap', 'heatmap', tab === 'heat', {
+                day: heatDay || '', window: String(win || 0.04), unit: unit || '',
+                levels: (heatLevels || []).join(',')});
+            add('hedge-graph', 'hedge', tab === 'tape',
+                {window: String(hedgeWin == null ? 15 : hedgeWin)});
+            // version de la chaîne -> dcc.Store « chain-ver » : relance les
+            // graphiques par strike, niveaux et tuiles à chaque changement
+            add('chain-ver', 'chainver', true, {});
+            if (list.length) list[list.length - 1].onData = function(m) {
+                window.dash_clientside.set_props('chain-ver', {data: m.v});
+            };
+            G.streams(list);
             return '';
         }
         """,
@@ -5435,11 +5501,11 @@ def create_app() -> Dash:
         [Output("cards", "children"), Output("regime-banner", "children"),
          Output("pc-gauge", "children")],
         [Input("rt-tick", "n_intervals"), Input("symbol", "value"),
-         Input("lang", "value"), Input("unit", "value")],
+         Input("lang", "value"), Input("unit", "value"), Input("chain-ver", "data")],
         State("url", "pathname"),
     )
     @broadcast.shared(ttl=2.0, skip=(0,))
-    def refresh_cards(_, symbol, lang, unit, path=None):
+    def refresh_cards(_, symbol, lang, unit, ver=None, path=None):
         """Tuiles au rythme du flux (5 s) et non des pulls (60 s).
 
         Le GEX net y est recalculé au spot courant : c'est la valeur qui dit
@@ -5459,12 +5525,14 @@ def create_app() -> Dash:
          Output("dex-strike", "figure"),
          Output("smile", "figure"), Output("tv-copy", "content"),
          Output("tv-copy", "title")],
-        [Input("tick", "n_intervals"), Input("symbol", "value"),
+        [Input("chain-ver", "data"), Input("symbol", "value"),
          Input("bucket", "value"), Input("window", "value"),
          Input("majors", "value"),
          Input("lang", "value"), Input("unit", "value")],
     )
-    @broadcast.shared(ttl=10.0, skip=(0,))
+    # recalcul à chaque nouvelle version de la chaîne (cf. « chain-ver ») ; la
+    # version fait partie de la clé : un calcul par version pour tous les onglets
+    @broadcast.shared(ttl=10.0, skip=())
     def refresh(_, symbol, bucket, window, majors, lang, unit):
         # Flux, gamma flow, tape, historique GEX et spot vs zero gamma : graphiques
         # Lightweight Charts poussés en SSE (LW_CHARTS, cf. lw-streams plus bas).
@@ -5541,10 +5609,10 @@ def create_app() -> Dash:
     @app.callback(
         [Output("profile", "figure"), Output("profile-exp", "figure"),
          Output("profile-hint", "children")],
-        [Input("tick", "n_intervals"), Input("tab", "value"), Input("symbol", "value"),
+        [Input("chain-ver", "data"), Input("tab", "value"), Input("symbol", "value"),
          Input("window", "value"), Input("lang", "value"), Input("unit", "value")],
     )
-    @broadcast.shared(ttl=10.0, skip=(0,))
+    @broadcast.shared(ttl=10.0, skip=())
     def refresh_profile(_, tab, symbol, window, lang, unit):
         if tab != "profile":   # onglet masqué : rien à recalculer
             raise PreventUpdate
@@ -5565,11 +5633,11 @@ def create_app() -> Dash:
     @app.callback(
         [Output("vex", "figure"), Output("cex", "figure"),
          Output("g2-cards", "children"), Output("g2-hint", "children")],
-        [Input("tick", "n_intervals"), Input("tab", "value"), Input("symbol", "value"),
+        [Input("chain-ver", "data"), Input("tab", "value"), Input("symbol", "value"),
          Input("bucket", "value"), Input("window", "value"),
          Input("lang", "value"), Input("unit", "value")],
     )
-    @broadcast.shared(ttl=10.0, skip=(0,))
+    @broadcast.shared(ttl=10.0, skip=())
     def refresh_greeks2(_, tab, symbol, bucket, window, lang, unit):
         if tab != "greeks2":
             raise PreventUpdate
@@ -5936,6 +6004,15 @@ def create_app() -> Dash:
             return Response("graphique ou symbole inconnu", status=404)
         return Response(broadcast.sse_events(lw_channel(name, params)),
                         mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    @app.server.route("/api/v1/lw-multi")
+    def _lw_multi_stream():
+        from flask import Response, request
+        chs = lw_multi_channels(request.args.get("q"))
+        if not chs:
+            return Response("aucun graphique valide", status=404)
+        return Response(broadcast.multi_events(chs), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     @app.server.route("/api/v1/<symbol>/scalp-stream")

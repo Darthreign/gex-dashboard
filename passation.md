@@ -37,6 +37,7 @@ Pour une page : lancer le dashboard et regarder la page concernée (`.claude/lau
 | Page /moc | `gex/mocpage.py`, `.moc-*` dans `gex/assets/style.css`, `moc_*` dans `gex/i18n.py` (FR **et** EN) | Calcul toutes les 5 s, uniquement quand la page est ouverte. |
 | Page /scalp en temps réel | `gex/app.py` : `scalp_indicators_channel`, `scalp_chart_channel`, `scalp_panels_channel` ; routes dans `gex/asgi.py` **et** routes Flask | Tout passe par SSE, **jamais de `dcc.Interval` à la seconde sur /scalp**. Nouveau bloc : l'ajouter à `scalp_panels_snapshot` et à la table `target` du callback client `/scalp-stream`. Un canal = un calcul partagé par tous les onglets. |
 | Graphiques Lightweight Charts (page principale, /scalp, /scalpv1) | `gex/lwspec.py` (figure Plotly -> description), `LW_CHARTS` et `heatmap_spec` dans `gex/app.py`, `gex/assets/gex-lw.js` (rendu), `.lw-*` dans `style.css` ; routes `/api/v1/lw/<nom>` dans `gex/asgi.py` **et** Flask | Les fonctions `*_fig` Plotly restent la source (titres, couleurs, messages « pas de données ») et servent aussi aux PNG du bot : corriger un graphique = corriger sa `*_fig`. Nouveau graphique temporel : l'ajouter à `LW_CHARTS` et au callback client « lw-streams ». Graphiques par strike (GEX/DEX, profil, vanna/charm, smile, positionnement) : restés en Plotly, volontairement. Tests : `tests/test_lwspec.py`. |
+| Chaînes OPRA en continu | `gex/livechain.py`, `futopt.reprice_native` / `apply_greeks`, `app.chain_state`, `FlowTape.contract_volumes` | Ne jamais réévaluer une chaîne CBOE (délayée). Si le CPU sature : augmenter `livechain.MIN_INTERVAL_S`. Tests : `tests/test_livechain.py`. |
 | Lecture normalisée / edge /scalp | `gex/edge.py`, `gex/edge_report.py` | Seuils utilisés seulement si `data/reports/edge_params_<SYM>.json` dit `validated: true` (`scripts/edge_report.py`). |
 | Architecture de charge | `gex/broadcast.py`, `gex/livestate.py`, `gex/asgi.py`, `gex/run.py` | Repli serveur : `GEX_SERVER=waitress`. Repli moteur : retirer `GEX_ENGINE`. |
 | Conventions de calcul (GEX, IV, AM/PM, horloge de variance…) | `gex/metrics.py`, `gex/greeks.py` | Voir README, « Conventions de calcul ». Ne pas changer une convention sans mettre à jour le README. |
@@ -83,6 +84,20 @@ Les mesures d'urgence des 05-06/10 sont levées et la page scalp n'a plus AUCUN 
 - **Séries temporelles en Lightweight Charts et en SSE** : flux delta, gamma flow, order flow (tape), historique GEX, spot vs Gamma Flip, couverture des dealers (onglet Tape, et /scalp + /scalpv1), prix /scalpv1. Chaque graphique a son flux `/api/v1/lw/<nom>?symbol=…` (un calcul partagé par réglages, poussé seulement si la description change), ouvert seulement si son onglet est affiché. Le zoom de l'utilisateur est conservé entre deux mises à jour ; recadrage seulement quand le contexte change (symbole, jour, fenêtre…).
 - Plus de `heatmap-tick` ni de callback Plotly pour ces graphiques ; l'ancienne carte LW de couverture des dealers (masquée depuis le 05/10 car elle clignotait) est supprimée.
 - Vérifié dans Chromium sur données synthétiques : page principale (tous les graphiques), Heatmap, Tape, /scalp, /scalpv1, aucune erreur JS, aucune 5xx. **À vérifier en séance réelle** : fluidité de la couverture des dealers en « Live » (mise à jour à la seconde).
+
+## Chaînes OPRA en continu (même session)
+
+Règle demandée : **OPRA = données live, CBOE = toutes les minutes** (CBOE est délayé de 15 min).
+- `gex/livechain.py` : entre deux salves OPRA (toutes les 3 min), la dernière chaîne est réévaluée au spot temps réel, au plus toutes les 2 s et seulement si le spot ou le volume a bougé. Concerne SPX, NDX, SPY, QQQ, NQ, ES quand la chaîne vient de dxFeed. Branché dans `app.chain_state` : tout ce qui lit la chaîne affichée suit (GEX/DEX par strike, niveaux, tuiles, profil gamma, Vanna & Charm, heatmap, /scalp).
+- Recalculés : temps restant, gamma, delta, GEX, DEX, Gamma Flip, HVL. **Fixes jusqu'à la salve suivante** : open interest, IV (« sticky strike », l'IV en continu demanderait un abonnement à toute la chaîne : refusé, trop lourd). Les murs GEX1…5 restent classés au spot de clôture, volontairement.
+- Volume du jour : complété par les prints OPRA (`FlowTape.contract_volumes`, relayé au dashboard par la liaison capture) ; on garde le plus grand du volume de salve et du volume compté.
+- Garde-fous : spot live absent ou de plus de 2 min, ou à plus de 5 % du spot de salve -> on affiche la salve telle quelle.
+- Coût mesuré : ~140 ms par réévaluation d'une chaîne SPX de 9 600 contrats (dont ~105 ms pour le Gamma Flip), seulement pour les symboles affichés.
+- Flux delta, gamma échangé, tape, couverture : ils lisaient déjà le flux OPRA mais seulement sur disque ; ils incluent maintenant la minute en cours (`app.tape_day`).
+- Affichage : un flux « chainver » pousse la version de la chaîne ; la vue principale (GEX/DEX, niveaux, profil, Vanna & Charm, tuiles) se recalcule à chaque version au lieu du tick de 60 s.
+- **Une seule connexion SSE par page** (`/api/v1/lw-multi`, `GexLW.streams`) : un navigateur n'ouvre que 6 connexions HTTP/1.1 par serveur, et un flux par graphique bloquait les requêtes Dash (constaté pendant la vérification).
+- Pas branchés (restent sur la salve) : l'API `/api/v1/...`, le digest et le bot Discord.
+- Vérifié dans Chromium sur une chaîne NQ synthétique au spot mouvant : 12 mises à jour GEX/DEX en ~18 s, tuiles au spot live, aucune erreur. **À vérifier en séance réelle** : charge CPU du dashboard avec plusieurs symboles ouverts.
 
 ## « pts depuis l'open » pendant la séance ETH (même session)
 

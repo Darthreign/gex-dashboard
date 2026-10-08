@@ -80,6 +80,15 @@ async def lw_stream(request):
     return _sse(lw_channel(name, params))
 
 
+async def lw_multi_stream(request):
+    from .app import lw_multi_channels
+    chs = lw_multi_channels(request.query_params.get("q"))
+    if not chs:
+        return JSONResponse({"error": "aucun graphique valide"}, 404)
+    return StreamingResponse(broadcast.multi_events_async(chs),
+                             media_type="text/event-stream", headers=SSE_HEADERS)
+
+
 def build(dash_app, wsgi_threads: int = WSGI_THREADS) -> Starlette:
     """Application ASGI : routes SSE asynchrones, puis tout le reste vers
     l'application Flask de Dash."""
@@ -88,6 +97,7 @@ def build(dash_app, wsgi_threads: int = WSGI_THREADS) -> Starlette:
         Route("/api/v1/{symbol}/scalp-indicators-stream", scalp_indicators_stream),
         Route("/api/v1/{symbol}/chart-stream", scalp_chart_stream),
         Route("/api/v1/{symbol}/scalp-stream", scalp_panels_stream),
+        Route("/api/v1/lw-multi", lw_multi_stream),
         Route("/api/v1/lw/{name}", lw_stream),
         Mount("/", app=WSGIMiddleware(dash_app.server, workers=wsgi_threads)),
     ])

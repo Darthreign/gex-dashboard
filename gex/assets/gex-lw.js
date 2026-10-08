@@ -10,6 +10,7 @@
  *
  *   GexLW.stream('flow', '/api/v1/lw/flow?symbol=SPX&lang=fr')  // ouvre / remplace
  *   GexLW.stream('flow', null)                                 // ferme
+ *   GexLW.stream('k', url, (msg) => ...)                       // message brut
  */
 (function () {
   "use strict";
@@ -220,7 +221,9 @@
     }
   }
 
-  function stream(id, url) {
+  // `onData` (facultatif) : traite le message au lieu de dessiner un graphique
+  // (ex. version de chaîne poussée dans un dcc.Store)
+  function stream(id, url, onData) {
     const cur = streams[id];
     if (cur && cur.url === url) return;
     if (cur) {
@@ -242,7 +245,7 @@
         st.delay = 3000;
         let spec;
         try { spec = JSON.parse(ev.data); } catch (e) { return; }
-        render(id, spec);
+        if (onData) onData(spec); else render(id, spec);
       };
       es.onerror = () => {
         es.close();
@@ -254,5 +257,55 @@
     connect();
   }
 
-  window.GexLW = { render, stream };
+  // Tous les graphiques d'une page sur UNE connexion (/api/v1/lw-multi) : un
+  // navigateur n'ouvre que 6 connexions HTTP/1.1 par serveur, un flux par
+  // graphique les épuisait et bloquait les requêtes Dash.
+  //   GexLW.streams([{id, name, args, onData?}, ...])   // [] ou null : ferme
+  let multi = null;
+  function streamAll(list) {
+    const items = (list || []).filter((x) => x && x.name);
+    const q = JSON.stringify(items.map((x) => ({ id: x.id, name: x.name, args: x.args || {} })));
+    const url = items.length ? "/api/v1/lw-multi?q=" + encodeURIComponent(q) : null;
+    const handlers = {};
+    items.forEach((x) => { handlers[x.id] = x.onData || null; });
+    if (multi && multi.url === url) { multi.handlers = handlers; return; }
+    // contexte changé pour un graphique : recadrer à son prochain message
+    const prevArgs = multi ? multi.args : {};
+    const args = {};
+    items.forEach((x) => {
+      args[x.id] = JSON.stringify(x.args || {});
+      if (charts[x.id] && prevArgs[x.id] !== args[x.id]) charts[x.id].fitted = false;
+    });
+    if (multi) {
+      multi.closed = true;
+      if (multi.es) multi.es.close();
+      if (multi.timer) clearTimeout(multi.timer);
+      multi = null;
+    }
+    if (!url) return;
+    const st = { url, args, handlers, es: null, timer: null, delay: 3000, closed: false };
+    multi = st;
+    const connect = () => {
+      if (st.closed) return;
+      const es = new EventSource(url);
+      st.es = es;
+      es.onmessage = (ev) => {
+        st.delay = 3000;
+        let m;
+        try { m = JSON.parse(ev.data); } catch (e) { return; }
+        if (!m || !(m.id in st.handlers)) return;
+        const h = st.handlers[m.id];
+        if (h) h(m.d); else render(m.id, m.d);
+      };
+      es.onerror = () => {
+        es.close();
+        if (st.closed || multi !== st) return;
+        st.timer = setTimeout(connect, st.delay + Math.random() * 2000);
+        st.delay = Math.min(st.delay * 2, 30000);
+      };
+    };
+    connect();
+  }
+
+  window.GexLW = { render, stream, streams: streamAll };
 })();

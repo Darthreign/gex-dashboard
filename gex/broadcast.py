@@ -174,6 +174,75 @@ async def sse_events_async(ch: Channel, keepalive: float = KEEPALIVE_S):
         ch.unsubscribe()
 
 
+def _retag(tag: str, payload: str) -> str:
+    """« data: {json}\n\n » d'un canal -> « data: {"id": tag, "d": {json}} »."""
+    body = payload[len("data: "):].strip() if payload.startswith("data: ") else payload.strip()
+    return f'data: {{"id":{json.dumps(tag)},"d":{body}}}\n\n'
+
+
+def _fresh(chs: dict[str, "Channel"], seen: dict[str, int]) -> list[str]:
+    out = []
+    for tag, ch in chs.items():
+        with ch._cond:
+            v, p = ch._version, ch._payload
+        if v > seen[tag] and p is not None:
+            seen[tag] = v
+            out.append(_retag(tag, p))
+    return out
+
+
+def multi_events(chs: dict[str, "Channel"], keepalive: float = KEEPALIVE_S,
+                 poll: float = 0.25):
+    """Plusieurs canaux sur UNE connexion SSE (serveur WSGI à threads), chaque
+    message étiqueté par sa cible. Un navigateur n'ouvre que 6 connexions
+    HTTP/1.1 par serveur : un flux par graphique les épuisait, et les
+    requêtes Dash restaient alors en attente indéfiniment."""
+    seen = {tag: ch.subscribe() for tag, ch in chs.items()}
+    try:
+        idle = 0.0
+        while True:
+            out = _fresh(chs, seen)
+            if out:
+                idle = 0.0
+                yield "".join(out)
+                continue
+            time.sleep(poll)
+            idle += poll
+            if idle >= keepalive:
+                idle = 0.0
+                yield ": keepalive\n\n"
+    finally:
+        for ch in chs.values():
+            ch.unsubscribe()
+
+
+async def multi_events_async(chs: dict[str, "Channel"], keepalive: float = KEEPALIVE_S):
+    """Même multiplexage pour un serveur asyncio : un seul événement réveillé
+    par n'importe lequel des canaux."""
+    seen = {tag: ch.subscribe() for tag, ch in chs.items()}
+    loop = asyncio.get_running_loop()
+    ev = asyncio.Event()
+    for ch in chs.values():
+        with ch._cond:
+            ch._waiters.add((loop, ev))
+    try:
+        while True:
+            ev.clear()                   # avant la lecture : aucun réveil perdu
+            out = _fresh(chs, seen)
+            if out:
+                yield "".join(out)
+                continue
+            try:
+                await asyncio.wait_for(ev.wait(), keepalive)
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+    finally:
+        for ch in chs.values():
+            with ch._cond:
+                ch._waiters.discard((loop, ev))
+            ch.unsubscribe()
+
+
 # ---------------------------------------------------------------- callbacks
 
 _memo: dict[tuple, tuple[float, object]] = {}
