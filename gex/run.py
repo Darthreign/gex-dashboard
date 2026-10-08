@@ -165,8 +165,13 @@ def main(host: str = "127.0.0.1", port: int = 8050) -> None:
     # timeout_keep_alive : connexions HTTP inactives entre deux requêtes. Une
     # connexion SSE morte est détectée par l'échec d'écriture du keepalive
     # (15 s, cf. broadcast.KEEPALIVE_S), plus besoin de channel_timeout.
+    # log_config=None : uvicorn n'installe pas sa propre configuration de
+    # logs (ses formateurs appellent sys.stdout.isatty(), qui plante sous
+    # pythonw.exe — tâche planifiée sans console) ; ses messages passent par
+    # celle du dashboard (logs/gex.log).
+    logging.getLogger("uvicorn").setLevel(logging.WARNING)
     uvicorn.run(build(dash_app), host=host, port=port, log_level="warning",
-                timeout_keep_alive=30, access_log=False)
+                log_config=None, timeout_keep_alive=30, access_log=False)
 
 
 if __name__ == "__main__":

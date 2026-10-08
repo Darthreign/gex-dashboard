@@ -75,6 +75,10 @@ Les mesures d'urgence des 05-06/10 sont levées et la page scalp n'a plus AUCUN 
 - Moteur d'indicateurs repassé de 60 s à 20 s (`SCALP_INDICATORS_EVERY_S`) : 2,6 s à froid pour NQ + ES à 600 000 ticks chacun.
 - **Si ça sature en séance** : `STATS`/logs d'abord ; chaque flux est un canal par réglages, son coût ne dépend pas du nombre d'onglets. Repli serveur : `GEX_SERVER=waitress` (les routes Flask des flux existent aussi).
 
+## Tâche planifiée « GEX dashboard » qui ne démarrait plus (même session)
+
+Sous `pythonw.exe` (tâche sans console), `sys.stdout`/`sys.stderr` valent None et uvicorn plantait au démarrage en configurant ses logs (`ValueError: Unable to configure formatter 'default'`), sans rien écrire nulle part. `run.bat` (console) fonctionnait. Corrigé : `logsetup._ensure_std_streams()` redirige ces flux vers le néant, et uvicorn tourne avec `log_config=None` (ses messages vont dans logs/gex.log). Vérifié en lançant le dashboard sans flux standard : il répond en 4 s, contre aucune réponse avant.
+
 ## Forwards des échéances lointaines (même session, vu dans capture.log du 08/10)
 
 `metrics.implied_forwards` rejetait comme « aberrant » tout forward à plus de 3 % du spot, donc toutes les LEAPS (portage légitime de +5 à +20 % sur 1-4 ans) : ces échéances retombaient sur un forward = spot, IV faussée. La référence est désormais aussi le forward de portage S·e^(rT), tolérance 3 % + 2 %/an. Un écart à court terme reste rejeté et signalé : au 08/10, TMUS (spot 159,42 contre un forward de ~171 sur toutes les échéances) indique un spot figé ou faux pour ce titre.
