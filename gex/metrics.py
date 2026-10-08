@@ -64,7 +64,7 @@ def enrich(snapshot: ChainSnapshot, now_et: datetime | None = None) -> pd.DataFr
 
     oi = df["open_interest"].to_numpy()
     sign = np.where(is_call, 1.0, -1.0)
-    df["gex"] = sign * g * oi * CONTRACT_MULTIPLIER * s**2 * 0.01
+    df["gex"] = greeks.gex_dollars(sign, g, oi, CONTRACT_MULTIPLIER, s)
     # Convention DIFFÉRENTE de celle du GEX, et c'est voulu. Le gamma d'une
     # option est TOUJOURS positif (call comme put) : sans un signe artificiel,
     # calls et puts seraient indiscernables — d'où le flip `sign` (dealers
@@ -173,7 +173,7 @@ def gamma_profile(df: pd.DataFrame, spot: float, weight_col: str = "open_interes
     oi = d[weight_col].to_numpy()[:, None]
     sign = np.where((d["type"] == "C").to_numpy()[:, None], 1.0, -1.0)
     g = greeks.gamma(grid[None, :], k, t, rates.current_rate(), iv)
-    profile = (sign * g * oi * CONTRACT_MULTIPLIER * grid[None, :] ** 2 * 0.01).sum(axis=0)
+    profile = greeks.gex_dollars(sign, g, oi, CONTRACT_MULTIPLIER, grid[None, :]).sum(axis=0)
     return grid, profile
 
 
@@ -201,8 +201,8 @@ def gex_at_spot(df: pd.DataFrame, ref_spot: float,
     g = greeks.gamma(ref_spot, d["strike"].to_numpy(), d["t_years"].to_numpy(),
                      rates.current_rate(), d["iv"].to_numpy())
     sign = np.where((d["type"] == "C").to_numpy(), 1.0, -1.0)
-    gex = (sign * g * d[weight_col].to_numpy()
-           * CONTRACT_MULTIPLIER * ref_spot ** 2 * 0.01)
+    gex = greeks.gex_dollars(sign, g, d[weight_col].to_numpy(),
+                             CONTRACT_MULTIPLIER, ref_spot)
     return pd.Series(gex, index=d["strike"].to_numpy()).groupby(level=0).sum()
 
 
@@ -218,8 +218,8 @@ def gex_by_strike_weighted(df: pd.DataFrame, spot: float,
     if df.empty or weight_col not in df.columns:
         return pd.Series(dtype=float)
     sign = np.where((df["type"] == "C").to_numpy(), 1.0, -1.0)
-    gex = (sign * df["gamma_bs"].to_numpy() * df[weight_col].to_numpy()
-           * CONTRACT_MULTIPLIER * spot ** 2 * 0.01)
+    gex = greeks.gex_dollars(sign, df["gamma_bs"].to_numpy(), df[weight_col].to_numpy(),
+                             CONTRACT_MULTIPLIER, spot)
     return pd.Series(gex, index=df["strike"].to_numpy()).groupby(level=0).sum()
 
 
@@ -680,8 +680,7 @@ def flow_delta(prev: pd.DataFrame, cur: pd.DataFrame, spot: float) -> dict[str, 
     # séance, cela montre si ce qui se traite ajoute du gamma stabilisant
     # (calls) ou déstabilisant (puts) — un « CVD » du gamma.
     gsign = np.where(is_call, 1.0, -1.0)
-    gsigned = (dvol * m["gamma_bs"] * gsign
-               * CONTRACT_MULTIPLIER * spot ** 2 * 0.01)
+    gsigned = greeks.gex_dollars(gsign, m["gamma_bs"], dvol, CONTRACT_MULTIPLIER, spot)
     return {
         "flow_total": float(signed.sum()),
         "flow_calls": float(signed[is_call].sum()),

@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 import requests
 
 from .config import CONTRACT_MULTIPLIER
+from .greeks import gex_dollars
 from .rtquote import (
     BACKOFF_MAX,
     BACKOFF_START,
@@ -445,7 +446,7 @@ class FlowTape:
             # lieu de les empiler tous du même côté.
             gamma = self._gamma.get(stream)
             if gamma is not None and spot and type_sign:
-                g = sign * type_sign * size * gamma * mult * spot ** 2 * 0.01
+                g = gex_dollars(sign * type_sign, gamma, size, mult, spot)
                 bar.net_gamma += g
                 if typ == "C":
                     bar.net_gamma_calls += g

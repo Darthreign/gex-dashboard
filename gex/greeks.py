@@ -15,6 +15,16 @@ from scipy.stats import norm
 _EPS = 1e-12
 
 
+def gex_dollars(sign, gamma, weight, multiplier, spot):
+    """GEX en $ par 1 % de move : sign × gamma × poids × multiplicateur × spot² × 0.01.
+
+    Seul endroit où la formule est écrite. `weight` = open interest, volume ou
+    taille d'un print selon l'appelant ; `sign` encode l'hypothèse de
+    positionnement dealer (call +1, put −1), le gamma BS étant toujours positif.
+    """
+    return sign * gamma * weight * multiplier * spot ** 2 * 0.01
+
+
 def _d1_d2(s, k, t, r, sigma):
     s = np.asarray(s, dtype=float)
     k = np.asarray(k, dtype=float)
