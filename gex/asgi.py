@@ -5,7 +5,8 @@ pool pour toute la vie de l'onglet — d'où les relèvements successifs
 (8 -> 256 threads, connection_limit 500) et les pannes « connection limit
 reached » en séance. Ici :
 
-- les trois flux SSE (/stream, /scalp-indicators-stream, /chart-stream) sont
+- les flux SSE (/stream, /scalp-indicators-stream, /chart-stream,
+  /scalp-stream) sont
   servis par la boucle asyncio d'uvicorn : une connexion ne coûte qu'une
   coroutine endormie, des milliers tiennent sur un seul thread. Elles lisent
   les mêmes canaux partagés (gex/broadcast.py) que la version WSGI ;
@@ -62,6 +63,14 @@ async def scalp_chart_stream(request):
     return _sse(scalp_chart_channel(symbol, tf))
 
 
+async def scalp_panels_stream(request):
+    from .app import SCALP_SCHED_SYMBOLS, scalp_panels_channel, scalp_panels_params
+    symbol = request.path_params["symbol"].upper()
+    if symbol not in SCALP_SCHED_SYMBOLS:
+        return JSONResponse({"error": "symbole non couvert (NQ/ES seulement)"}, 404)
+    return _sse(scalp_panels_channel(symbol, *scalp_panels_params(request.query_params)))
+
+
 def build(dash_app, wsgi_threads: int = WSGI_THREADS) -> Starlette:
     """Application ASGI : routes SSE asynchrones, puis tout le reste vers
     l'application Flask de Dash."""
@@ -69,5 +78,6 @@ def build(dash_app, wsgi_threads: int = WSGI_THREADS) -> Starlette:
         Route("/api/v1/{symbol}/stream", price_stream),
         Route("/api/v1/{symbol}/scalp-indicators-stream", scalp_indicators_stream),
         Route("/api/v1/{symbol}/chart-stream", scalp_chart_stream),
+        Route("/api/v1/{symbol}/scalp-stream", scalp_panels_stream),
         Mount("/", app=WSGIMiddleware(dash_app.server, workers=wsgi_threads)),
     ])

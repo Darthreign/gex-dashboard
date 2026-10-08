@@ -2357,6 +2357,94 @@ def scalp_chart_channel(symbol: str, tf: str) -> broadcast.Channel:
     return broadcast.channel(("scalp-chart", symbol, tf), factory, 1.0)
 
 
+SCALP_PANELS = ("head", "ladder", "prints", "hedge", "price")
+# bloc -> case « Masquer… » de Personnalisation qui le coupe
+SCALP_PANEL_HIDE = {"ladder": "hide_ladder", "prints": "hide_tape",
+                    "hedge": "hide_hedge_chart", "price": "hide_price_chart"}
+
+
+def scalp_panels_snapshot(symbol: str, lang: str, window: int, min_size: float,
+                          v1: bool, hide: frozenset) -> dict[str, str]:
+    """Blocs de la page scalp hors bandeau et graphique LW, chacun sérialisé
+    en JSON (composants Dash et figures Plotly) : en-tête, niveaux, gros
+    prints, couverture des dealers, et prix Plotly sur /scalpv1 seulement.
+    Les blocs masqués par l'utilisateur ne sont pas calculés."""
+    from plotly.utils import PlotlyJSONEncoder
+
+    def enc(o) -> str:
+        return json.dumps(o, cls=PlotlyJSONEncoder)
+
+    want = {b for b in SCALP_PANELS if SCALP_PANEL_HIDE.get(b) not in hide}
+    if not v1:
+        want.discard("price")              # /scalp : graphique LW (chart-stream)
+    out: dict[str, str] = {}
+    sctx = scalp_context(symbol)
+    if v1 and sctx is not None:
+        # /scalpv1 n'a pas le flux d'indicateurs : son bandeau (V1, sans
+        # lecture normalisée) passe par ce flux-ci
+        spot = _scalp_live_spot(symbol, sctx)
+        out["banner"] = enc(scalp_banner(symbol, sctx, spot, lang, scalp_absorption(symbol),
+                                         swing=False, edge=False))
+    if "hedge" in want:
+        hedge = cached_hedge_fig(symbol, lang, window)
+        hedge.update_layout(height=300, uirevision=f"scalp-{symbol}-{window}")
+        out["hedge"] = enc(hedge)
+    if "prints" in want:
+        out["prints"] = enc(tape_table(symbol, lang, min_size=min_size, include_combos=False))
+    if sctx is None:
+        wait = enc(html.Div(t(lang, "waiting_native"), className="hint"))
+        out["head"] = wait
+        if "ladder" in want:
+            out["ladder"] = wait
+        return out
+    spot = _scalp_live_spot(symbol, sctx)
+    out["head"] = enc(scalp_head(symbol, lang, sctx, spot))
+    if "ladder" in want:
+        out["ladder"] = enc(scalp_ladder(symbol, sctx, spot))
+    if "price" in want:
+        price = scalp_price_fig(symbol, sctx, spot)
+        price.update_layout(uirevision=f"scalp-price-{symbol}")
+        out["price"] = enc(price)
+    return out
+
+
+def scalp_panels_channel(symbol: str, lang: str, window: int, min_size: float,
+                         v1: bool, hide: frozenset) -> broadcast.Channel:
+    """Canal du flux /scalp-stream (même principe que les deux canaux
+    ci-dessus) : un calcul par seconde pour tous les onglets aux mêmes
+    réglages, poussé seulement si un bloc a changé. Le message porte TOUS
+    les blocs (un nouvel abonné reçoit un état complet) et une signature par
+    bloc : le navigateur ne remplace que ceux dont la signature a changé."""
+    def factory():
+        last = {"sig": None}
+
+        def produce():
+            blocks = scalp_panels_snapshot(symbol, lang, window, min_size, v1, hide)
+            sig = {k: format(hash(v) & 0xFFFFFFFF, "x") for k, v in blocks.items()}
+            if sig == last["sig"]:
+                return None
+            last["sig"] = sig
+            body = ",".join(f'"{k}":{v}' for k, v in blocks.items())
+            return f'data: {{"sig":{json.dumps(sig)},"blocks":{{{body}}}}}\n\n'
+        return produce
+
+    return broadcast.channel(("scalp-panels", symbol, lang, window, min_size, v1,
+                              tuple(sorted(hide))), factory, 1.0)
+
+
+def scalp_panels_params(args) -> tuple:
+    """(lang, window, min_size, v1, hide) depuis la requête du flux."""
+    def num(name, default, cast):
+        try:
+            return cast(args.get(name, default))
+        except (TypeError, ValueError):
+            return default
+    hide = frozenset(h for h in (args.get("hide") or "").split(",")
+                     if h in SCALP_PANEL_HIDE.values())
+    return (args.get("lang", "fr"), num("window", -1, int), num("min", 0.0, float),
+            args.get("v1") == "1", hide)
+
+
 _SCALP_INDICATOR_SCHED = None
 
 
@@ -3843,16 +3931,9 @@ def create_app() -> Dash:
             # onglet ne pardonne pas l'écart. Ne pas redescendre sous 1000 ms
             # sans re-mesurer SOUS CHARGE DE MARCHÉ RÉELLE, pas un test solo
             # hors séance — la leçon de cette nuit ne s'est pas généralisée.
-            # Désactivé en urgence le 2026-10-05, RÉACTIVÉ le 2026-10-08 : les
-            # callbacks qu'il cadence sont désormais partagés entre onglets
-            # (broadcast.shared, un calcul par seconde quel que soit le nombre
-            # d'onglets) et servis par le serveur ASGI. Il ne tourne que sur
-            # /scalp et /scalpv1 (cf. le clientside callback qui pilote
-            # tape-tick/tape-tab-tick) et refresh_scalp ne calcule pas les
-            # blocs masqués par l'utilisateur.
-            dcc.Interval(id="tape-tick", interval=1000, disabled=True),
-            # Onglet Tape de la page principale : sa propre minuterie, pour que
-            # les pages scalp ne réveillent pas ses callbacks (et inversement).
+            # Onglet Tape de la page principale : rafraîchi à la seconde, et
+            # seulement quand il est ouvert (cf. callback qui pilote
+            # `disabled`). Les pages scalp, elles, sont en flux poussé (SSE).
             dcc.Interval(id="tape-tab-tick", interval=1000, disabled=True),
             # Ticker de prix /scalp : vrai flux poussé (EventSource, cf.
             # clientside_callback plus bas), aucun sondage — donc pas de dcc.Interval
@@ -3932,21 +4013,18 @@ def create_app() -> Dash:
     # Page /moc : ses propres callbacks (cf. gex/mocpage.py)
     mocpage.register(app)
 
-    # Minuteries à la seconde, seulement là où quelqu'un les lit : tape-tick
-    # sur les pages scalp, tape-tab-tick sur l'onglet Tape de la page
-    # principale (aucune requête par seconde depuis une page qui n'en a pas
-    # besoin).
+    # Les onglets Tape et Heatmap de la page principale ne sont rafraîchis
+    # que lorsqu'ils sont ouverts : aucune requête périodique depuis une
+    # autre page (scalp, moc) ou un autre onglet.
     app.clientside_callback(
         """
         function(path, tab) {
             const p = path || '/';
-            const scalp = p === '/scalp' || p.startsWith('/scalp/')
-                || p === '/scalpv1' || p.startsWith('/scalpv1/');
-            const main = !scalp && !(p === '/moc' || p.startsWith('/moc/'));
-            return [!scalp, !(main && tab === 'tape')];
+            const other = p.startsWith('/scalp') || p.startsWith('/moc');
+            return [other || tab !== 'tape', other || tab !== 'heat'];
         }
         """,
-        [Output("tape-tick", "disabled"), Output("tape-tab-tick", "disabled")],
+        [Output("tape-tab-tick", "disabled"), Output("heatmap-tick", "disabled")],
         Input("url", "pathname"), Input("tab", "value"),
     )
 
@@ -5051,7 +5129,7 @@ def create_app() -> Dash:
                     let snap;
                     try { snap = JSON.parse(ev.data); } catch (e) { return; }
                     // Mesure d'urgence 2026-10-05 : le bandeau (scalp-banner)
-                    // est maintenant poussé par CE flux (tape-tick désactivé,
+                    // est poussé par CE flux (aucun sondage à la seconde,
                     // cf. refresh_scalp) plutôt que recalculé par Dash.
                     if (snap.banner) {
                         window.dash_clientside.set_props('scalp-banner', {children: snap.banner});
@@ -5233,9 +5311,10 @@ def create_app() -> Dash:
          Output("pc-gauge", "children")],
         [Input("rt-tick", "n_intervals"), Input("symbol", "value"),
          Input("lang", "value"), Input("unit", "value")],
+        State("url", "pathname"),
     )
     @broadcast.shared(ttl=2.0, skip=(0,))
-    def refresh_cards(_, symbol, lang, unit):
+    def refresh_cards(_, symbol, lang, unit, path=None):
         """Tuiles au rythme du flux (5 s) et non des pulls (60 s).
 
         Le GEX net y est recalculé au spot courant : c'est la valeur qui dit
@@ -5243,6 +5322,9 @@ def create_app() -> Dash:
         minutes. Le recalcul porte sur un seul point de spot, donc son coût
         est négligeable devant la grille de 161 points du Gamma Flip.
         """
+        p = path or "/"
+        if p.startswith("/scalp") or p.startswith("/moc"):
+            raise PreventUpdate            # tuiles masquées sur ces pages
         xf, _, _ = _transform_for(symbol, unit)
         return (build_cards(symbol, lang, xf, scale=unit), regime_banner(symbol, lang),
                 pc_gauge(symbol, lang))
@@ -5486,94 +5568,90 @@ def create_app() -> Dash:
             raise PreventUpdate
         return cached_hedge_fig(symbol, lang, int(window or 0))    # -1 = live à la seconde
 
+    # Page scalp en temps réel PAR FLUX POUSSÉ (2026-10-08) : plus aucun
+    # sondage à la seconde. Ce callback ne fait que le PREMIER rendu du
+    # bandeau (chargement, changement de symbole/langue/version) ; ensuite :
+    # - bandeau /scalp : flux /scalp-indicators-stream ;
+    # - graphique /scalp : flux /chart-stream ;
+    # - en-tête, niveaux, gros prints, couverture des dealers (et bandeau +
+    #   prix Plotly sur /scalpv1) : flux /scalp-stream (scalp_panels_channel).
     @app.callback(
-        [Output("scalp-banner", "children"),
-         Output("scalp-head", "children"), Output("scalp-ladder", "children"),
-         Output("scalp-hedge", "figure"), Output("scalp-prints", "children"),
-         Output("scalp-price", "figure")],
-        [Input("tape-tick", "n_intervals"), Input("url", "pathname"),
-         Input("symbol", "value"), Input("lang", "value"),
-         Input("scalp-window", "value"), Input("scalp-min", "value"),
+        Output("scalp-banner", "children"),
+        [Input("url", "pathname"), Input("symbol", "value"), Input("lang", "value"),
          Input("scalp-banner-version", "data")],
-        [State("emergency-ready", "data"), State("sc-ergo-options", "value")],
     )
-    @broadcast.shared(ttl=1.0, skip=(0,))
-    def refresh_scalp(_, path, symbol, lang, window, min_size, banner_version, ready,
-                      ergo=None):
+    @broadcast.shared(ttl=1.0, skip=())
+    def refresh_scalp(path, symbol, lang, banner_version):
         if not is_scalp_path(path) or symbol not in ("NQ", "ES"):
             raise PreventUpdate
-        # Mesure d'urgence 2026-10-06 : au chargement de page (et pendant
-        # les 5 s de `emergency-ready`, cf. commentaire sur le Store dans le
-        # layout), on calcule UNIQUEMENT le bandeau (déjà repris en direct
-        # par le flux SSE juste après) — hedge/ladder/tape/price restent
-        # no_update, donc jamais calculés "par défaut". Un `ctx.triggered_id
-        # is None` seul ne suffisait pas : dcc.Location + les boot callbacks
-        # (lang, scalp-banner-version…) redéclenchent ce callback juste
-        # après le montage avec un VRAI triggered_id, pas None (repéré en
-        # direct, "ça a quand même rechargé toutes les données").
-        if not ready:
-            sctx = scalp_context(symbol)
-            if sctx is None:
-                wait = html.Div(t(lang, "waiting_native" if symbol in ("NQ", "ES")
-                                  else "waiting_first_pull"), className="hint")
-                return wait, no_update, no_update, no_update, no_update, no_update
-            spot = _scalp_live_spot(symbol, sctx)
-            absorb = scalp_absorption(symbol)
-            is_v2_banner = (path or "/") == "/scalp" and (banner_version or "v2") != "v1"
-            banner = scalp_banner(symbol, sctx, spot, lang, absorb, swing=is_v2_banner,
-                                  edge=is_scalp_v2_page(path))
-            return banner, no_update, no_update, no_update, no_update, no_update
-        # /scalp v2 affiche le graphique de PRIX en Lightweight Charts
-        # (scalp-lw-card) ; scalp-price (Plotly) reste dans le DOM mais
-        # CSS-hidden sur cette page (body.scalp-v2-page, style.css) — seul
-        # /scalpv1 l'affiche encore. Le construire quand même (go.Figure +
-        # sérialisation JSON : pas gratuit) doublait le travail par cycle en
-        # pure perte — no_update sur cet Output quand /scalp v2 est actif.
-        #
-        # "Couverture des dealers" (scalp-hedge) : repassé sur Plotly pour
-        # /scalp v2 AUSSI le 2026-10-05 (donc plus de no_update ici) — la
-        # version Lightweight Charts (scalp-lw-hedge) clignotait en mode Live
-        # (thread principal du navigateur saturé par les mises à jour trop
-        # fréquentes), deux tentatives de correctif ont chacune régressé
-        # (intervalle dédié -> page figée ; flux SSE poussé -> graphique
-        # vide), abandonnées cette nuit-là. Plotly n'a jamais eu ce problème
-        # sur /scalpv1 — plus simple de réutiliser ce qui marche déjà que de
-        # continuer à risquer une régression. cf. style.css pour le bascule
-        # d'affichage (scalp-hedge-card visible, scalp-lw-hedge-card masquée,
-        # y compris sur /scalp v2 désormais).
-        is_v2 = (path or "/") == "/scalp"
-        # blocs masqués par l'utilisateur (Personnalisation) : rien à calculer
-        hidden = set(ergo or ())
-        if "hide_hedge_chart" in hidden:
-            hedge = no_update
-        else:
-            hedge = cached_hedge_fig(symbol, lang, int(window if window is not None else -1))
-            hedge.update_layout(height=300, uirevision=f"scalp-{symbol}-{window}")
-        prints = no_update if "hide_tape" in hidden else \
-            tape_table(symbol, lang, min_size=float(min_size or 0), include_combos=False)
         sctx = scalp_context(symbol)
         if sctx is None:
-            wait = html.Div(t(lang, "waiting_native" if symbol in ("NQ", "ES")
-                              else "waiting_first_pull"), className="hint")
-            price = no_update if is_v2 else empty_fig(t(lang, "sc_waiting_levels"), symbol)
-            return wait, wait, wait, hedge, prints, price
+            return html.Div(t(lang, "waiting_native"), className="hint")
         spot = _scalp_live_spot(symbol, sctx)
-        if is_v2 or "hide_price_chart" in hidden:
-            price = no_update
-        else:
-            price = scalp_price_fig(symbol, sctx, spot)
-            price.update_layout(uirevision=f"scalp-price-{symbol}")
         absorb = scalp_absorption(symbol)
-        # swing=True SEULEMENT sur /scalp exact — même garde que scalp-lw-card/
-        # refresh_scalp_lw, /scalpv1 ne doit jamais recevoir swing=True quoi
-        # que vaille le store scalp-banner-version (bouton V1/V2, absent du
-        # DOM /scalpv1 de toute façon, mais la garde reste explicite ici).
+        # swing=True SEULEMENT sur /scalp exact : /scalpv1 ne doit jamais le
+        # recevoir, quoi que vaille le store scalp-banner-version
         is_v2_banner = (path or "/") == "/scalp" and (banner_version or "v2") != "v1"
-        return (scalp_banner(symbol, sctx, spot, lang, absorb, swing=is_v2_banner,
-                                  edge=is_scalp_v2_page(path)),
-                scalp_head(symbol, lang, sctx, spot),
-                no_update if "hide_ladder" in hidden else scalp_ladder(symbol, sctx, spot),
-                hedge, prints, price)
+        return scalp_banner(symbol, sctx, spot, lang, absorb, swing=is_v2_banner,
+                            edge=is_scalp_v2_page(path))
+
+    # Flux des blocs (cf. commentaire ci-dessus) : une connexion par onglet,
+    # rouverte quand un réglage change ; seuls les blocs dont la signature a
+    # changé sont remplacés (pas de clignotement des blocs immobiles).
+    app.clientside_callback(
+        """
+        function(symbol, path, lang, window_, minSize, ergo) {
+            if (window._scPanels) { window._scPanels.close(); window._scPanels = null; }
+            if (window._scPanelsTimer) { clearTimeout(window._scPanelsTimer); window._scPanelsTimer = null; }
+            const p = path || '/';
+            const v1 = p === '/scalpv1' || p.startsWith('/scalpv1/');
+            const v2 = p === '/scalp' || p.startsWith('/scalp/');
+            if (!(v1 || v2) || !['NQ', 'ES'].includes(symbol)) {
+                return window.dash_clientside.no_update;
+            }
+            const hide = (ergo || []).filter(h => h.startsWith('hide_')).sort().join(',');
+            const qs = new URLSearchParams({lang: lang || 'fr',
+                window: window_ == null ? -1 : window_, min: minSize || 0,
+                v1: v1 ? '1' : '0', hide: hide});
+            const target = {head: ['scalp-head', 'children'], ladder: ['scalp-ladder', 'children'],
+                            prints: ['scalp-prints', 'children'], hedge: ['scalp-hedge', 'figure'],
+                            price: ['scalp-price', 'figure'], banner: ['scalp-banner', 'children']};
+            const token = {};
+            window._scPanelsToken = token;
+            window._scPanelsSig = {};
+            const state = {delay: 3000};
+            const connect = function() {
+                const es = new EventSource(`/api/v1/${symbol}/scalp-stream?${qs}`);
+                window._scPanels = es;
+                es.onmessage = function(ev) {
+                    state.delay = 3000;
+                    let m;
+                    try { m = JSON.parse(ev.data); } catch (e) { return; }
+                    const seen = window._scPanelsSig;
+                    Object.keys(m.blocks || {}).forEach(function(k) {
+                        if (!target[k] || seen[k] === m.sig[k]) return;
+                        seen[k] = m.sig[k];
+                        const prop = {};
+                        prop[target[k][1]] = m.blocks[k];
+                        window.dash_clientside.set_props(target[k][0], prop);
+                    });
+                };
+                es.onerror = function() {
+                    es.close();
+                    if (window._scPanelsToken !== token || window._scPanels !== es) return;
+                    window._scPanelsTimer = setTimeout(connect, state.delay + Math.random() * 2000);
+                    state.delay = Math.min(state.delay * 2, 30000);
+                };
+            };
+            connect();
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("scalp-stream-sink", "title"),
+        Input("symbol", "value"), Input("url", "pathname"), Input("lang", "value"),
+        Input("scalp-window", "value"), Input("scalp-min", "value"),
+        Input("sc-ergo-options", "value"),
+    )
 
     # scalp-lw-data : migré du poll tape-tick vers un flux SSE poussé
     # (2026-10-05, ~10h ET lundi, urgence serveur en pleine séance — demande
@@ -5737,6 +5815,16 @@ def create_app() -> Dash:
     # le nouveau `tf` (même principe que symbole/page sur les deux flux
     # ci-dessus) — le serveur ne gère donc qu'UN SEUL tf par connexion,
     # jamais un mélange.
+    @app.server.route("/api/v1/<symbol>/scalp-stream")
+    def _scalp_panels_stream(symbol):
+        from flask import Response, request
+        symbol = symbol.upper()
+        if symbol not in SCALP_SCHED_SYMBOLS:
+            return Response("symbole non couvert (NQ/ES seulement)", status=404)
+        ch = scalp_panels_channel(symbol, *scalp_panels_params(request.args))
+        return Response(broadcast.sse_events(ch), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
     @app.server.route("/api/v1/<symbol>/chart-stream")
     def _scalp_chart_stream(symbol):
         from flask import Response, request
