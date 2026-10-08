@@ -27,7 +27,7 @@ def test_first_run_writes_compatible_file():
     cfg, custom = moc.letf_config("NQ")
     assert custom and cfg["TQQQ"] == (3.0, 2.6e10)
     assert cfg["SQQQ"] == moc.DEFAULT_LETF["NQ"]["SQQQ"]        # défaut gardé
-    meta = json.loads(letf_aum.path().read_text())["_meta"]["etf"]
+    meta = json.loads(letf_aum.path().read_text(encoding="utf-8"))["_meta"]["etf"]
     assert meta["TQQQ"]["source"] == "yahoo" and meta["SQQQ"]["source"] == "défaut"
 
 

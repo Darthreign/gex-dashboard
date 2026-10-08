@@ -210,7 +210,7 @@ def report(symbol: str, max_days: int | None = None) -> dict:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({**chosen.to_json(), "validated": validated,
                                 "generated": datetime.now(ET).isoformat(),
-                                "test_days": out["test_days"]}, indent=2))
+                                "test_days": out["test_days"]}, indent=2), encoding="utf-8")
     return out
 
 

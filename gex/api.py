@@ -44,8 +44,11 @@ def _futures_last_price(symbol: str) -> float | None:
     from .rtquote import QUOTES, credentials_present
 
     px = None
-    if remote_url():
-        px = flowtape.TAPE.last_price(symbol)
+    # en mode séparé, TAPE est un RemoteTape (cf. gex/run.py) ; sinon, ou
+    # tant qu'il n'est pas installé, la capture locale fait foi
+    remote_last = getattr(flowtape.TAPE, "last_price", None)
+    if remote_url() and remote_last is not None:
+        px = remote_last(symbol)
     else:
         from .tickcapture import CAPTURE
         px = CAPTURE.last_price(symbol)

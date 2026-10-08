@@ -197,7 +197,7 @@ def update(sources=SOURCES, now: datetime | None = None, p: Path | None = None) 
     out["_meta"] = {"updated": now.isoformat(timespec="minutes"), "etf": new_meta}
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.write_text(json.dumps(out, indent=2), encoding="utf-8")
     tmp.replace(p)
     log.info("AUM ETF à levier : %d mis à jour, %d conservés, %d rejetés",
              len(updated), len(kept), len(rejected))

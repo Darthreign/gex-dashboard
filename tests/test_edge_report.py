@@ -62,7 +62,7 @@ def test_le_filtre_de_zone_separe_l_edge_du_piege(donnees):
     zones = r["by_zone"]["mean"]
     assert zones["frein"] > 0 > zones["accelerateur"]
     assert r["test"].loc["setup", "expectancy_em"] > r["test"].loc["naive", "expectancy_em"]
-    saved = json.loads(edge_report.params_path("NQ").read_text())
+    saved = json.loads(edge_report.params_path("NQ").read_text(encoding="utf-8"))
     assert saved["excess_em"] == 0.5 and "validated" in saved
     assert "Hors échantillon" in edge_report.to_markdown(r)
 

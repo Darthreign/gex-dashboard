@@ -55,7 +55,7 @@ class EdgeParams:
 def load_params(path: Path) -> tuple[EdgeParams, bool]:
     """Paramètres validés par le rapport s'ils existent (True), sinon défauts."""
     try:
-        return EdgeParams.from_json(json.loads(path.read_text())), True
+        return EdgeParams.from_json(json.loads(path.read_text(encoding="utf-8"))), True
     except (OSError, ValueError, TypeError):
         return EdgeParams(), False
 

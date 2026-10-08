@@ -1251,7 +1251,7 @@ def _edge_params(symbol: str):
     validated, days = False, ""
     if ok:
         try:
-            meta = json.loads(path.read_text())
+            meta = json.loads(path.read_text(encoding="utf-8"))
             validated, days = bool(meta.get("validated")), meta.get("test_days", "")
         except (OSError, ValueError):
             pass
