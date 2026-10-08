@@ -82,7 +82,7 @@ Les mesures d'urgence des 05-06/10 sont levées et la page scalp n'a plus AUCUN 
 - **Heatmap** : ce n'est plus une figure Plotly mais le même graphique que l'indicateur « Σ Profil gamma » de /scalp v2 : bougies 1 min, profil de gamma par strike en barres horizontales sur le bord droit (vert = net call, rouge = net put ; épais pâle = open interest, fin vif = volume), niveaux choisis. `heatmap_fig` (Plotly) ne sert plus qu'au PNG du bot.
 - **Séries temporelles en Lightweight Charts et en SSE** : flux delta, gamma flow, order flow (tape), historique GEX, spot vs Gamma Flip, couverture des dealers (onglet Tape, et /scalp + /scalpv1), prix /scalpv1. Chaque graphique a son flux `/api/v1/lw/<nom>?symbol=…` (un calcul partagé par réglages, poussé seulement si la description change), ouvert seulement si son onglet est affiché. Le zoom de l'utilisateur est conservé entre deux mises à jour ; recadrage seulement quand le contexte change (symbole, jour, fenêtre…).
 - Plus de `heatmap-tick` ni de callback Plotly pour ces graphiques ; l'ancienne carte LW de couverture des dealers (masquée depuis le 05/10 car elle clignotait) est supprimée.
-- Vérifié dans Chromium sur données synthétiques : page principale (tous les graphiques), Heatmap, Tape, /scalp, /scalpv1, aucune erreur JS, aucune 5xx. **À vérifier en séance réelle** : fluidité de la couverture des dealers en « Live » (mise à jour à la seconde).
+- Vérifié dans Chromium sur données synthétiques : page principale (tous les graphiques), Heatmap, Tape, /scalp, /scalpv1, aucune erreur JS, aucune 5xx. Couverture des dealers en « Live » (mise à jour à la seconde) : ne clignote pas, confirmé par l'utilisateur sur son installation.
 
 ## « pts depuis l'open » pendant la séance ETH (même session)
 
