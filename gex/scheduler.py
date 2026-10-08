@@ -621,6 +621,15 @@ def start_scheduler(embedded_capture: bool = True, ingest: bool = True) -> Backg
 def add_ingest_jobs(sched: BackgroundScheduler) -> None:
     """Récupération des chaînes et tâches qui en dépendent : portées par le
     dashboard en mode autonome, par le processus moteur sinon."""
+    # Encours des ETF à levier (page /moc, cf. gex/letf_aum.py) : chaque soir
+    # de semaine, après la publication des valeurs liquidatives, et au
+    # démarrage si le fichier est absent ou périmé.
+    from . import letf_aum
+    sched.add_job(letf_aum.update, "cron", day_of_week="mon-fri", hour=18, minute=10,
+                  max_instances=1, coalesce=True, misfire_grace_time=6 * 3600)
+    if letf_aum.is_stale():
+        sched.add_job(letf_aum.update, "date",
+                      run_date=datetime.now(ET) + timedelta(seconds=90))
     sched.add_job(
         pull_all,
         "interval",

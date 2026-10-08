@@ -163,7 +163,7 @@ def cards(symbol: str, est: dict | None, lang: str) -> list:
     r = est["day_return"]
     out.append(card(t(lang, "moc_card_letf"), _usd(est["letf"]["total"]),
                     (f"{r:+.2%} · " if r is not None else "")
-                    + t(lang, "moc_letf_custom" if est.get("letf_custom") else "moc_letf_default"),
+                    + _letf_source(symbol, lang),
                     acc(est["letf"]["total"])))
     mags = est["magnets"]
     if mags:
@@ -171,6 +171,14 @@ def cards(symbol: str, est: dict | None, lang: str) -> list:
         out.append(card(t(lang, "moc_card_magnet", chain=m["chain"]), f"{m['strike']:,.0f}",
                         " · ".join(f"{x['strike']:,.0f} ({x['dist']:+,.0f})" for x in mags)))
     return out
+
+
+def _letf_source(symbol: str, lang: str) -> str:
+    from .letf_aum import freshness
+    day, stale = freshness(symbol)
+    if day is None:
+        return t(lang, "moc_letf_default")
+    return t(lang, "moc_letf_stale" if stale else "moc_letf_asof", day=day)
 
 
 def profile_fig(symbol: str, est: dict | None, lang: str) -> go.Figure:

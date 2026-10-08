@@ -13,3 +13,4 @@ waitress>=3.0
 uvicorn>=0.30
 starlette>=0.38
 a2wsgi>=1.10
+yfinance>=0.2.50
