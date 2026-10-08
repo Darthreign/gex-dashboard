@@ -92,7 +92,8 @@ Règle demandée : **OPRA = données live, CBOE = toutes les minutes** (CBOE est
 - Recalculés : temps restant, gamma, delta, GEX, DEX, Gamma Flip, HVL. **Fixes jusqu'à la salve suivante** : open interest, IV (« sticky strike », l'IV en continu demanderait un abonnement à toute la chaîne : refusé, trop lourd). Les murs GEX1…5 restent classés au spot de clôture, volontairement.
 - Volume du jour : complété par les prints OPRA (`FlowTape.contract_volumes`, relayé au dashboard par la liaison capture) ; on garde le plus grand du volume de salve et du volume compté.
 - Garde-fous : spot live absent ou de plus de 2 min, ou à plus de 5 % du spot de salve -> on affiche la salve telle quelle.
-- Coût mesuré : ~140 ms par réévaluation d'une chaîne SPX de 9 600 contrats (dont ~105 ms pour le Gamma Flip), seulement pour les symboles affichés.
+- Coût mesuré : ~50 ms par réévaluation d'une chaîne SPX de 9 600 contrats. Le Gamma Flip (IV figée) ne dépend pas du spot courant : celui de la salve est réutilisé tel quel (`metrics.register_live_alias`) ; HVL et flip « moneyness » sont recalculés au plus toutes les 30 s (`metrics.ZG_LIVE_REFRESH_S`). `zero_gamma_info` est mémoïsé par chaîne, et la densité normale est calculée en numpy (`greeks._pdf`, même valeur que scipy, ~3× plus rapide ici).
+- Charge mesurée (chaîne SPX de 9 600 contrats, spot qui bouge, serveur de test) : 1 onglet = 16 % d'un cœur, 28 ms de latence médiane ; **20 onglets = 34 % d'un cœur, 331 ms médiane, 940 ms p95, 0,43 Mo/s sortants, aucune erreur**. Avant optimisation : 163 %, 1,4 s, 3,3 s. Le coût dépend surtout du nombre de symboles regardés, pas du nombre d'onglets.
 - Flux delta, gamma échangé, tape, couverture : ils lisaient déjà le flux OPRA mais seulement sur disque ; ils incluent maintenant la minute en cours (`app.tape_day`).
 - Affichage : un flux « chainver » pousse la version de la chaîne ; la vue principale (GEX/DEX, niveaux, profil, Vanna & Charm, tuiles) se recalcule à chaque version au lieu du tick de 60 s.
 - **Une seule connexion SSE par page** (`/api/v1/lw-multi`, `GexLW.streams`) : un navigateur n'ouvre que 6 connexions HTTP/1.1 par serveur, et un flux par graphique bloquait les requêtes Dash (constaté pendant la vérification).
@@ -103,6 +104,7 @@ Règle demandée : **OPRA = données live, CBOE = toutes les minutes** (CBOE est
 
 - Séances à prix figé (aucun tick dans les 2 min avant 15h45/15h50/16h00 : Labor Day 07/09, trous de capture 08/09 et 18/09) : exclues au lieu d'être comptées « mouvement 0 » (`moc_report._price_at`).
 - Échéances réglées à l'ouverture (mensuels SPX/NDX, trimestriels ES/NQ) : retirées du book l'après-midi de leur échéance (`moc.live_contracts`). Avant, les snapshots CBOE (sans colonne `settle_am`) les comptaient comme expirant à la clôture : −4 millions de contrats ES le 18/09. Relancer `python scripts/moc_report.py` pour régénérer l'historique.
+- Snapshot NQ/ES enregistré à 15h36 (collecte rapide 0DTE/1DTE, job `native_moc_snapshot`) : les options sur futures manquaient au rapport depuis le 24/09.
 
 ## « pts depuis l'open » pendant la séance ETH (même session)
 

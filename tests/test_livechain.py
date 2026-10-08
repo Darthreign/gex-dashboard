@@ -152,3 +152,21 @@ def test_lw_multi_filtre_les_entrees():
                     {"id": "y", "name": "flow", "args": {"symbol": "XXX"}}])
     assert list(lw_multi_channels(q)) == ["flow"]
     assert lw_multi_channels("pas du json") == {}
+
+
+def test_flip_de_la_salve_reutilise_pour_la_chaine_reevaluee(monkeypatch):
+    st = _native_chain()
+    base_flip = metrics.zero_gamma_info(st.enriched, st.snapshot.spot)
+    _quote(30120.0)
+    v = livechain.view("NQ", "NQ", st, __import__("threading").Lock())
+    calls = []
+    real = metrics._zero_gamma_info
+    monkeypatch.setattr(metrics, "_zero_gamma_info",
+                        lambda *a, **k: calls.append(a) or real(*a, **k))
+    # flip OI sticky strike : celui de la salve, sans recalcul
+    assert metrics.zero_gamma_info(v.enriched, 30120.0) == base_flip
+    assert calls == []
+    # un sous-ensemble de la chaîne réévaluée n'est jamais redirigé
+    sub = v.enriched[v.enriched["type"] == "C"]
+    metrics.zero_gamma_info(sub, 30120.0)
+    assert len(calls) == 1

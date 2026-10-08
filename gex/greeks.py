@@ -16,6 +16,16 @@ import numpy as np
 from scipy.stats import norm
 
 _EPS = 1e-12
+_INV_SQRT_2PI = 1.0 / np.sqrt(2.0 * np.pi)
+
+
+def _pdf(x):
+    """Densité de la loi normale centrée réduite. Même valeur que
+    `scipy.stats.norm.pdf`, sans son coût fixe de validation : sur les
+    profils de gamma (dizaines de milliers de points, ~40 appels par chaîne)
+    ce coût dominait le calcul du Gamma Flip."""
+    x = np.asarray(x, dtype=float)
+    return _INV_SQRT_2PI * np.exp(-0.5 * x * x)
 
 
 def gex_dollars(sign, gamma, weight, multiplier, spot):
@@ -73,13 +83,13 @@ def put_delta(s, k, t, r, sigma, q=0.0):
 def gamma(s, k, t, r, sigma, q=0.0):
     """Gamma, identique calls et puts."""
     d1, _ = _d1_d2(s, k, t, r, sigma, q)
-    return _dq(t, q) * norm.pdf(d1) / (_arr(s) * _sig(sigma) * np.sqrt(_t(t)))
+    return _dq(t, q) * _pdf(d1) / (_arr(s) * _sig(sigma) * np.sqrt(_t(t)))
 
 
 def vega(s, k, t, r, sigma, q=0.0):
     """Vega pour 1 point de vol (non divisé par 100)."""
     d1, _ = _d1_d2(s, k, t, r, sigma, q)
-    return _arr(s) * _dq(t, q) * norm.pdf(d1) * np.sqrt(_t(t))
+    return _arr(s) * _dq(t, q) * _pdf(d1) * np.sqrt(_t(t))
 
 
 def call_theta(s, k, t, r, sigma):
@@ -87,7 +97,7 @@ def call_theta(s, k, t, r, sigma):
     d1, d2 = _d1_d2(s, k, t, r, sigma)
     t = _t(t)
     return (
-        -_arr(s) * norm.pdf(d1) * sigma / (2 * np.sqrt(t))
+        -_arr(s) * _pdf(d1) * sigma / (2 * np.sqrt(t))
         - r * _arr(k) * np.exp(-r * t) * norm.cdf(d2)
     )
 
@@ -96,7 +106,7 @@ def put_theta(s, k, t, r, sigma):
     d1, d2 = _d1_d2(s, k, t, r, sigma)
     t = _t(t)
     return (
-        -_arr(s) * norm.pdf(d1) * sigma / (2 * np.sqrt(t))
+        -_arr(s) * _pdf(d1) * sigma / (2 * np.sqrt(t))
         + r * _arr(k) * np.exp(-r * t) * norm.cdf(-d2)
     )
 
@@ -108,7 +118,7 @@ def vanna(s, k, t, r, sigma, q=0.0):
     Multiplier par 0.01 pour l'effet d'un point de volatilité.
     """
     d1, d2 = _d1_d2(s, k, t, r, sigma, q)
-    return -_dq(t, q) * norm.pdf(d1) * d2 / _sig(sigma)
+    return -_dq(t, q) * _pdf(d1) * d2 / _sig(sigma)
 
 
 def charm(s, k, t, r, sigma, q=0.0, is_call=True):
@@ -123,7 +133,7 @@ def charm(s, k, t, r, sigma, q=0.0, is_call=True):
     d1, d2 = _d1_d2(s, k, t, r, sigma, q)
     t, sigma, q = _t(t), _sig(sigma), _arr(q)
     dq = np.exp(-q * t)
-    common = -dq * norm.pdf(d1) * (2 * (r - q) * t - d2 * sigma * np.sqrt(t)) \
+    common = -dq * _pdf(d1) * (2 * (r - q) * t - d2 * sigma * np.sqrt(t)) \
         / (2 * t * sigma * np.sqrt(t))
     carry = np.where(is_call, q * dq * norm.cdf(d1), -q * dq * norm.cdf(-d1))
     return common + carry

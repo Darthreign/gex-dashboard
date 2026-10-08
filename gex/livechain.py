@@ -23,6 +23,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 
+from . import metrics
 from .metrics import ET
 
 log = logging.getLogger(__name__)
@@ -124,6 +125,8 @@ def _compute(key, snap, df, summary, ts, spot, vols) -> LiveView:
     from .scheduler import build_native_summary
     now = datetime.now(ET)
     live = reprice_native(df, spot, now, vols)
+    # même chaîne à un autre spot : le Gamma Flip (IV figée) est celui de la salve
+    metrics.register_live_alias(live, df, float(snap.spot))
     new_snap, new_summary = build_native_summary(summary.symbol, live, now)
     # le bandeau/tuiles affichent l'heure de la donnée : celle du spot live
     new_snap = replace(new_snap, symbol=snap.symbol)

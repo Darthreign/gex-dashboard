@@ -9,6 +9,9 @@ Convention GEX (SpotGamma "naive") :
 from __future__ import annotations
 
 import logging
+import threading
+import time as time_mod
+import weakref
 from dataclasses import dataclass, field
 from datetime import datetime, date, time, timedelta
 from zoneinfo import ZoneInfo
@@ -590,8 +593,65 @@ def _nearest_crossing(grid: np.ndarray, profile: np.ndarray,
     return float(x0 - y0 * (x1 - x0) / (y1 - y0)), float((y1 - y0) / (x1 - x0))
 
 
+ZG_LIVE_REFRESH_S = 30
+# chaîne réévaluée au spot live -> (réf. à elle-même, réf. à la salve, spot
+# de la salve), cf. register_live_alias
+_LIVE_ALIAS: dict[int, tuple] = {}
+
+
+def register_live_alias(live: pd.DataFrame, base: pd.DataFrame, base_spot: float) -> None:
+    """Déclare `live` comme la salve `base` réévaluée à un autre spot (mêmes
+    contrats, même OI, même IV) : son Gamma Flip est alors celui de la salve.
+    Un sous-ensemble de `live` (autre objet) n'est jamais concerné."""
+    with _ZG_LOCK:
+        for k in [k for k, v in _LIVE_ALIAS.items() if v[0]() is None]:
+            del _LIVE_ALIAS[k]
+        _LIVE_ALIAS[id(live)] = (weakref.ref(live), weakref.ref(base), float(base_spot))
+
+
+_ZG_MEMO: dict[tuple, tuple] = {}
+_ZG_MEMO_MAX = 64
+_ZG_LOCK = threading.Lock()
+
+
 def zero_gamma_info(df: pd.DataFrame, spot: float,
                     weight_col: str = "open_interest", sticky: str = "strike") -> dict:
+    """Mémoïsé par chaîne (même objet DataFrame) et paramètres : le résumé,
+    les tuiles et l'API demandent le même flip pour la même version de chaîne
+    (réévaluée toutes les ~2 s en OPRA, cf. gex/livechain.py)."""
+    alias = _LIVE_ALIAS.get(id(df))
+    if alias is not None and alias[0]() is df and alias[1]() is not None:
+        base, base_spot = alias[1](), alias[2]
+        if weight_col == "open_interest" and sticky == "strike":
+            # IV figée : le profil ne dépend pas du spot courant (il ne fait que
+            # centrer la grille) — le flip de la salve est le bon, calculé une fois
+            return zero_gamma_info(base, base_spot, weight_col, sticky)
+        # HVL (volume live) et flip sticky moneyness (suit le spot) : recalculés
+        # sur la chaîne réévaluée, au plus toutes les ZG_LIVE_REFRESH_S
+        key = (id(base), int(time_mod.time() // ZG_LIVE_REFRESH_S), weight_col, sticky)
+    else:
+        key = (id(df), float(spot), weight_col, sticky, SETTINGS.zg_range, SETTINGS.zg_steps)
+    with _ZG_LOCK:
+        hit = _ZG_MEMO.get(key)
+    if alias is not None and hit is not None and hit[0]() is alias[1]():
+        return dict(hit[1])
+    if hit is not None and hit[0]() is df:
+        return dict(hit[1])
+    out = _zero_gamma_info(df, spot, weight_col, sticky)
+    try:
+        ref = weakref.ref(alias[1]() if alias is not None else df)
+    except TypeError:
+        return out
+    with _ZG_LOCK:
+        if len(_ZG_MEMO) >= _ZG_MEMO_MAX:
+            for k in [k for k, v in _ZG_MEMO.items() if v[0]() is None] or list(_ZG_MEMO)[:16]:
+                _ZG_MEMO.pop(k, None)
+        _ZG_MEMO[key] = (ref, dict(out))
+    return out
+
+
+def _zero_gamma_info(df: pd.DataFrame, spot: float,
+                     weight_col: str = "open_interest", sticky: str = "strike") -> dict:
     """Zero gamma avec son contexte :
 
     - `status` : "ok", "no_flip" (profil d'un seul signe jusqu'à ±25 % — le

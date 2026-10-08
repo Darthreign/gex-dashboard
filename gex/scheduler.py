@@ -318,7 +318,7 @@ def pull_native_options() -> None:
             log.exception("%s : échec de la collecte native", code)
 
 
-def pull_native_options_fast() -> None:
+def pull_native_options_fast(persist: bool = False) -> None:
     """Chaînes d'options natives NQ et ES — FENÊTRE RESSERRÉE (0DTE/1DTE,
     `futopt.FAST_TRADING_DAYS` jours de BOURSE) : moins de contrats à
     souscrire que la fenêtre large, donc une salve dxFeed nettement plus
@@ -346,9 +346,12 @@ def pull_native_options_fast() -> None:
             if df is None or df.empty:
                 continue
             now = datetime.now(ET)
+            if persist:
+                store.save_snapshot(code, df, now)
             summary = _seed_native_state(code, df, now)
-            log.info("%s (natif, rapide) pull ok — spot=%.2f netGEX=%.2f Bn",
-                     code, summary.spot, summary.net_gex / 1e9)
+            log.info("%s (natif, rapide%s) pull ok — spot=%.2f netGEX=%.2f Bn",
+                     code, ", enregistré" if persist else "", summary.spot,
+                     summary.net_gex / 1e9)
         except Exception:  # noqa: BLE001 — un échec ne doit rien casser d'autre
             log.exception("%s : échec de la collecte native rapide", code)
 
@@ -666,6 +669,15 @@ def add_ingest_jobs(sched: BackgroundScheduler) -> None:
     # cadence bien plus serrée sans reproduire le coût qui justifiait 15 min.
     sched.add_job(pull_native_options_fast, "interval", minutes=3,
                   max_instances=1, coalesce=True)
+    # Snapshot NQ/ES ENREGISTRÉ juste avant 15h45 pour le rapport MOC
+    # (moc_report.snapshot_at lit le dernier snapshot <= 15h45) : sans lui,
+    # les options sur futures manquaient à l'estimation depuis le 24/09 (seules
+    # les collectes larges de 10h/14h étaient sur disque). Fenêtre rapide
+    # (0DTE/1DTE, ce qui pèse à la clôture) : la large (~90-280 s par
+    # sous-jacent) risquerait de finir après 15h45 et d'être ignorée.
+    sched.add_job(pull_native_options_fast, "cron", day_of_week="mon-fri",
+                  hour=15, minute=36, kwargs={"persist": True},
+                  max_instances=1, coalesce=True, id="native_moc_snapshot")
     # Chaînes d'indice natives : ~20 s par chaîne (contre ~90 s sur future),
     # donc une cadence bien plus serrée — supprimer un retard de 15 min pour
     # rafraîchir toutes les 15 min n'aurait aucun sens.
