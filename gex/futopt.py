@@ -38,7 +38,7 @@ import requests
 
 from . import greeks, store
 from . import rates
-from .metrics import ET, YEAR_SECONDS, seconds_to_expiry
+from .metrics import ET, YEAR_SECONDS, am_settled, seconds_to_expiry
 from .rtquote import QUOTES, decode_compact_feed_data, feed_setup_message, quote_token
 
 log = logging.getLogger(__name__)
@@ -135,8 +135,21 @@ def fetch_chain_instruments(product_code: str, access_token: str) -> pd.DataFram
         "expiry": pd.Timestamp(i["expiration-date"]).date(),
         "streamer_symbol": i["streamer-symbol"],
         "underlying_symbol": i.get("underlying-symbol"),
+        "settle_am": _settles_am(i),
     } for i in items if i.get("streamer-symbol")]
     return pd.DataFrame(rows)
+
+
+def _settles_am(item: dict) -> bool:
+    """Les options trimestrielles CME se règlent sur la cotation d'ouverture ;
+    l'API le dit via `settlement-type` ou l'heure de `expires-at`."""
+    st = str(item.get("settlement-type") or "").upper()
+    if st in ("AM", "PM"):
+        return st == "AM"
+    exp_at = item.get("expires-at")
+    if exp_at:
+        return pd.Timestamp(exp_at).tz_convert(ET).hour < 12
+    return False
 
 
 def _trading_day_horizon(n_days: int, now_et: datetime | None = None) -> date:
@@ -400,7 +413,7 @@ def enrich_native(chain: pd.DataFrame, raw: dict[str, dict], spot: float,
     df["bid"] = df["bid"].fillna(0.0)
     df["ask"] = df["ask"].fillna(0.0)
 
-    secs = seconds_to_expiry(pd.Series(df["expiry"]), now_et)
+    secs = seconds_to_expiry(pd.Series(df["expiry"]), now_et, am_settled(df))
     df = df[secs > 0].reset_index(drop=True)
     secs = secs[secs > 0]
     t = np.maximum(secs, 300.0) / YEAR_SECONDS

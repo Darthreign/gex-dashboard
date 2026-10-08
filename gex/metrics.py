@@ -25,13 +25,41 @@ YEAR_SECONDS = 365.0 * 24 * 3600
 EXPIRY_BUCKETS = ["0DTE", "Semaine", "Mois", "Tout"]
 
 
-def seconds_to_expiry(expiries: pd.Series, now_et: datetime) -> np.ndarray:
-    """Secondes jusqu'à l'expiration, échéance posée à 16:00 ET.
+# Racines réglées sur la cotation d'ouverture (SOQ) du jour d'échéance : leur
+# gamma disparaît à 9:30 ET, pas à 16:00. Les séries PM ont leur propre racine
+# (SPXW, NDXP, RUTW).
+AM_SETTLED_ROOTS = frozenset({"SPX", "NDX", "RUT"})
+AM_SETTLE = pd.Timedelta(hours=9, minutes=30)
+PM_SETTLE = pd.Timedelta(hours=16)
 
-    Négatif = contrat expiré (0DTE après la cloche) — à exclure.
+
+def am_settled(df: pd.DataFrame) -> np.ndarray:
+    """Contrats réglés à l'ouverture : colonne `settle_am` fournie par la source
+    si elle existe, sinon déduite de la racine (`root` ou `underlying_symbol`)."""
+    if "settle_am" in df.columns:
+        return df["settle_am"].fillna(False).astype(bool).to_numpy()
+    for col in ("root", "underlying_symbol"):
+        if col in df.columns:
+            return df[col].isin(AM_SETTLED_ROOTS).to_numpy()
+    return np.zeros(len(df), dtype=bool)
+
+
+def expiry_datetimes(expiries: pd.Series, am: np.ndarray | None = None) -> pd.Series:
+    """Instant de règlement en ET : 9:30 pour les séries AM, 16:00 sinon."""
+    base = pd.to_datetime(pd.Series(expiries).reset_index(drop=True)).dt.tz_localize(ET)
+    if am is None:
+        return base + PM_SETTLE
+    return base + pd.Series(np.where(am, AM_SETTLE, PM_SETTLE))
+
+
+def seconds_to_expiry(expiries: pd.Series, now_et: datetime,
+                      am: np.ndarray | None = None) -> np.ndarray:
+    """Secondes jusqu'au règlement (cf. `expiry_datetimes`).
+
+    Négatif = contrat expiré (0DTE après la cloche, ou série AM après
+    l'ouverture le jour de l'opex) — à exclure.
     """
-    expiry_dt = pd.to_datetime(expiries).dt.tz_localize(ET) + pd.Timedelta(hours=16)
-    return (expiry_dt - now_et).dt.total_seconds().to_numpy()
+    return (expiry_datetimes(expiries, am) - now_et).dt.total_seconds().to_numpy()
 
 
 def enrich(snapshot: ChainSnapshot, now_et: datetime | None = None) -> pd.DataFrame:
@@ -44,7 +72,7 @@ def enrich(snapshot: ChainSnapshot, now_et: datetime | None = None) -> pd.DataFr
     df = snapshot.options.copy()
     # exclut les contrats expirés (dont les 0DTE du jour après 16:00 ET,
     # dont les quotes résiduelles polluent GEX 0DTE et skew IV)
-    secs = seconds_to_expiry(df["expiry"], now_et)
+    secs = seconds_to_expiry(df["expiry"], now_et, am_settled(df))
     df = df[secs > 0].reset_index(drop=True)
     s = snapshot.spot
     # plancher 5 min pour éviter les gammas explosifs à la cloche

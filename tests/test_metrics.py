@@ -539,3 +539,25 @@ def test_compute_levels_cote_suit_le_live_spot():
     # live AU-DESSUS du strike → plus de résistance au-dessus
     sur = metrics.compute_levels(df, spot, 101.0, bucket="0DTE")
     assert sur["keys"]["call_wall"] is None
+
+
+def test_series_am_reglee_a_l_ouverture_le_jour_de_l_opex():
+    """SPX mensuel (racine SPX) réglé sur la SOQ : expiré dès 9:30 ET ;
+    SPXW de même échéance vit jusqu'à 16:00."""
+    opex = date(2026, 9, 18)
+    rows = [{"expiry": opex, "type": "C", "strike": 100.0, "root": r} for r in ("SPX", "SPXW")]
+    snap = make_chain(100.0, rows)
+    apres_ouverture = datetime(2026, 9, 18, 10, 0, tzinfo=ET)
+    df = metrics.enrich(snap, now_et=apres_ouverture)
+    assert list(df["root"]) == ["SPXW"]
+
+    avant = datetime(2026, 9, 18, 9, 0, tzinfo=ET)
+    df = metrics.enrich(snap, now_et=avant).set_index("root")
+    assert df.loc["SPX", "t_years"] == pytest.approx(1800 / metrics.YEAR_SECONDS)
+    assert df.loc["SPXW", "t_years"] == pytest.approx(7 * 3600 / metrics.YEAR_SECONDS)
+
+
+def test_settle_am_explicite_prime_sur_la_racine():
+    df = pd.DataFrame({"root": ["SPX", "SPXW"], "settle_am": [False, True]})
+    assert list(metrics.am_settled(df)) == [False, True]
+    assert list(metrics.am_settled(pd.DataFrame({"underlying_symbol": ["NDX", "NDXP"]}))) == [True, False]
