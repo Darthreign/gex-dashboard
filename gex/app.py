@@ -3846,10 +3846,10 @@ def create_app() -> Dash:
             # Désactivé en urgence le 2026-10-05, RÉACTIVÉ le 2026-10-08 : les
             # callbacks qu'il cadence sont désormais partagés entre onglets
             # (broadcast.shared, un calcul par seconde quel que soit le nombre
-            # d'onglets) et servis par le serveur ASGI. Il ne tourne que là où
-            # il sert — /scalp, /scalpv1 et l'onglet Tape (cf. callback
-            # `tape_tick_on`) — et refresh_scalp ne calcule pas les blocs
-            # masqués par l'utilisateur.
+            # d'onglets) et servis par le serveur ASGI. Il ne tourne que sur
+            # /scalp et /scalpv1 (cf. le clientside callback qui pilote
+            # tape-tick/tape-tab-tick) et refresh_scalp ne calcule pas les
+            # blocs masqués par l'utilisateur.
             dcc.Interval(id="tape-tick", interval=1000, disabled=True),
             # Onglet Tape de la page principale : sa propre minuterie, pour que
             # les pages scalp ne réveillent pas ses callbacks (et inversement).
