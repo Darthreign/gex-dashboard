@@ -93,3 +93,19 @@ def test_layout_and_routing():
     ids = str(mocpage.layout())
     for i in ("moc-tick", "moc-banner", "moc-cards", "moc-tape", "moc-profile", "moc-history"):
         assert i in ids
+
+
+def test_nav_links_between_main_scalp_and_moc():
+    """Bouton de redirection sur chaque page : la barre de navigation porte
+    les trois liens, la CSS ne masque que celui de la page courante."""
+    from pathlib import Path
+
+    from gex.app import create_app
+    nav = str(create_app().layout)
+    for i, href in (("scalp-link", "/scalp"), ("moc-link", "/moc"), ("full-link", "/")):
+        assert f"id='{i}'" in nav or f'id="{i}"' in nav or i in nav
+        assert href in nav
+    css = (Path(__file__).resolve().parents[1] / "gex/assets/style.css").read_text(encoding="utf-8")
+    assert "body.scalp-page .scalp-link" in css           # pas de lien vers soi-même
+    assert "body.moc-page .moc-link" in css
+    assert "body:not(.scalp-page):not(.moc-page) .full-link" in css

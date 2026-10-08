@@ -3368,7 +3368,7 @@ def create_app() -> Dash:
                         value="fr", inline=True),
                     dcc.Link("⚡ Mode scalping", id="scalp-link", href="/scalp",
                              className="linkbtn scalp-link"),
-                    dcc.Link("🔔 MOC", id="moc-link", href="/moc",
+                    dcc.Link("🔔 Mode MOC", id="moc-link", href="/moc",
                              className="linkbtn moc-link"),
                     dcc.Link("← Vue complète", id="full-link", href="/",
                              className="linkbtn full-link"),
