@@ -266,7 +266,8 @@ def build_day(chain: pd.DataFrame, symbol: str, day: date,
     d["delta_bs"] = np.where(is_call, dc, dc - 1.0)
     sign = np.where(is_call, 1.0, -1.0)
     d["gex"] = greeks.gex_dollars(sign, g, d["open_interest"], CONTRACT_MULTIPLIER, spot)
-    d["dex"] = d["delta_bs"] * d["open_interest"] * CONTRACT_MULTIPLIER * spot
+    # même convention que metrics.enrich : dealers courts calls ET puts
+    d["dex"] = -1.0 * d["delta_bs"] * d["open_interest"] * CONTRACT_MULTIPLIER * spot
     d["spot"] = float(spot)
     zg = metrics.zero_gamma(d, spot)
     if persist_chain:

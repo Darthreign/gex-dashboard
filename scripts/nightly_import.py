@@ -13,16 +13,19 @@ l'import du jour. Journalisé dans logs/nightly_import.log.
 from __future__ import annotations
 
 import datetime as dt
+import sys
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-ROOT = Path(r"D:/Gex")
-TICKS = ROOT / "data" / "ticks" / "NQ"
-IMPORT = ROOT / "data" / "import" / "ticks_full" / "NQ"
-RAW = ROOT / "data" / "import" / "databento_raw"
-LOG = ROOT / "logs" / "nightly_import.log"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from gex.config import DATA_DIR  # noqa: E402
+
+TICKS = DATA_DIR / "ticks" / "NQ"
+IMPORT = DATA_DIR / "import" / "ticks_full" / "NQ"
+RAW = DATA_DIR / "import" / "databento_raw"
+LOG = DATA_DIR.parent / "logs" / "nightly_import.log"
 PARIS = ZoneInfo("Europe/Paris")   # affichage/log seulement
 ET = ZoneInfo("America/New_York")   # référence des séances CME
 
@@ -30,6 +33,7 @@ ET = ZoneInfo("America/New_York")   # référence des séances CME
 def log(msg: str) -> None:
     line = f"{dt.datetime.now(PARIS):%Y-%m-%d %H:%M:%S} | {msg}"
     print(line)
+    LOG.parent.mkdir(parents=True, exist_ok=True)
     with open(LOG, "a", encoding="utf-8") as f:
         f.write(line + "\n")
 
