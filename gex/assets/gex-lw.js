@@ -209,8 +209,20 @@
     // recadrage : premier affichage ou changement de contexte seulement
     const key = spec.key || id;
     if ((!st.fitted || st.key !== key) && ordered.length && !spec.message) {
+      // axes des prix déverrouillés (un glissement manuel coupe l'autoscale :
+      // la vue restait sur les prix du symbole précédent)
+      [0, 1].forEach((pane) => ["right", "left"].forEach((side) => {
+        try { st.chart.priceScale(side, pane).applyOptions({ autoScale: true }); } catch (e) {}
+      }));
       const ts = st.chart.timeScale();
-      if (spec.range) {
+      // fenêtre demandée seulement si elle recoupe les données : une séance
+      // cash 9h30-16h15 demandée en pleine nuit affichait un graphique vide
+      let lo = Infinity, hi = -Infinity;
+      ordered.forEach((s) => {
+        const d = s.data();
+        if (d.length) { lo = Math.min(lo, d[0].time); hi = Math.max(hi, d[d.length - 1].time); }
+      });
+      if (spec.range && hi >= spec.range[0] && lo <= spec.range[1]) {
         try { ts.setVisibleRange({ from: spec.range[0], to: spec.range[1] }); }
         catch (e) { ts.fitContent(); }
       } else {

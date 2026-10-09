@@ -4818,7 +4818,16 @@ def create_app() -> Dash:
             // setData() seul préserve déjà la vue courante, c'est tout le
             // principe de Lightweight Charts. Signalé en direct le
             // 2026-10-03 : "pénible de zoomer et se faire dézoomer".
+            // Changement de symbole : recadrage complet (axe des prix
+            // déverrouillé s'il avait été déplacé à la main, comme le bouton
+            // « recentrer ») — sinon la vue restait sur les prix de l'autre
+            // sous-jacent (signalé le 2026-10-09).
+            if (data.symbol && state.symbol !== data.symbol) {
+                if (state.symbol !== undefined) state.fitted = false;
+                state.symbol = data.symbol;
+            }
             if (candles.length && !state.fitted) {
+                state.series.priceScale().applyOptions({autoScale: true});
                 state.chart.timeScale().fitContent();
                 state.fitted = true;
             }
