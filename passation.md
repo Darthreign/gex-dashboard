@@ -100,6 +100,10 @@ Règle demandée : **OPRA = données live, CBOE = toutes les minutes** (CBOE est
 - Pas branchés (restent sur la salve) : l'API `/api/v1/...`, le digest et le bot Discord.
 - Vérifié dans Chromium sur une chaîne NQ synthétique au spot mouvant : 12 mises à jour GEX/DEX en ~18 s, tuiles au spot live, aucune erreur. **À vérifier en séance réelle** : charge CPU du dashboard avec plusieurs symboles ouverts.
 
+## Heatmap d'un future : nuit Globex et bougie en direct (09/10)
+
+Signalé par l'utilisateur : la heatmap ne montrait pas les bougies de la nuit ni le prix en direct. Elle ne lisait que le fichier du jour calendaire (à partir de minuit) et cadrait la vue sur 9h30-16h15. Désormais, quand le prix affiché est celui d'un future (symbole NQ/ES, ou échelle NQ/ES pour un indice) : séance CME complète depuis 18h00 ET la veille et bougie en cours en direct (`app._futures_overlay`, qui réutilise `futures_session_bars`, extrait du graphique /scalp) ; jour passé : de 18h00 la veille à 17h00. Un indice affiché à son échelle (SPX, NDX…) garde la séance cash : il ne cote pas la nuit.
+
 ## Rapport MOC : deux corrections après les premiers résultats (08/10)
 
 - Séances à prix figé (aucun tick dans les 2 min avant 15h45/15h50/16h00 : Labor Day 07/09, trous de capture 08/09 et 18/09) : exclues au lieu d'être comptées « mouvement 0 » (`moc_report._price_at`).

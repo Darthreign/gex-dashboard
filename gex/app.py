@@ -442,11 +442,16 @@ def _heatmap_inputs(symbol: str, lang: str, day: str | None, window: float, xf,
     # historique (NQ/ES), on le prend tel quel — inutile de transposer une
     # approximation quand le prix réel existe déjà à cette échelle. Sinon on
     # retombe sur l'historique du symbole natif, passé par xf.
-    path, native_price = None, False
+    # Future NQ/ES : séance CME complète, depuis l'ouverture Globex de 18h00
+    # la veille (bougies de la nuit comprises) et bougie en cours en direct.
+    path, native_price, globex = None, False, False
     if unit and unit in ("NQ", "ES") and unit != symbol:
-        alt = _price_overlay(unit, day)
+        alt = _futures_overlay(unit, day)
         if alt is not None and not alt.empty:
-            path, native_price = alt, True
+            path, native_price, globex = alt, True, True
+    if path is None and symbol in ("NQ", "ES"):
+        path = _futures_overlay(symbol, day)
+        globex = path is not None and not path.empty
     if path is None:
         path = _price_overlay(symbol, day)
 
@@ -489,9 +494,17 @@ def _heatmap_inputs(symbol: str, lang: str, day: str | None, window: float, xf,
         for lv in walls.itertuples():
             items.append(dict(y=xf(lv.strike), label=labels.get(lv.strike, "GEX"),
                               color=C["lvl"], dash="dot"))
+    # fenêtre de temps : la séance cash pour un indice ; toute la séance
+    # Globex chargée pour un future (sinon la nuit serait hors champ)
+    if globex:
+        span = list(to_local(pd.Series([path["timestamp"].iloc[0],
+                                         max(path["timestamp"].iloc[-1],
+                                             pd.Timestamp(f"{day} 16:15"))])))
+    else:
+        span = _session_range(day)
     return {"title": title, "error": None, "day": day, "spot": spot, "path": path,
             "native_price": native_price, "oi": oi, "vol": vol, "items": items,
-            "lo": lo, "hi": hi}
+            "lo": lo, "hi": hi, "span": span}
 
 
 def heatmap_fig(symbol: str, lang: str, day: str | None = None,
@@ -585,7 +598,7 @@ def heatmap_fig(symbol: str, lang: str, day: str | None = None,
     lay["xaxis"]["tickformat"] = "%H:%M"
     # Fenêtre fixée sur la séance : sans cela, une journée peu fournie écrase
     # l'échelle sur quelques minutes et le graphique devient illisible.
-    lay["xaxis"]["range"] = _session_range(day)
+    lay["xaxis"]["range"] = h["span"]
     # Persistance de l'état d'interaction : la heatmap se régénère toutes les
     # quelques secondes (callback sur `tick`). Sans uirevision, un zoom manuel
     # sur l'axe des prix — pour resserrer la fenêtre — serait remis à zéro à
@@ -663,7 +676,7 @@ def heatmap_spec(symbol: str, lang: str, day: str | None = None, window: float =
                       "title": it["label"], "style": _LW_DASH.get(it.get("dash"), 2),
                       "axisLabel": True} for it in h["items"]]
     spec["priceRange"] = [float(xf(np.array([h["lo"]]))[0]), float(xf(np.array([h["hi"]]))[0])]
-    r = lwspec._epoch(_session_range(h["day"]))
+    r = lwspec._epoch(h["span"])
     if np.isfinite(r).all():
         spec["range"] = [float(r[0]), float(r[1])]
     return spec
@@ -700,6 +713,28 @@ def _chain_for_day(symbol: str, day: str) -> tuple[pd.DataFrame | None, float | 
         return None, None
     spot = float(df["spot"].iloc[0]) if "spot" in df.columns else None
     return df, spot
+
+
+def _futures_overlay(symbol: str, day: str) -> pd.DataFrame | None:
+    """Bougies d'un future NQ/ES pour la heatmap, sur la séance CME : la
+    séance EN COURS (depuis 18h00 ET la veille, bougie live comprise) si `day`
+    est aujourd'hui ; sinon de 18h00 la veille de `day` à 17h00 ce jour-là."""
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    cols = ["timestamp", "open", "high", "low", "close"]
+    if day == today:
+        bars, used = futures_session_bars(symbol, _futures_last_price(symbol))
+        if not bars.empty and used == today:
+            return bars.sort_values("timestamp")[cols].reset_index(drop=True)
+    d0 = pd.Timestamp(day)
+    start, end = d0 - pd.Timedelta(hours=6), d0 + pd.Timedelta(hours=17)
+    parts = [store.load_prices(symbol, x) for x in ((d0 - pd.Timedelta(days=1)).strftime("%Y-%m-%d"), day)]
+    parts = [p for p in parts if not p.empty]
+    if not parts:
+        return None
+    px = pd.concat(parts, ignore_index=True)
+    ts = pd.to_datetime(px["timestamp"])
+    px = px[(ts >= start) & (ts < end)]
+    return px.sort_values("timestamp")[cols].reset_index(drop=True) if not px.empty else None
 
 
 def _price_overlay(symbol: str, day: str) -> pd.DataFrame | None:
@@ -1688,6 +1723,68 @@ def scalp_ladder(symbol: str, ctx: dict, spot: float) -> html.Div:
 
 _LIVE_BARS: dict[str, dict[datetime, dict]] = {}
 LIVE_BARS_KEEP_MIN = 5     # de quoi couvrir le retard de flush_prices (vidé toutes les 30 s)
+
+
+def futures_session_bars(symbol: str, spot: float | None) -> tuple[pd.DataFrame, str]:
+    """(bougies 1 min de la séance CME EN COURS, jour de fichier utilisé) d'un
+    future NQ/ES : depuis l'ouverture Globex de 18h00 ET (fichier de la veille
+    avant minuit compris), plus la ou les bougies en cours reconstruites à
+    partir de `spot` (prix vivant vu par ce process). Repli sur la dernière
+    journée enregistrée s'il n'y a rien aujourd'hui. Partagé par le graphique
+    /scalp et la heatmap de la page principale."""
+    today_cal = datetime.now(ET).strftime("%Y-%m-%d")
+    used_day = today_cal
+    bars = _load_prices_cached(symbol, today_cal)
+    if bars.empty:
+        days = store.price_days(symbol)
+        if days:
+            used_day = days[-1]
+            bars = _load_prices_cached(symbol, used_day)
+    if bars.empty:
+        return bars, used_day
+    if used_day == today_cal:
+        # Séance CME, pas date calendaire ET (2026-10-05) : la séance en
+        # cours a commencé la veille (calendaire) à 18h ET = 00h Paris,
+        # bien avant minuit ET où bascule le fichier "aujourd'hui" (cf.
+        # commentaire au-dessus sur la convention de stockage). Sans ce
+        # complément, "depuis l'ouverture" démarrait à minuit ET (6h
+        # Paris) au lieu de 18h ET la veille (0h Paris) — repéré en
+        # direct juste après le retrait de la troncature par défaut.
+        now_et = datetime.now(ET)
+        session_start = now_et.replace(hour=18, minute=0, second=0, microsecond=0)
+        if now_et.hour < 18:
+            # avant 18h ET : la séance en cours a débordé sur la veille
+            # (calendaire) — préfixer le morceau manquant.
+            session_start -= timedelta(days=1)
+            prev_bars = _load_prices_cached(symbol, session_start.strftime("%Y-%m-%d"))
+            if not prev_bars.empty:
+                prev_bars = prev_bars[pd.to_datetime(prev_bars["timestamp"])
+                                     >= session_start.replace(tzinfo=None)]
+                if not prev_bars.empty:
+                    bars = pd.concat([prev_bars, bars], ignore_index=True)
+        else:
+            # à/après 18h ET : le fichier "aujourd'hui" contient encore
+            # la fin de la séance PRÉCÉDENTE (00h-17h ET) — la retirer,
+            # sinon "depuis l'ouverture" montre deux séances à la suite.
+            bars = bars[pd.to_datetime(bars["timestamp"])
+                       >= session_start.replace(tzinfo=None)]
+    # Bougie(s) en cours (2026-10-05) : sans ça, ce graphique n'affiche
+    # jamais rien de moins de 1-2 min (le temps que flush_prices écrive la
+    # minute achevée) — repéré en direct ("on dirait qu'il attend la
+    # clôture de bougie pour la dessiner"). Même mécanisme que
+    # `scalp_price_fig` (Plotly, /scalpv1) : `_update_live_bar` tient à
+    # jour les quelques dernières minutes à partir du spot vu par CE
+    # process, on ne complète que ce qui manque après le dernier point du
+    # disque. Seulement si on affiche la séance EN COURS — un repli sur un
+    # jour passé (`used_day != today_cal`) n'a pas de bougie "live" à ajouter.
+    if used_day == today_cal and spot:
+        live_bars = _update_live_bar(symbol, spot, datetime.now(ET))
+        last_ts = bars["timestamp"].iloc[-1] if not bars.empty else None
+        manquantes = sorted(m for m in live_bars if last_ts is None or m > last_ts)
+        if manquantes:
+            bars = pd.concat([bars, pd.DataFrame([
+                {"timestamp": m, **live_bars[m]} for m in manquantes])], ignore_index=True)
+    return bars, used_day
 
 
 def _update_live_bar(symbol: str, spot: float, now_et: datetime) -> dict[datetime, dict]:
@@ -2871,58 +2968,9 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
         # direct quelques minutes après : "ça attend la clôture de bougie").
         # `today_cal` (date calendaire ET directe, même convention que
         # `scalp_price_fig`/le stockage) est la bonne référence ici.
-        today_cal = datetime.now(ET).strftime("%Y-%m-%d")
-        used_day = today_cal
-        bars = _load_prices_cached(symbol, today_cal)
-        if bars.empty:
-            days = store.price_days(symbol)
-            if days:
-                used_day = days[-1]
-                bars = _load_prices_cached(symbol, used_day)
+        bars, used_day = futures_session_bars(symbol, spot)
         if bars.empty:
             return empty
-        if used_day == today_cal:
-            # Séance CME, pas date calendaire ET (2026-10-05) : la séance en
-            # cours a commencé la veille (calendaire) à 18h ET = 00h Paris,
-            # bien avant minuit ET où bascule le fichier "aujourd'hui" (cf.
-            # commentaire au-dessus sur la convention de stockage). Sans ce
-            # complément, "depuis l'ouverture" démarrait à minuit ET (6h
-            # Paris) au lieu de 18h ET la veille (0h Paris) — repéré en
-            # direct juste après le retrait de la troncature par défaut.
-            now_et = datetime.now(ET)
-            session_start = now_et.replace(hour=18, minute=0, second=0, microsecond=0)
-            if now_et.hour < 18:
-                # avant 18h ET : la séance en cours a débordé sur la veille
-                # (calendaire) — préfixer le morceau manquant.
-                session_start -= timedelta(days=1)
-                prev_bars = _load_prices_cached(symbol, session_start.strftime("%Y-%m-%d"))
-                if not prev_bars.empty:
-                    prev_bars = prev_bars[pd.to_datetime(prev_bars["timestamp"])
-                                         >= session_start.replace(tzinfo=None)]
-                    if not prev_bars.empty:
-                        bars = pd.concat([prev_bars, bars], ignore_index=True)
-            else:
-                # à/après 18h ET : le fichier "aujourd'hui" contient encore
-                # la fin de la séance PRÉCÉDENTE (00h-17h ET) — la retirer,
-                # sinon "depuis l'ouverture" montre deux séances à la suite.
-                bars = bars[pd.to_datetime(bars["timestamp"])
-                           >= session_start.replace(tzinfo=None)]
-        # Bougie(s) en cours (2026-10-05) : sans ça, ce graphique n'affiche
-        # jamais rien de moins de 1-2 min (le temps que flush_prices écrive la
-        # minute achevée) — repéré en direct ("on dirait qu'il attend la
-        # clôture de bougie pour la dessiner"). Même mécanisme que
-        # `scalp_price_fig` (Plotly, /scalpv1) : `_update_live_bar` tient à
-        # jour les quelques dernières minutes à partir du spot vu par CE
-        # process, on ne complète que ce qui manque après le dernier point du
-        # disque. Seulement si on affiche la séance EN COURS — un repli sur un
-        # jour passé (`used_day != today_cal`) n'a pas de bougie "live" à ajouter.
-        if used_day == today_cal:
-            live_bars = _update_live_bar(symbol, spot, datetime.now(ET))
-            last_ts = bars["timestamp"].iloc[-1] if not bars.empty else None
-            manquantes = sorted(m for m in live_bars if last_ts is None or m > last_ts)
-            if manquantes:
-                bars = pd.concat([bars, pd.DataFrame([
-                    {"timestamp": m, **live_bars[m]} for m in manquantes])], ignore_index=True)
         if size > 1:
             bars = _resample_price_bars(bars, size)
         # Plus de troncature par défaut depuis le 2026-10-05 (demande
