@@ -947,3 +947,7 @@ body.sc-keywords-only .sc-edge-status { display: none; }
   display: none; position: absolute; inset: 30px 10px 6px; align-items: center;
   justify-content: center; text-align: center; color: var(--muted); font-size: 13px;
 }
+
+/* bandeau /scalp : couverture des dealers à contre-sens du mouvement */
+.sc-edge-brake { color: var(--ink); background: rgba(25, 158, 112, 0.35); padding: 0 5px;
+                 border-radius: 3px; letter-spacing: 0.02em; }

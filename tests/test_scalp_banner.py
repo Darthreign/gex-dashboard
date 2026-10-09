@@ -449,3 +449,23 @@ def test_bandeau_v2_affiche_la_lecture_normalisee(monkeypatch):
     monkeypatch.setattr(app_mod, "scalp_inputs", lambda s, spot: (30.0, 0.0, 0.0))
     v1 = str(app_mod.scalp_banner("NQ", ctx, 30050.0, "fr", None).to_plotly_json())
     assert "sc-edge" not in v1
+
+
+def test_bandeau_frein_active_par_la_couverture():
+    from gex import app as A
+
+    def texte(x):
+        if isinstance(x, str):
+            return x
+        ch = getattr(x, "children", None)
+        if isinstance(ch, list):
+            return "".join(texte(c) for c in ch)
+        return texte(ch) if ch is not None else ""
+    r = {"ext_em": -0.8, "zone": "accelerateur", "setup": "fade", "fade_dir": 1,
+         "confirmations": ["flux"], "excess_dir": -1, "validated": False, "test_days": None,
+         "em": 200.0, "dist_flip_em": -0.5, "veto": None}
+    assert "FREIN ACTIVÉ" in texte(A.scalp_edge_line(r, "fr"))
+    assert "BRAKE ON" in texte(A.scalp_edge_line(r, "en"))
+    # sans couverture à contre-sens : libellé habituel
+    r["confirmations"] = ["absorption"]
+    assert "FREIN ACTIVÉ" not in texte(A.scalp_edge_line(r, "fr"))

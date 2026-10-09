@@ -1436,6 +1436,16 @@ def scalp_edge_line(r: dict, lang: str) -> html.Div:
     zone = t(lang, f"sc_zone_{r['zone']}")
     if r["ext_em"] is None:
         txt, cls = t(lang, "sc_edge_na"), "na"
+    elif r["setup"] == "fade" and "flux" in r["confirmations"]:
+        # couverture des dealers à contre-sens du mouvement : le frein est
+        # actif quelle que soit la zone — dit en clair (demande du 09/10)
+        rest = [c for c in r["confirmations"] if c != "flux"]
+        side = t(lang, "sc_edge_side_up" if r["fade_dir"] > 0 else "sc_edge_side_down")
+        txt = [t(lang, "sc_edge_fade_head", side=side, ext=_sc_fmt(r["ext_em"], 2)),
+               html.B(t(lang, "sc_edge_brake_on"), className="sc-edge-brake"),
+               t(lang, "sc_edge_brake_tail", zone=zone)
+               + "".join(" · " + t(lang, f"sc_conf_{c}") for c in rest)]
+        cls = "fade"
     elif r["setup"] == "fade":
         conf = ", ".join(t(lang, f"sc_conf_{c}") for c in r["confirmations"])
         side = t(lang, "sc_edge_side_up" if r["fade_dir"] > 0 else "sc_edge_side_down")
