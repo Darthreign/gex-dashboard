@@ -37,9 +37,41 @@ def test_absorption_et_flux_confirment_l_epuisement():
     assert "absorption" not in r["confirmations"]
 
 
-def test_zone_d_acceleration_marque_le_setup_a_eviter():
-    r = edge.reading(85.0, 100.0, 20.0, 95.0, -1.0, [], 0.0, None, None, P)
-    assert r["excess_dir"] == -1 and r["setup"] == "avoid" and r["fade_dir"] == 0
+def test_zone_d_acceleration_selon_la_politique():
+    from dataclasses import replace
+    # excès BAISSIER sous le flip, vendeurs absorbés au bid (support) : un long
+    vendeurs = [{"ts": 900.0, "price": 85.5, "side": "SELL"}]
+    bas = dict(spot=85.0, open_=100.0, em=20.0, zg=95.0, gex0=-1.0, absorptions=vendeurs,
+               now_ts=1000.0, flow_net=None, flow_gross=None)
+    # excès HAUSSIER sous le flip (flip très haut), acheteurs absorbés : un short
+    acheteurs = [{"ts": 900.0, "price": 115.5, "side": "BUY"}]
+    haut = dict(spot=115.0, open_=100.0, em=20.0, zg=130.0, gex0=-1.0, absorptions=acheteurs,
+                now_ts=1000.0, flow_net=None, flow_gross=None)
+    # « long » (défaut, expérience de l'utilisateur) : long autorisé, short évité
+    r = edge.reading(**bas, p=P)
+    assert r["zone"] == "accelerateur" and r["setup"] == "fade" and r["fade_dir"] == 1
+    r = edge.reading(**haut, p=P)
+    assert r["zone"] == "accelerateur" and r["setup"] == "avoid" and r["veto"] == "zone"
+    # « avoid » : aucun rejet ; « both » : les deux sens
+    assert edge.reading(**bas, p=replace(P, accel_policy="avoid"))["setup"] == "avoid"
+    assert edge.reading(**haut, p=replace(P, accel_policy="both"))["setup"] == "fade"
+
+
+def test_flux_dans_le_sens_de_l_exces_met_le_setup_a_eviter():
+    from dataclasses import replace
+    # excès haussier en zone frein ; les dealers ACHÈTENT franchement (+80 / 100)
+    r = edge.reading(115.0, 100.0, 20.0, 90.0, 1.0, [], 0.0, 80.0, 100.0, P)
+    assert r["setup"] == "avoid" and r["veto"] == "flux"
+    sans = edge.reading(115.0, 100.0, 20.0, 90.0, 1.0, [], 0.0, 80.0, 100.0,
+                        replace(P, flow_veto=False))
+    assert sans["setup"] == "fade"
+
+
+def test_sortie_en_points():
+    p = edge.EdgeParams(target_pts=5.0, stop_pts=5.0, horizon_min=3)
+    r = edge.simulate_trade(np.array([106.0]), np.array([99.0]), np.array([105.0]),
+                            100.0, 1, 200.0, p)
+    assert r["exit"] == "target" and r["pnl_pts"] == 5.0 and r["pnl_em"] == pytest.approx(0.025)
 
 
 def test_simulation_cible_stop_et_temps():

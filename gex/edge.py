@@ -5,8 +5,13 @@ en unités de mouvement attendu (EM) plutôt qu'en points fixes, se corrige
 plus souvent qu'au hasard QUAND les teneurs de marché freinent (zone de gamma
 positif, au-dessus du Gamma Flip) et qu'un signe d'épuisement le confirme
 (absorption de sens opposé au mouvement, flux de couverture qui freine).
-Dans la zone d'accélération (sous le flip), le même excès est au contraire
-un risque de tendance : le setup est marqué « à éviter ».
+Dans la zone d'accélération (sous le flip), la politique est réglable
+(`accel_policy`) : l'expérience de l'utilisateur (09/10) est que les freins y
+restent actifs pour un LONG après une baisse, alors que shorter un excès
+haussier y est risqué — d'où « longs seulement » par défaut, à confirmer par
+le rapport (résultats par zone ET par sens). Un flux de couverture franc dans
+le sens de l'excès (les dealers poussent le prix) met le setup « à éviter »
+(`flow_veto`) : il peut emmener le prix bien au-delà de l'EM.
 
 Le même code sert au direct (bandeau /scalp v2) et au backtest
 (scripts/edge_report.py), qui mesure l'espérance en EM, la compare à un
@@ -40,6 +45,15 @@ class EdgeParams:
     require: int = 1                # confirmations minimales pour un setup
     target_em: float = 0.25
     stop_em: float = 0.25
+    # cible / stop en POINTS (taille de trade de l'utilisateur : 5-10 pts sur
+    # NQ) ; 0 = en EM (target_em / stop_em)
+    target_pts: float = 0.0
+    stop_pts: float = 0.0
+    # zone d'accélération (gamma négatif) : "avoid" (aucun rejet), "long"
+    # (rejet d'un excès BAISSIER seulement, donc achat), "both"
+    accel_policy: str = "long"
+    # flux de couverture franc DANS le sens de l'excès : setup à éviter
+    flow_veto: bool = True
     horizon_min: int = 30
     cooldown_min: int = 15
 
@@ -90,7 +104,7 @@ def reading(spot: float, open_: float | None, em: float | None, zg: float | None
     = sens AGRESSEUR absorbé (BUY : acheteurs absorbés à l'ask, résistance ;
     SELL : vendeurs absorbés au bid, support)."""
     out = {"ext_em": None, "zone": "inconnu", "dist_flip_em": None, "excess_dir": 0,
-           "fade_dir": 0, "confirmations": [], "setup": "none", "em": em}
+           "fade_dir": 0, "confirmations": [], "setup": "none", "em": em, "veto": None}
     if open_ is None or not em or em <= 0:
         return out
     ext = (spot - open_) / em
@@ -107,14 +121,23 @@ def reading(spot: float, open_: float | None, em: float | None, zg: float | None
     if any(a["side"] == exhausted_side and 0 <= now_ts - a["ts"] <= p.absorb_window_s
            and abs(a["price"] - spot) <= p.absorb_dist_em * em for a in absorptions):
         conf.append("absorption")
+    pushing = False
     if flow_gross and flow_gross > 0 and flow_net is not None:
-        if abs(flow_net) / flow_gross >= p.flow_ratio and (flow_net > 0) != (excess_dir > 0):
-            conf.append("flux")
+        if abs(flow_net) / flow_gross >= p.flow_ratio:
+            if (flow_net > 0) != (excess_dir > 0):
+                conf.append("flux")          # les dealers freinent l'excès
+            else:
+                pushing = True               # ils le poussent
     out["confirmations"] = conf
-    if zone == "accelerateur":
-        out["setup"] = "avoid"
+    fade_dir = -excess_dir
+    accel_ok = (p.accel_policy == "both"
+                or (p.accel_policy == "long" and fade_dir > 0))
+    if pushing and p.flow_veto:
+        out.update(setup="avoid", veto="flux")
+    elif zone == "accelerateur" and not accel_ok:
+        out.update(setup="avoid", veto="zone")
     elif len(conf) >= p.require:
-        out.update(setup="fade", fade_dir=-excess_dir)
+        out.update(setup="fade", fade_dir=fade_dir)
     return out
 
 
@@ -126,21 +149,27 @@ def simulate_trade(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray,
     barres SUIVANTES (au plus `horizon_min`). Cible et stop en EM ; si les
     deux sont touchés dans la même barre, le stop compte (hypothèse
     prudente). Résultat en EM, avec les excursions favorable / défavorable."""
-    tgt, stp = p.target_em * em, p.stop_em * em
+    tgt = p.target_pts if p.target_pts > 0 else p.target_em * em
+    stp = p.stop_pts if p.stop_pts > 0 else p.stop_em * em
     mfe = mae = 0.0
     for h, lo, c in zip(highs[:p.horizon_min], lows[:p.horizon_min], closes[:p.horizon_min]):
         fav = (h - entry) if direction > 0 else (entry - lo)
         adv = (entry - lo) if direction > 0 else (h - entry)
         mfe, mae = max(mfe, fav), max(mae, adv)
         if adv >= stp:
-            return {"pnl_em": -p.stop_em, "exit": "stop", "mfe_em": mfe / em, "mae_em": mae / em}
+            return _result(-stp, "stop", mfe, mae, em)
         if fav >= tgt:
-            return {"pnl_em": p.target_em, "exit": "target", "mfe_em": mfe / em, "mae_em": mae / em}
+            return _result(tgt, "target", mfe, mae, em)
         last = c
     if not len(closes[:p.horizon_min]):
-        return {"pnl_em": 0.0, "exit": "none", "mfe_em": 0.0, "mae_em": 0.0}
-    pnl = (last - entry) * direction / em
-    return {"pnl_em": pnl, "exit": "time", "mfe_em": mfe / em, "mae_em": mae / em}
+        return _result(0.0, "none", 0.0, 0.0, em)
+    return _result((last - entry) * direction, "time", mfe, mae, em)
+
+
+def _result(pts: float, exit_: str, mfe: float, mae: float, em: float) -> dict:
+    """Résultat en EM (comparable d'un jour à l'autre) ET en points."""
+    return {"pnl_em": pts / em, "pnl_pts": pts, "exit": exit_,
+            "mfe_em": mfe / em, "mae_em": mae / em}
 
 
 def minute_bars(ticks: pd.DataFrame) -> pd.DataFrame:
@@ -217,14 +246,15 @@ def _num(v):
 
 # ---------------------------------------------------------------- statistiques
 
-def summarize(trades: pd.DataFrame, n_boot: int = 2000, seed: int = 0) -> pd.DataFrame:
+def summarize(trades: pd.DataFrame, n_boot: int = 2000, seed: int = 0,
+              value: str = "pnl_em") -> pd.DataFrame:
     """Par famille : nombre, taux de gain, espérance en EM et son intervalle
     à 90 % par bootstrap PAR SÉANCE (les trades d'une même séance ne sont
     pas indépendants), MFE/MAE médians."""
     rows = []
     rng = np.random.default_rng(seed)
     for kind, g in trades.groupby("kind"):
-        by_day = g.groupby("day")["pnl_em"]
+        by_day = g.groupby("day")[value]
         sums, counts = by_day.sum().to_numpy(), by_day.count().to_numpy()
         boots = []
         if len(sums) >= 2:
@@ -232,9 +262,10 @@ def summarize(trades: pd.DataFrame, n_boot: int = 2000, seed: int = 0) -> pd.Dat
                 k = rng.integers(0, len(sums), len(sums))
                 boots.append(sums[k].sum() / max(counts[k].sum(), 1))
         lo, hi = (np.percentile(boots, [5, 95]) if boots else (np.nan, np.nan))
+        unit = "pts" if value == "pnl_pts" else "em"
         rows.append({"kind": kind, "n": len(g), "days": len(sums),
-                     "win_rate": float((g["pnl_em"] > 0).mean()),
-                     "expectancy_em": float(g["pnl_em"].mean()),
+                     "win_rate": float((g[value] > 0).mean()),
+                     f"expectancy_{unit}": float(g[value].mean()),
                      "ci90_lo": float(lo), "ci90_hi": float(hi),
                      "mfe_med_em": float(g["mfe_em"].median()),
                      "mae_med_em": float(g["mae_em"].median())})

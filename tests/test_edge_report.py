@@ -64,7 +64,15 @@ def test_le_filtre_de_zone_separe_l_edge_du_piege(donnees):
     assert r["test"].loc["setup", "expectancy_em"] > r["test"].loc["naive", "expectancy_em"]
     saved = json.loads(edge_report.params_path("NQ").read_text(encoding="utf-8"))
     assert saved["excess_em"] == 0.5 and "validated" in saved
-    assert "Hors échantillon" in edge_report.to_markdown(r)
+    md = edge_report.to_markdown(r)
+    assert "Hors échantillon" in md
+    # gamma négatif : les trois politiques comparées, et le rejet naïf par sens
+    assert set(r["variants"].index) >= {"accel=avoid", "accel=long", "accel=both"}
+    assert set(r["naive_zone_dir"].index.get_level_values("sens")) <= {"long", "short"}
+    # à la taille de trade de l'utilisateur : cible = stop en points
+    assert set(r["points"].index.get_level_values("cible_stop_pts")) == {5.0, 8.0, 10.0}
+    assert "expectancy_pts" in r["points"].columns
+    assert "À ta taille de trade" in md and "Gamma négatif" in md
 
 
 def test_trop_peu_de_seances(tmp_path, monkeypatch):

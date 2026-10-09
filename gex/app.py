@@ -1442,7 +1442,8 @@ def scalp_edge_line(r: dict, lang: str) -> html.Div:
         txt, cls = t(lang, "sc_edge_fade", side=side, ext=_sc_fmt(r["ext_em"], 2),
                      zone=zone, conf=conf), "fade"
     elif r["setup"] == "avoid":
-        txt, cls = t(lang, "sc_edge_avoid", ext=_sc_fmt(r["ext_em"], 2)), "avoid"
+        key = "sc_edge_avoid_flow" if r.get("veto") == "flux" else "sc_edge_avoid"
+        txt, cls = t(lang, key, ext=_sc_fmt(r["ext_em"], 2)), "avoid"
     elif r["excess_dir"]:
         txt, cls = t(lang, "sc_edge_watch", ext=_sc_fmt(r["ext_em"], 2), zone=zone), "watch"
     else:

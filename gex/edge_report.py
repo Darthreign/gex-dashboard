@@ -39,6 +39,9 @@ from .metrics import ET
 log = logging.getLogger(__name__)
 
 MIN_TRAIN_TRADES = 30
+# Taille de trade de l'utilisateur (scalp de petits retracements) : cible =
+# stop, en points. ES ≈ NQ / 4,5 en amplitude.
+POINT_SIZES = {"NQ": (5.0, 8.0, 10.0), "ES": (1.25, 2.0, 2.5)}
 TRAIN_FRACTION = 0.6
 RTH_START_MIN, RTH_END_MIN = 9 * 60 + 30, 16 * 60
 
@@ -171,7 +174,53 @@ def choose_params(train: list[dict], base: edge.EdgeParams) -> tuple[edge.EdgePa
     return best, pd.DataFrame(table)
 
 
-def report(symbol: str, max_days: int | None = None) -> dict:
+def _by_zone_dir(trades: pd.DataFrame, kind: str) -> pd.DataFrame:
+    """Espérance par zone ET par sens (long = rejet d'un excès baissier)."""
+    t = trades[trades["kind"] == kind]
+    if t.empty:
+        return pd.DataFrame()
+    t = t.assign(sens=np.where(t["dir"] > 0, "long", "short"))
+    return t.groupby(["zone", "sens"])["pnl_em"].agg(["count", "mean"])
+
+
+def _variants(test: list[dict], chosen: edge.EdgeParams) -> pd.DataFrame:
+    """Setup hors échantillon selon la politique en gamma négatif et le veto
+    « flux dans le sens de l'excès » : ce sont des choix d'expérience, le
+    rapport dit lequel tient sur les données."""
+    from dataclasses import replace
+    rows = []
+    for label, p in (("accel=avoid", replace(chosen, accel_policy="avoid")),
+                     ("accel=long", replace(chosen, accel_policy="long")),
+                     ("accel=both", replace(chosen, accel_policy="both")),
+                     (f"accel={chosen.accel_policy}, sans veto flux",
+                      replace(chosen, flow_veto=False))):
+        tr = replay(test, p)
+        s = edge.summarize(tr[tr["kind"] == "setup"]) if not tr.empty else pd.DataFrame()
+        if s.empty:
+            rows.append({"variante": label, "n": 0})
+            continue
+        r = s.loc["setup"]
+        rows.append({"variante": label, "n": int(r["n"]), "win_rate": r["win_rate"],
+                     "expectancy_em": r["expectancy_em"], "ci90_lo": r["ci90_lo"],
+                     "ci90_hi": r["ci90_hi"]})
+    return pd.DataFrame(rows).set_index("variante")
+
+
+def _in_points(test: list[dict], chosen: edge.EdgeParams, sizes) -> pd.DataFrame:
+    """Mêmes entrées, sortie à ta taille de trade : cible = stop = N points."""
+    from dataclasses import replace
+    frames = []
+    for pts in sizes:
+        tr = replay(test, replace(chosen, target_pts=pts, stop_pts=pts))
+        if tr.empty:
+            continue
+        s = edge.summarize(tr, value="pnl_pts")
+        frames.append(s.assign(cible_stop_pts=pts).reset_index()
+                      .set_index(["cible_stop_pts", "kind"]))
+    return pd.concat(frames) if frames else pd.DataFrame()
+
+
+def report(symbol: str, max_days: int | None = None, point_sizes=None) -> dict:
     days = available_days(symbol)
     if max_days:
         days = days[-max_days:]
@@ -200,12 +249,18 @@ def report(symbol: str, max_days: int | None = None) -> dict:
                .agg(["count", "mean"]) if not test_trades.empty else pd.DataFrame())
     by_conf = (test_trades[test_trades["kind"] == "setup"].groupby("conf")["pnl_em"]
                .agg(["count", "mean"]) if not test_trades.empty else pd.DataFrame())
+    tt = test_trades if not test_trades.empty else pd.DataFrame(columns=["kind", "dir"])
+    sizes = point_sizes or POINT_SIZES.get(symbol, POINT_SIZES["NQ"])
     out.update(train_days=f"{train[0]['day']} → {train[-1]['day']}",
                test_days=f"{test[0]['day']} → {test[-1]['day']}",
                em_sources=pd.Series([s["em_source"] for s in sessions]).value_counts().to_dict(),
                chosen=chosen.to_json(), validated=validated,
                test=test_sum, default_all=default_all, grid=grid,
-               by_zone=by_zone, by_conf=by_conf)
+               by_zone=by_zone, by_conf=by_conf,
+               naive_zone_dir=_by_zone_dir(tt, "naive"),
+               setup_zone_dir=_by_zone_dir(tt, "setup"),
+               variants=_variants(test, chosen),
+               points=_in_points(test, chosen, sizes))
     path = params_path(symbol)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({**chosen.to_json(), "validated": validated,
@@ -229,6 +284,18 @@ def to_markdown(r: dict) -> str:
               "Espérance en EM par trade, intervalle à 90 % par bootstrap par séance.", "",
               "## Rejet naïf par zone (test) — la zone filtre-t-elle ?", "", _table(r["by_zone"]), "",
               "## Setup par confirmations (test)", "", _table(r["by_conf"]), "",
+              "## Par zone et par sens (test)", "",
+              "Rejet naïf (tout excès) — `long` = achat après un excès baissier, "
+              "`short` = vente après un excès haussier :", "", _table(r["naive_zone_dir"]), "",
+              "Setup :", "", _table(r["setup_zone_dir"]), "",
+              "## Gamma négatif et veto du flux (setup, test)", "",
+              "`avoid` : aucun rejet sous le Gamma Flip · `long` : achats seulement "
+              "(rejet d'un excès baissier) · `both` : les deux sens.", "",
+              _table(r["variants"]), "",
+              "## À ta taille de trade (test)", "",
+              "Mêmes entrées, sortie à cible = stop en points, 30 min maximum. "
+              "Espérance en points par trade, avant frais.", "",
+              _table(r["points"]), "",
               "## Paramètres par défaut, toutes séances", "", _table(r["default_all"]), ""]
     return "\n".join(lines)
 
@@ -243,11 +310,14 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("symbols", nargs="*", default=["NQ", "ES"])
     ap.add_argument("--days", type=int, default=None, help="limiter aux N dernières séances")
+    ap.add_argument("--pts", default=None,
+                    help="tailles cible = stop en points, ex. 5,8,10 (défaut : 5,8,10 sur NQ)")
     args = ap.parse_args(argv)
     outdir = SETTINGS.data_dir / "reports"
     outdir.mkdir(parents=True, exist_ok=True)
     for sym in args.symbols:
-        md = to_markdown(report(sym.upper(), args.days))
+        sizes = tuple(float(x) for x in args.pts.split(",")) if args.pts else None
+        md = to_markdown(report(sym.upper(), args.days, sizes))
         path = outdir / f"edge_{sym.upper()}_{datetime.now(ET):%Y-%m-%d}.md"
         path.write_text(md, encoding="utf-8")
         print(md)

@@ -100,6 +100,13 @@ Règle demandée : **OPRA = données live, CBOE = toutes les minutes** (CBOE est
 - Pas branchés (restent sur la salve) : l'API `/api/v1/...`, le digest et le bot Discord.
 - Vérifié dans Chromium sur une chaîne NQ synthétique au spot mouvant : 12 mises à jour GEX/DEX en ~18 s, tuiles au spot live, aucune erreur. **À vérifier en séance réelle** : charge CPU du dashboard avec plusieurs symboles ouverts.
 
+## Lecture edge /scalp : gamma négatif, veto du flux, taille de trade (09/10)
+
+Suite au rapport d'edge et à l'expérience de l'utilisateur (scalp de retracements de 5-10 pts sur NQ) :
+- **Gamma négatif** : plus d'interdiction totale du contre-pied. `EdgeParams.accel_policy` = `long` par défaut (achat après un excès baissier autorisé, short après un excès haussier évité), `avoid` ou `both` possibles. L'utilisateur constate que les freins restent actifs en G− pour un long, pas pour un short ; le rapport de test du 08/10 allait dans ce sens (rejet naïf : accélérateur +0,036 EM contre frein +0,025).
+- **Veto du flux** (`flow_veto`) : flux de couverture des dealers franc DANS le sens de l'excès -> setup « à éviter » (bandeau : « poussé par la couverture des dealers »). Données de couverture seulement depuis le flux OPRA.
+- **Rapport** (`scripts/edge_report.py`) : nouvelles sections « par zone et par sens », comparaison des trois politiques et du veto, et « à ta taille de trade » (cible = stop en points : 5/8/10 sur NQ, 1,25/2/2,5 sur ES, `--pts` pour changer). Garder la politique que le rapport confirme, pas celle qu'on préfère.
+
 ## Heatmap d'un future : nuit Globex et bougie en direct (09/10)
 
 Signalé par l'utilisateur : la heatmap ne montrait pas les bougies de la nuit ni le prix en direct. Elle ne lisait que le fichier du jour calendaire (à partir de minuit) et cadrait la vue sur 9h30-16h15. Désormais, quand le prix affiché est celui d'un future (symbole NQ/ES, ou échelle NQ/ES pour un indice) : séance CME complète depuis 18h00 ET la veille et bougie en cours en direct (`app._futures_overlay`, qui réutilise `futures_session_bars`, extrait du graphique /scalp) ; jour passé : de 18h00 la veille à 17h00. Un indice affiché à son échelle (SPX, NDX…) garde la séance cash : il ne cote pas la nuit.
