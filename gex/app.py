@@ -2589,6 +2589,7 @@ def scalp_panels_snapshot(symbol: str, lang: str, window: int, min_size: float,
     if "hedge" in want:
         spec = lwspec.fig_to_spec(cached_hedge_fig(symbol, lang, window), height=300)
         spec["key"] = f"scalp-{symbol}-{window}"
+        spec["follow"] = True          # se recentre seul sur ses courbes
         out["hedge"] = enc(spec)
     if "prints" in want:
         out["prints"] = enc(tape_table(symbol, lang, min_size=min_size, include_combos=False))

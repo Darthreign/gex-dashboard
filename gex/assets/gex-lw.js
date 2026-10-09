@@ -208,7 +208,9 @@
 
     // recadrage : premier affichage ou changement de contexte seulement
     const key = spec.key || id;
-    if ((!st.fitted || st.key !== key) && ordered.length && !spec.message) {
+    // `follow` : recadré à CHAQUE mise à jour sur ses courbes (couverture des
+    // dealers de /scalp : fenêtre glissante, la vue doit suivre toute seule)
+    if ((!st.fitted || st.key !== key || spec.follow) && ordered.length && !spec.message) {
       // axes des prix déverrouillés (un glissement manuel coupe l'autoscale :
       // la vue restait sur les prix du symbole précédent)
       [0, 1].forEach((pane) => ["right", "left"].forEach((side) => {
@@ -319,5 +321,6 @@
     connect();
   }
 
-  window.GexLW = { render, stream, streams: streamAll };
+  // `_charts` : lecture seule, pour le diagnostic (tests navigateur)
+  window.GexLW = { render, stream, streams: streamAll, _charts: charts };
 })();
