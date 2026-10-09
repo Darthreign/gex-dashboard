@@ -641,7 +641,10 @@ def heatmap_spec(symbol: str, lang: str, day: str | None = None, window: float =
                        {"name": t(lang, "legend_gex_vol"), "color": "rgba(25, 158, 112, 0.85)"},
                        {"name": t(lang, "legend_heat_sign"), "color": "rgba(230, 103, 103, 0.85)"}],
             "range": None, "rangeButtons": False, "series": [], "lines": [],
-            "profile": [], "priceRange": None}
+            "profile": [], "priceRange": None,
+            # longueur max des barres de gamma : 65 % de la largeur (30 % sur
+            # /scalp v2, où elles ne doivent pas masquer les bougies récentes)
+            "profileWidth": 0.65}
     if h["error"]:
         return spec
     path, native = h["path"], h["native_price"]

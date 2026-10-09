@@ -186,7 +186,7 @@
     const host = ordered[0];
     if (spec.profile !== undefined && host && window.GexProfilePrimitive) {
       if (st.profileSeries !== host) {
-        st.profile = new window.GexProfilePrimitive();
+        st.profile = new window.GexProfilePrimitive({ widthFrac: spec.profileWidth });
         host.attachPrimitive(st.profile);
         st.profileSeries = host;
       }

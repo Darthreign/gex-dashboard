@@ -29,14 +29,16 @@
   }
 
   class GexProfileRenderer {
-    constructor(entries, barHCss) { this._entries = entries; this._barHCss = barHCss; }
+    constructor(entries, barHCss, widthFrac) {
+      this._entries = entries; this._barHCss = barHCss; this._widthFrac = widthFrac;
+    }
     draw(target) {
       const entries = this._entries;
       if (!entries || !entries.length) return;
       target.useBitmapCoordinateSpace((scope) => {
         const ctx = scope.context;
         const paneW = scope.bitmapSize.width;
-        const maxBarCssW = (scope.bitmapSize.width / scope.horizontalPixelRatio) * 0.30;
+        const maxBarCssW = (scope.bitmapSize.width / scope.horizontalPixelRatio) * this._widthFrac;
         const barHCss = this._barHCss;
         entries.forEach((e) => {
           // OI en fond (plus épaisse, plus transparente), volume devant.
@@ -92,11 +94,17 @@
       // quand même le strike malgré le plafond appliqué à vol.
       this._barHCss = gapPx ? Math.max(1, Math.min(3, gapPx / 2.2)) : 3;
     }
-    renderer() { return new GexProfileRenderer(this._entries, this._barHCss); }
+    renderer() {
+      return new GexProfileRenderer(this._entries, this._barHCss, this._source._widthFrac);
+    }
   }
 
   class GexProfilePrimitive {
-    constructor() {
+    // `options.widthFrac` : longueur maximale des barres, en fraction de la
+    // largeur du graphique (30 % par défaut, celle de /scalp v2 ; 65 % sur
+    // la heatmap de la page principale, demande du 2026-10-09).
+    constructor(options) {
+      this._widthFrac = (options && options.widthFrac) || 0.30;
       this._chart = null;
       this._series = null;
       this._requestUpdate = null;
