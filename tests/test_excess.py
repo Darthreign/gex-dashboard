@@ -268,3 +268,13 @@ def test_detail_porte_la_force_du_soutien():
     ts, net, g, ok = _flow([0] * 10 + [3] * 5, gross=[0] * 10 + [10] * 5)
     color, det = excess.flow_color(ts, net, g, ok, 60 * 15, 1)
     assert color == "gris" and det["support_ratio"] == pytest.approx(0.3)
+
+
+def test_stabilite_par_trimestre():
+    er = _script()
+    rt = pd.DataFrame({"day": ["2026-01-05", "2026-01-06", "2026-04-07", "2026-04-08"],
+                       "couleur": ["rouge", "vert", "rouge", "rouge"],
+                       "continuation": [120.0, 10.0, 60.0, 5.0]})
+    t = er.stability(rt)
+    assert t.loc["2026Q1", ("n", "rouge")] == 1 and t.loc["2026Q2", ("n", "rouge")] == 2
+    assert t.loc["2026Q2", ("cont>=50_%", "rouge")] == 50

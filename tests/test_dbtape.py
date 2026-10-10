@@ -145,8 +145,9 @@ def test_comparaison_au_tape_live(tmp_path, monkeypatch):
     import excess_report
     sessions, _ = excess_report.load_sessions("NQ", flux="databento")
     assert [s["day"] for s in sessions] == ["2026-10-07"]
-    assert "tape reconstruit Databento" in excess_report.report("NQ", 100, 60, 120,
-                                                                flux="databento")
+    md = excess_report.report("NQ", 100, 60, 120, flux="databento")
+    assert "tape reconstruit Databento" in md and "Flux reconstruit (Databento)" in md
+    assert "Contrôle d'échelle" not in md and "anciennes séances" not in md
 
 
 class _FakeStore:

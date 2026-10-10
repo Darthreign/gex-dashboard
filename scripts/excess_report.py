@@ -330,6 +330,20 @@ def _block(ev: pd.DataFrame) -> list[str]:
     return lines
 
 
+def stability(rt: pd.DataFrame) -> pd.DataFrame:
+    """Au second test, par trimestre : nombre de cas et part des
+    continuations d'au moins 50 pts, par couleur — un effet réel doit se
+    retrouver d'un trimestre à l'autre, pas seulement en moyenne."""
+    if rt.empty:
+        return pd.DataFrame()
+    q = pd.to_datetime(rt["day"]).dt.to_period("Q").astype(str)
+    g = rt.assign(trimestre=q, c50=100 * (rt["continuation"] >= 50))
+    n = g.pivot_table(index="trimestre", columns="couleur", values="c50", aggfunc="size")
+    pct = g.pivot_table(index="trimestre", columns="couleur", values="c50", aggfunc="mean")
+    cols = [c for c in excess.COLORS if c in n.columns]
+    return pd.concat({"n": n[cols], "cont>=50_%": pct[cols]}, axis=1)
+
+
 def _retest_block(rt: pd.DataFrame) -> list[str]:
     if rt.empty:
         return ["_(aucun second test)_", ""]
@@ -344,6 +358,10 @@ def _retest_block(rt: pd.DataFrame) -> list[str]:
         lines += [f"#### Second test — excès {sens} "
                   f"(fade = {'achat' if sens == 'baissier' else 'vente'})", "",
                   _table(excess.summarize_retests(rt[rt["sens"] == sens])), ""]
+    if rt["day"].nunique() >= 40:
+        lines += ["#### Second test — stabilité par trimestre", "", _table(stability(rt)), "",
+                  "Fade vendeur seulement (excès haussier) :", "",
+                  _table(stability(rt[rt["sens"] == "haussier"])), ""]
     return lines
 
 
@@ -361,12 +379,15 @@ def report(symbol: str, excess_pts: float, swing_pts: float, horizon: int,
              + (f" ({sessions[0]['day']} → {sessions[-1]['day']})" if sessions else ""), ""]
     if not sessions:
         return "\n".join(lines + ["_(aucune séance avec ticks et tape)_"])
-    lines += ["## Contrôle d'échelle du tape", "",
-              "Delta moyen implicite = brut / (contrats × prix NQ × 20 $) : juste, il reste sous "
-              "1 ; valorisé ×5, il est 5 fois plus grand. Seuil calé sur les barres vérifiées : "
-              + (f"**{threshold:.2f}**" if threshold else "_aucune barre vérifiée_")
-              + ". Les anciennes barres ne servent que dans une fenêtre de 15 min d'échelle "
-              "commune.", "", _table(scale_table(sessions).set_index("seance")), ""]
+    if flux == "live":
+        lines += ["## Contrôle d'échelle du tape", "",
+                  "Delta moyen implicite = brut / (contrats × prix NQ × 20 $) : juste, il reste "
+                  "sous 1 ; valorisé ×5, il est 5 fois plus grand. Seuil calé sur les barres "
+                  "vérifiées : "
+                  + (f"**{threshold:.2f}**" if threshold else "_aucune barre vérifiée_")
+                  + ". Les anciennes barres ne servent que dans une fenêtre de 15 min "
+                  "d'échelle commune.", "",
+                  _table(scale_table(sessions).set_index("seance")), ""]
     lines += ["## Équivalence de tes points en EM", "",
               "```\n" + pd.DataFrame(
                   [{"jour": s["day"], "EM_pts": s["em"],
@@ -380,7 +401,9 @@ def report(symbol: str, excess_pts: float, swing_pts: float, horizon: int,
               f"{len(rt)}. Au second test : `cont_*` = dépassement de l'extrême précédent ; "
               f"`rempli_%` = ordre à {ENTRY_OFFSET:g} pts de l'extrême touché ; retours et MAE "
               "depuis ce prix d'entrée, ordres remplis seulement.", ""]
-    for src in SOURCES + ("ensemble",):
+    if flux != "live":                 # une seule source : le tape reconstruit
+        lines += ["### Flux reconstruit (Databento)", ""] + _block(ev) + _retest_block(rt)
+    for src in (SOURCES + ("ensemble",)) if flux == "live" else ():
         e_sub = ev if src == "ensemble" or ev.empty else ev[ev["flux"] == src]
         r_sub = rt if src == "ensemble" or rt.empty else rt[rt["flux"] == src]
         title = {"vérifié": "Flux vérifié (référence)",
@@ -397,9 +420,10 @@ def report(symbol: str, excess_pts: float, swing_pts: float, horizon: int,
                   f"{info['seances_sans_em']}", "", _table(excess.summarize(evb)), ""]
     lines += ["Lecture : au SECOND TEST, le voyant n'est utile que si le ROUGE montre une "
               "continuation nettement plus longue (cont_p90, cont>=50_%) que le VERT. "
-              "Comparer d'abord le bloc « vérifié » et le bloc « anciennes séances » : s'ils "
-              "divergent, le bloc « ensemble » ne vaut rien. Regarder n et les intervalles à "
-              "95 % : avec quelques dizaines de cas, seuls de gros écarts comptent."]
+              + ("Comparer d'abord le bloc « vérifié » et le bloc « anciennes séances » : s'ils "
+                 "divergent, le bloc « ensemble » ne vaut rien. " if flux == "live" else "")
+              + "Regarder n et les intervalles à 95 % : avec quelques dizaines de cas, seuls "
+              "de gros écarts comptent."]
     return "\n".join(lines)
 
 
