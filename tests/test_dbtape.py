@@ -145,6 +145,12 @@ def test_comparaison_au_tape_live(tmp_path, monkeypatch):
     import excess_report
     sessions, _ = excess_report.load_sessions("NQ", flux="databento")
     assert [s["day"] for s in sessions] == ["2026-10-07"]
+    # séance reconstruite non étiquetée (roll) : jamais lue, même à échelle cohérente
+    live.assign(mult_source=None).to_parquet(
+        tmp_path / "tape_databento" / "NQ" / "2026-10-07.parquet")
+    assert excess_report.load_sessions("NQ", flux="databento")[0] == []
+    live.assign(mult_source="databento").to_parquet(
+        tmp_path / "tape_databento" / "NQ" / "2026-10-07.parquet")
     md = excess_report.report("NQ", 100, 60, 120, flux="databento")
     assert "tape reconstruit Databento" in md and "Flux reconstruit (Databento)" in md
     assert "Contrôle d'échelle" not in md and "anciennes séances" not in md

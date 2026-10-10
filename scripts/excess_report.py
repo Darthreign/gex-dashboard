@@ -243,6 +243,10 @@ def _tick_days(symbol: str) -> set[str]:
 def load_sessions(symbol: str, use_old: bool = True, flux: str = "live",
                   start: str | None = None,
                   end: str | None = None) -> tuple[list[dict], float | None]:
+    if flux != "live":
+        # tape reconstruit : une séance non étiquetée l'est pour un sous-jacent
+        # incertain (roll), pas pour une question d'échelle — jamais utilisée
+        use_old = False
     tdays = tape_days(symbol, flux)
     # une séance lit le tape de son jour ET de la veille (soirée Globex)
     wanted = {d for d in _tick_days(symbol)
