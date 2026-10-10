@@ -21,6 +21,12 @@ frein suivant) : pendant un excès, les market makers le SOUTIENNENT-ils
   (cf. flowtape : la couverture suit le delta pris par le preneur).
 - Ensuite (mesure, pas un trade) : excursion adverse maximale, et retour de
   10 / 15 / 20 points en faveur du fade, dans un horizon donné.
+- Second test (l'entrée réelle de l'utilisateur) : après l'excès, première
+  réaction d'au moins 15 pts, puis retour à moins de 10 pts de l'extrême ;
+  voyant lu à ce moment-là, puis continuation au-delà de l'extrême et suivi
+  d'un ordre placé à 3 pts de l'extrême.
+- Le gris est découpé à titre DESCRIPTIF (`gris_nuance`) ; le seuil du voyant
+  n'est pas modifié.
 
 Rien ici n'est un signal validé : c'est l'outil de mesure.
 """
@@ -79,7 +85,9 @@ def flow_color(minute_ts: np.ndarray, net: np.ndarray, gross: np.ndarray,
     net_p, gross_p = float(net[in_p].sum()), float(np.abs(gross[in_p]).sum())
     s_r, s_p = net_r * excess_dir, net_p * excess_dir     # > 0 : soutient l'excès
     detail = {"net_recent": net_r, "gross_recent": gross_r,
-              "net_prev": net_p, "gross_prev": gross_p}
+              "net_prev": net_p, "gross_prev": gross_p,
+              # > 0 : soutient l'excès ; |.| >= ratio : flux « franc »
+              "support_ratio": s_r / gross_r if gross_r > 0 else np.nan}
     franc_r = gross_r > 0 and abs(net_r) / gross_r >= ratio
     push_p = gross_p > 0 and s_p / gross_p >= ratio
     if franc_r and s_r < 0:
@@ -89,6 +97,95 @@ def flow_color(minute_ts: np.ndarray, net: np.ndarray, gross: np.ndarray,
     if franc_r and s_r > 0:
         return "rouge", detail
     return "gris", detail
+
+
+def gris_nuance(support_ratio: float, ratio: float = 0.35, weak: float = 0.20) -> str:
+    """Découpage DESCRIPTIF du gris (le seuil du voyant n'est pas modifié) :
+    soutien ou opposition entre `weak` et `ratio`, ou flux quasi neutre."""
+    if support_ratio is None or np.isnan(support_ratio):
+        return "gris (aucun flux)"
+    if support_ratio >= weak:
+        return f"gris (soutien {weak:g}-{ratio:g})"
+    if support_ratio <= -weak:
+        return f"gris (contre {weak:g}-{ratio:g})"
+    return f"gris (< {weak:g})"
+
+
+def find_retest(high: np.ndarray, low: np.ndarray, i: int, excess_dir: int,
+                reaction_pts: float = 15.0, retest_pts: float = 10.0,
+                max_wait: int = 120) -> dict | None:
+    """Second test après l'excès franchi en bougie `i` : l'extrême E suit
+    l'excès jusqu'à une première réaction d'au moins `reaction_pts` contre
+    lui, puis le prix revient à moins de `retest_pts` de E. Retour :
+    {t, extreme, reaction_i} (t = bougie du retour) ou None dans `max_wait`
+    minutes. Dans une même bougie, la réaction n'est retenue qu'avec un
+    extrême déjà fixé (prudent : l'ordre intra-bougie est inconnu)."""
+    end = min(len(high), i + 1 + max_wait)
+    ext = low[i] if excess_dir < 0 else high[i]
+    reacted = None
+    for k in range(i + 1, end):
+        h, lo = float(high[k]), float(low[k])
+        if reacted is None:
+            back = (h - ext) if excess_dir < 0 else (ext - lo)
+            if back >= reaction_pts:
+                reacted = k
+                continue
+            ext = min(ext, lo) if excess_dir < 0 else max(ext, h)
+        else:
+            near = (lo <= ext + retest_pts) if excess_dir < 0 else (h >= ext - retest_pts)
+            if near:
+                return {"t": k, "extreme": float(ext), "reaction_i": reacted}
+    return None
+
+
+def retest_outcome(high: np.ndarray, low: np.ndarray, t: int, extreme: float,
+                   fade_dir: int, entry_offset: float = 3.0, horizon: int = 120,
+                   targets=TARGETS) -> dict:
+    """Au second test (bougie `t`) : CONTINUATION au-delà de l'extrême
+    précédent (le prix va-t-il plus loin ?) et, si l'ordre à `entry_offset`
+    points de l'extrême est touché, le même suivi que `outcome` depuis ce
+    prix d'entrée."""
+    end = min(len(high), t + horizon)
+    hi, lo = high[t:end], low[t:end]
+    beyond = (extreme - lo) if fade_dir > 0 else (hi - extreme)
+    res = {"continuation": float(max(0.0, beyond.max())) if len(hi) else 0.0}
+    entry = extreme + fade_dir * entry_offset
+    touched = (lo <= entry) if fade_dir > 0 else (hi >= entry)
+    idx = np.flatnonzero(touched)
+    res["rempli"] = bool(len(idx))
+    if len(idx):
+        f = t + int(idx[0])
+        res.update(outcome(high, low, f, entry, fade_dir, max(1, end - f - 1), targets))
+    return res
+
+
+def summarize_retests(events: pd.DataFrame, key: str = "couleur", order=COLORS,
+                      targets=TARGETS, marks=MAE_MARKS) -> pd.DataFrame:
+    """Par couleur au second test : continuation au-delà de l'extrême
+    précédent, part des ordres remplis et, parmi eux, retours et MAE."""
+    rows = []
+    labels = [c for c in order if c in set(events.get(key, []))] if not events.empty else []
+    labels += sorted(set(events[key]) - set(labels)) if not events.empty else []
+    for label in labels:
+        g = events[events[key] == label]
+        n = len(g)
+        row = {key: label, "n": n, "seances": g["day"].nunique(),
+               "cont_med": g["continuation"].median(),
+               "cont_p75": g["continuation"].quantile(0.75),
+               "cont_p90": g["continuation"].quantile(0.90),
+               "cont_max": g["continuation"].max()}
+        for m in marks:
+            row[f"cont>={m:g}_%"] = 100 * (g["continuation"] >= m).mean()
+        k_lo, k_hi = wilson(int((g["continuation"] >= marks[1]).sum()), n)
+        row[f"cont>={marks[1]:g}_ic95"] = f"{100 * k_lo:.0f}-{100 * k_hi:.0f}"
+        f = g[g["rempli"]]
+        row["rempli_%"] = 100 * len(f) / n
+        for k in targets:
+            row[f"retour_{k:g}_%"] = 100 * f[f"hit_{k:g}"].mean() if len(f) else np.nan
+        row["mae_med"] = f["mae"].median() if len(f) else np.nan
+        row["mae_p90"] = f["mae"].quantile(0.90) if len(f) else np.nan
+        rows.append(row)
+    return pd.DataFrame(rows).set_index(key) if rows else pd.DataFrame()
 
 
 def outcome(high: np.ndarray, low: np.ndarray, i: int, level: float, fade_dir: int,
@@ -130,17 +227,18 @@ def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
     return (c - h, c + h)
 
 
-def summarize(events: pd.DataFrame, targets=TARGETS, marks=MAE_MARKS) -> pd.DataFrame:
+def summarize(events: pd.DataFrame, targets=TARGETS, marks=MAE_MARKS,
+              key: str = "couleur", order=COLORS) -> pd.DataFrame:
     """Par couleur : nombre, séances, taux de retour (avec intervalle à 95 %
     pour le premier objectif), excursion adverse (médiane, p75, p90, max) et
     part des excès qui ont continué d'au moins 25 / 50 / 100 points."""
     rows = []
-    for color in COLORS:
-        g = events[events["couleur"] == color] if not events.empty else events
-        if g.empty:
-            continue
+    labels = [c for c in order if not events.empty and c in set(events[key])]
+    labels += sorted(set(events[key]) - set(labels)) if not events.empty else []
+    for color in labels:
+        g = events[events[key] == color]
         n = len(g)
-        row = {"couleur": color, "n": n, "seances": g["day"].nunique()}
+        row = {key: color, "n": n, "seances": g["day"].nunique()}
         for k in targets:
             row[f"retour_{k:g}_%"] = 100 * g[f"hit_{k:g}"].mean()
         lo, hi = wilson(int(g[f"hit_{targets[0]:g}"].sum()), n)
@@ -154,4 +252,4 @@ def summarize(events: pd.DataFrame, targets=TARGETS, marks=MAE_MARKS) -> pd.Data
         for m in marks:
             row[f"mae>={m:g}_%"] = 100 * (g["mae"] >= m).mean()
         rows.append(row)
-    return pd.DataFrame(rows).set_index("couleur") if rows else pd.DataFrame()
+    return pd.DataFrame(rows).set_index(key) if rows else pd.DataFrame()

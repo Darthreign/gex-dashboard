@@ -135,8 +135,10 @@ def test_script_bout_en_bout(tmp_path, monkeypatch):
     day = "2026-10-07"
     start = datetime(2026, 10, 7, 9, 30, tzinfo=ET).timestamp()
     # 9h30 -> 12h : +50, -160 (excès baissier), puis remontée
+    # puis réaction à 19910, second test à 19892, et remontée
     path = np.concatenate([np.linspace(20000, 20050, 30), np.linspace(20050, 19890, 60),
-                           np.linspace(19890, 19980, 90)])
+                           np.linspace(19890, 19910, 10), np.linspace(19910, 19892, 10),
+                           np.linspace(19892, 19980, 80)])
     ticks = pd.DataFrame({"ts": start + 60 * np.arange(len(path)) + 1,
                           "price": path, "side": "BUY", "size": 1.0})
     (tmp_path / "ticks" / "NQ").mkdir(parents=True)
@@ -155,7 +157,61 @@ def test_script_bout_en_bout(tmp_path, monkeypatch):
     e = ev.iloc[0]
     assert e["sens"] == "baissier" and e["couleur"] == "rouge" and e["segment"] == "cash"
     assert e["hit_10"]
+    rt = excess_report.retests(ev)
+    assert len(rt) == 1 and rt.iloc[0]["couleur_exces"] == "rouge"
+    assert rt.iloc[0]["rempli"] and rt.iloc[0]["continuation"] == 0.0
     md = excess_report.report("NQ", 100, 60, 120)
     assert "Variante A" in md and "rouge" in md and "aucun EM disponible" in md
+    assert "Second test" in md and "Le gris détaillé" in md
     # le 25/09 est exclu d'office
     assert "2026-09-25" in excess_report.EXCLUDED_DAYS
+
+
+# --- second test et gris détaillé ---------------------------------------------------
+
+def test_second_test_apres_reaction_de_15():
+    # excès baissier franchi en 0 ; extrême 900, réaction à 920, retour à 908
+    hi, lo = _path([950, 900, 920, 908, 880, 930])
+    i = 0
+    rt = excess.find_retest(hi, lo, i, -1, reaction_pts=15, retest_pts=10)
+    assert rt is not None and rt["extreme"] == 900
+    assert lo[rt["t"]] <= 910 and lo[rt["t"] - 1] > 910
+    r = excess.retest_outcome(hi, lo, rt["t"], rt["extreme"], 1, entry_offset=3, horizon=200)
+    assert r["continuation"] == 20.0                    # nouveau creux à 880
+    assert r["rempli"] and r["mae"] == pytest.approx(23.0)   # entrée 903
+    assert r["hit_20"]
+
+
+def test_pas_de_second_test_sans_reaction():
+    hi, lo = _path([950, 900, 910, 895])                # rebond de 10 seulement
+    assert excess.find_retest(hi, lo, 0, -1, 15, 10) is None
+
+
+def test_second_test_ordre_non_rempli():
+    hi, lo = _path([1000, 1050, 1030, 1042, 1010])      # excès haussier, retest à 1042
+    rt = excess.find_retest(hi, lo, 0, 1, 15, 10)
+    r = excess.retest_outcome(hi, lo, rt["t"], rt["extreme"], -1, 3, 100)
+    assert not r["rempli"] and r["continuation"] == 0.0 and "hit_10" not in r
+
+
+def test_resume_second_test():
+    rt = pd.DataFrame({"day": ["d1", "d2"], "couleur": ["rouge", "rouge"],
+                       "continuation": [120.0, 5.0], "rempli": [True, False],
+                       "mae": [125.0, np.nan],
+                       **{f"hit_{k:g}": [False, np.nan] for k in excess.TARGETS}})
+    s = excess.summarize_retests(rt)
+    assert s.loc["rouge", "n"] == 2 and s.loc["rouge", "cont>=100_%"] == 50
+    assert s.loc["rouge", "rempli_%"] == 50 and s.loc["rouge", "retour_10_%"] == 0
+
+
+@pytest.mark.parametrize("r,attendu", [(0.3, "gris (soutien 0.2-0.35)"),
+                                       (-0.25, "gris (contre 0.2-0.35)"),
+                                       (0.05, "gris (< 0.2)"), (np.nan, "gris (aucun flux)")])
+def test_nuances_du_gris(r, attendu):
+    assert excess.gris_nuance(r) == attendu
+
+
+def test_detail_porte_la_force_du_soutien():
+    ts, net, g, ok = _flow([0] * 10 + [3] * 5, gross=[0] * 10 + [10] * 5)
+    color, det = excess.flow_color(ts, net, g, ok, 60 * 15, 1)
+    assert color == "gris" and det["support_ratio"] == pytest.approx(0.3)

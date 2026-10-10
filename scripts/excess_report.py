@@ -16,7 +16,12 @@ multiplicateur ou barre écrite après lui ; le 25/09/2026 est exclu) :
 3. couleur du voyant (flux de couverture des 5 min précédentes contre les
    10 d'avant, seuil « franc » 0,35 du bandeau, inchangé) ;
 4. excursion adverse et retours de 10 / 15 / 20 pts, sur 120 min au plus ;
-   un excès qui laisse moins de 60 min de données est écarté.
+   un excès qui laisse moins de 60 min de données est écarté ;
+5. SECOND TEST (ton entrée, variante en points) : après l'excès, réaction
+   d'au moins 15 pts puis retour à moins de 10 pts de l'extrême (dans les
+   120 min) ; voyant lu à ce moment, continuation au-delà de l'extrême, et
+   suivi d'un ordre à 3 pts de l'extrême s'il est touché ;
+6. le gris découpé selon la force du flux (descriptif, seuil inchangé).
 
 Séparé cash (9h30-16h00 ET) / Globex. Lecture seule ; rapport dans
 data/reports/exces_<SYM>_<date>.md. Peu de séances : des tendances, pas une
@@ -42,6 +47,7 @@ from gex.metrics import ET  # noqa: E402
 EXCLUDED_DAYS = {"2026-09-25"}        # multiplicateur invérifiable ce jour-là
 HEDGE = ["hedge_call_buy", "hedge_call_sell", "hedge_put_buy", "hedge_put_sell"]
 MIN_BARS_AFTER = 60
+REACTION_PTS, RETEST_PTS, ENTRY_OFFSET = 15.0, 10.0, 3.0
 CASH = (9 * 60 + 30, 16 * 60)
 
 
@@ -101,12 +107,33 @@ def session_events(day: str, bars: pd.DataFrame, flow: pd.DataFrame, excess_pts:
         i = e["i"]
         if len(hi) - i - 1 < MIN_BARS_AFTER:
             continue
-        color, _ = excess.flow_color(fts, fnet, fgross, fok, ts[i], e["dir"])
-        rows.append({"day": day, "ts": ts[i], "segment": _segment(ts[i]),
-                     "sens": "haussier" if e["dir"] > 0 else "baissier",
-                     "excess_pts": excess_pts, "couleur": color,
-                     **excess.outcome(hi, lo, i, e["level"], -e["dir"], horizon)})
+        color, det = excess.flow_color(fts, fnet, fgross, fok, ts[i], e["dir"])
+        row = {"day": day, "ts": ts[i], "segment": _segment(ts[i]),
+               "sens": "haussier" if e["dir"] > 0 else "baissier",
+               "excess_pts": excess_pts, "couleur": color,
+               "nuance": _nuance(color, det),
+               **excess.outcome(hi, lo, i, e["level"], -e["dir"], horizon)}
+        rt = excess.find_retest(hi, lo, i, e["dir"], REACTION_PTS, RETEST_PTS, horizon)
+        if rt is not None and len(hi) - rt["t"] - 1 >= MIN_BARS_AFTER:
+            t = rt["t"]
+            c2, det2 = excess.flow_color(fts, fnet, fgross, fok, ts[t], e["dir"])
+            row["retest"] = {"day": day, "ts": ts[t], "segment": _segment(ts[t]),
+                             "sens": row["sens"], "couleur": c2, "nuance": _nuance(c2, det2),
+                             "couleur_exces": color, "attente_min": t - i,
+                             **excess.retest_outcome(hi, lo, t, rt["extreme"], -e["dir"],
+                                                     ENTRY_OFFSET, horizon)}
+        rows.append(row)
     return rows
+
+
+def _nuance(color: str, detail: dict) -> str:
+    return excess.gris_nuance(detail.get("support_ratio")) if color == "gris" else color
+
+
+def retests(ev: pd.DataFrame) -> pd.DataFrame:
+    if ev.empty or "retest" not in ev:
+        return pd.DataFrame()
+    return pd.DataFrame([r for r in ev["retest"] if isinstance(r, dict)])
 
 
 def load_sessions(symbol: str) -> list[dict]:
@@ -184,11 +211,44 @@ def report(symbol: str, excess_pts: float, swing_pts: float, horizon: int) -> st
         for seg in ("tout", "cash", "globex"):
             sub = ev if seg == "tout" else ev[ev["segment"] == seg]
             lines += [f"### {seg.capitalize()}", "", _table(excess.summarize(sub)), ""]
-        lines += ["Par sens de l'excès (toutes séances) :", ""]
+        if variant == "A":
+            lines += ["### Le gris détaillé (descriptif, seuil 0,35 inchangé)", "",
+                      "Force du flux des 5 dernières minutes, rapportée au brut : "
+                      "`soutien` = dans le sens de l'excès, `contre` = opposé.", "",
+                      _table(excess.summarize(ev[ev["couleur"] == "gris"], key="nuance",
+                                              order=())), ""]
+            rt = retests(ev)
+            lines += ["## Second test — ton entrée (variante en points)", "",
+                      f"Après l'excès : réaction d'au moins {REACTION_PTS:g} pts, puis retour à "
+                      f"moins de {RETEST_PTS:g} pts de l'extrême. Voyant lu À CE MOMENT. "
+                      "`cont_*` = jusqu'où le prix dépasse l'extrême précédent ; "
+                      f"`rempli_%` = ordre à {ENTRY_OFFSET:g} pts de l'extrême touché ; "
+                      "retours et MAE comptés depuis ce prix d'entrée, ordres remplis seulement.",
+                      "", f"Excès suivis d'un second test : {len(rt)} sur {len(ev)}", ""]
+            if rt.empty:
+                lines += ["_(aucun second test)_", ""]
+            else:
+                for seg in ("tout", "cash", "globex"):
+                    sub = rt if seg == "tout" else rt[rt["segment"] == seg]
+                    lines += [f"### {seg.capitalize()}", "",
+                              _table(excess.summarize_retests(sub)), ""]
+                lines += ["### Gris détaillé au second test", "",
+                          _table(excess.summarize_retests(rt[rt["couleur"] == "gris"],
+                                                          key="nuance", order=())), "",
+                          "### Par sens de l'excès", ""]
+                for sens in ("baissier", "haussier"):
+                    lines += [f"Excès {sens} (fade = "
+                              f"{'achat' if sens == 'baissier' else 'vente'}) :", "",
+                              _table(excess.summarize_retests(rt[rt["sens"] == sens])), ""]
+            lines += ["## Variante A — par sens de l'excès (au franchissement)", ""]
+        if variant != "A":
+            lines += ["Par sens de l'excès (toutes séances) :", ""]
         for sens in ("baissier", "haussier"):
             lines += [f"Excès {sens} (fade = {'achat' if sens == 'baissier' else 'vente'}) :",
                       "", _table(excess.summarize(ev[ev["sens"] == sens])), ""]
-    lines += ["Lecture : le voyant n'est utile que si le ROUGE montre une excursion adverse "
+    lines += ["Lecture : au SECOND TEST, le voyant n'est utile que si le ROUGE montre une "
+              "continuation nettement plus longue (cont_p90, cont>=50_%) que le VERT. ",
+              "Lecture (franchissement) : le voyant n'est utile que si le ROUGE montre une excursion adverse "
               "nettement plus longue (mae_p90, mae>=50_%) et moins de retours que le VERT. "
               "Regarder d'abord n et l'intervalle retour_10_ic95 : avec quelques dizaines "
               "d'excès, seuls de gros écarts comptent."]
