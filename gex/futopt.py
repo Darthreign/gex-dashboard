@@ -552,6 +552,38 @@ def build_native_chain(product_code: str, window: float = DEFAULT_WINDOW,
     return df
 
 
+def oi_frame(chain: pd.DataFrame, raw: dict[str, dict], ts: datetime) -> pd.DataFrame:
+    """Référentiel + open interest reçu. `open_interest` reste NaN pour un
+    contrat dont dxFeed n'a envoyé aucun Summary (sans position ouverte, il
+    n'émet rien) : 0 serait une affirmation que la donnée ne porte pas."""
+    df = chain.copy()
+    df["open_interest"] = df["streamer_symbol"].map(
+        lambda s: raw.get(s, {}).get("oi", np.nan)).astype(float)
+    df["collected_at"] = pd.Timestamp(ts)
+    return df
+
+
+def collect_open_interest(product_code: str) -> pd.DataFrame | None:
+    """Open interest de la chaîne COMPLÈTE (toutes échéances, tous strikes),
+    pour l'archive quotidienne — les snapshots, eux, ne gardent que la fenêtre
+    filtrée (`filter_chain`). Seul l'événement Summary est souscrit : une
+    salve par connexion porte alors `MAX_BURST` contrats, soit ~2 connexions
+    pour les ~7 000 contrats NQ. Pas de condition d'arrêt possible sur l'OI
+    (un contrat sans position n'émet rien) : chaque connexion va au silence
+    ou au plafond `MAX_DURATION_S`."""
+    _, _, access = quote_token()
+    chain = fetch_chain_instruments(product_code, access)
+    if chain.empty:
+        log.warning("%s : référentiel vide, OI non archivé", product_code)
+        return None
+    raw = asyncio.run(_collect(chain["streamer_symbol"].tolist(), events=("Summary",)))
+    df = oi_frame(chain, raw, datetime.now(ET))
+    log.info("%s : OI de la chaîne complète — %d contrats, %d avec OI, total %.0f",
+             product_code, len(df), int(df["open_interest"].notna().sum()),
+             df["open_interest"].sum())
+    return df
+
+
 def pull_native(product_code: str, persist: bool = True) -> pd.DataFrame | None:
     """Point d'entrée planifiable : construit la chaîne et la persiste.
 

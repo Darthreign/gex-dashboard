@@ -224,3 +224,28 @@ def test_recalculs_utilisent_le_multiplicateur_du_future():
     assert (df["multiplier"] == 20.0).all()
     assert metrics.net_gex_at(df, 28700.0) == pytest.approx(df["gex"].sum(), rel=1e-6)
     assert metrics.gex_at_spot(df, 28700.0).sum() == pytest.approx(df["gex"].sum(), rel=1e-6)
+
+
+# --- Archive quotidienne de l'open interest (chaîne complète) -----------------
+
+def test_oi_frame_garde_nan_sans_summary_et_horodate():
+    chain = _chain().head(4)
+    syms = chain["streamer_symbol"].tolist()
+    raw = {syms[0]: {"oi": 150.0}, syms[1]: {"oi": 0.0}, syms[2]: {"iv": 0.2}}
+    ts = datetime(2026, 10, 12, 11, 15, tzinfo=ET)
+    out = futopt.oi_frame(chain, raw, ts)
+    oi = out["open_interest"].tolist()
+    assert oi[:2] == [150.0, 0.0]
+    assert np.isnan(oi[2]) and np.isnan(oi[3])
+    assert (out["collected_at"] == pd.Timestamp(ts)).all()
+    assert len(out) == 4 and {"strike", "type", "expiry"} <= set(out.columns)
+
+
+def test_save_open_interest_un_fichier_par_jour(tmp_path, monkeypatch):
+    from gex import store
+    from gex.config import SETTINGS
+    monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
+    df = futopt.oi_frame(_chain().head(2), {}, datetime(2026, 10, 12, 11, 15, tzinfo=ET))
+    p = store.save_open_interest("NQ", df, datetime(2026, 10, 12, 11, 15, tzinfo=ET))
+    assert p == tmp_path / "oi" / "NQ" / "2026-10-12.parquet"
+    assert len(pd.read_parquet(p)) == 2

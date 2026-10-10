@@ -318,6 +318,24 @@ def pull_native_options() -> None:
             log.exception("%s : échec de la collecte native", code)
 
 
+def archive_open_interest() -> None:
+    """Archive quotidienne de l'open interest NQ sur la chaîne COMPLÈTE
+    (data/oi/NQ/<jour>.parquet). Les snapshots ne gardent que la fenêtre
+    filtrée (~3 échéances, ±8 % du spot) : sans cette archive, l'OI des
+    trimestrielles, fins de mois et hebdos lointaines n'était conservé nulle
+    part — et son historique ne s'achète qu'au prix du schéma `statistics`
+    Databento (34 $ l'année, devis du 2026-10-10)."""
+    if not credentials_present():
+        return
+    try:
+        df = futopt.collect_open_interest("NQ")
+        if df is not None and not df.empty:
+            path = store.save_open_interest("NQ", df, datetime.now(ET))
+            log.info("OI NQ archivé : %s", path.name)
+    except Exception:  # noqa: BLE001 — un échec ne doit rien casser d'autre
+        log.exception("NQ : échec de l'archivage de l'open interest")
+
+
 def pull_native_options_fast(persist: bool = False) -> None:
     """Chaînes d'options natives NQ et ES — FENÊTRE RESSERRÉE (0DTE/1DTE,
     `futopt.FAST_TRADING_DAYS` jours de BOURSE) : moins de contrats à
@@ -648,6 +666,10 @@ def add_ingest_jobs(sched: BackgroundScheduler) -> None:
     # au rythme rapide.
     sched.add_job(pull_native_options, "cron", day_of_week="mon-fri",
                   hour="10,14", minute=0, max_instances=1, coalesce=True)
+    # OI de la chaîne NQ complète, une fois par jour : après le Daily Bulletin
+    # FINAL de CME (10h CT = 11h ET), qui fixe l'OI de règlement de la veille.
+    sched.add_job(archive_open_interest, "cron", day_of_week="mon-fri",
+                  hour=11, minute=15, max_instances=1, coalesce=True)
     # Ouverture de la séance CME du dimanche soir (~18h ET = 00h Paris,
     # cf. MARKET_OPEN/market_is_open ci-dessus pour la distinction avec les
     # heures de marché CASH) : les 0DTE du lundi commencent à se négocier dès

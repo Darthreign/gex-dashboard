@@ -133,6 +133,14 @@ def save_snapshot(symbol: str, df: pd.DataFrame, ts: datetime) -> Path:
     return path
 
 
+def save_open_interest(symbol: str, df: pd.DataFrame, ts: datetime) -> Path:
+    """Open interest de la chaîne COMPLÈTE, un fichier par jour de collecte
+    (réécrit si la collecte est relancée le même jour)."""
+    path = _ensure(SETTINGS.data_dir / "oi" / symbol / f"{ts:%Y-%m-%d}.parquet")
+    _write_atomic(df, path)
+    return path
+
+
 def append_daily(kind: str, symbol: str, row: dict, ts: datetime) -> Path:
     """Ajoute une ligne à un fichier journalier (flows) — petit, réécrit à chaque fois."""
     path = _ensure(SETTINGS.data_dir / kind / symbol / f"{ts:%Y-%m-%d}.parquet")
