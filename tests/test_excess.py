@@ -128,43 +128,94 @@ def test_wilson():
 
 # --- script ----------------------------------------------------------------------
 
-def test_script_bout_en_bout(tmp_path, monkeypatch):
-    from gex import store
-    from gex.config import SETTINGS
-    monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
-    day = "2026-10-07"
-    start = datetime(2026, 10, 7, 9, 30, tzinfo=ET).timestamp()
-    # 9h30 -> 12h : +50, -160 (excès baissier), puis remontée
-    # puis réaction à 19910, second test à 19892, et remontée
-    path = np.concatenate([np.linspace(20000, 20050, 30), np.linspace(20050, 19890, 60),
-                           np.linspace(19890, 19910, 10), np.linspace(19910, 19892, 10),
-                           np.linspace(19892, 19980, 80)])
-    ticks = pd.DataFrame({"ts": start + 60 * np.arange(len(path)) + 1,
-                          "price": path, "side": "BUY", "size": 1.0})
-    (tmp_path / "ticks" / "NQ").mkdir(parents=True)
+def _ecrire_seance(tmp_path, day, labeled, factor=1.0):
+    """Séance synthétique : ticks toutes les 10 s le long d'un chemin (excès
+    baissier, réaction, second test, remontée) et tape où les dealers vendent
+    (soutien de l'excès). `labeled` : barres vérifiées ; sinon format
+    ancien, montants × `factor`."""
+    start = datetime.fromisoformat(day + "T09:30").replace(tzinfo=ET).timestamp()
+    nodes = [(0, 20000), (30, 20050), (90, 19890), (100, 19910), (110, 19892), (210, 19980)]
+    t = np.arange(0, 210 * 60, 10.0)
+    price = np.round(np.interp(t, [m * 60 for m, _ in nodes], [p for _, p in nodes]) * 4) / 4
+    ticks = pd.DataFrame({"ts": start + t, "price": price, "side": "BUY", "size": 1.0})
+    (tmp_path / "ticks" / "NQ").mkdir(parents=True, exist_ok=True)
     ticks.to_parquet(tmp_path / "ticks" / "NQ" / f"{day}.parquet")
-    # tape vérifié : dealers vendeurs pendant la baisse (soutien de l'excès)
-    mins = pd.date_range("2026-10-07 09:30", periods=len(path), freq="1min")
+    mins = pd.date_range(day + " 09:30", periods=210, freq="1min")
     tape = pd.DataFrame({"timestamp": mins, "hedge_call_buy": 0.0,
-                         "hedge_call_sell": -5e6, "hedge_put_buy": -5e6,
-                         "hedge_put_sell": 0.0, "mult_source": "courtier"})
-    (tmp_path / "tape" / "NQ").mkdir(parents=True)
+                         "hedge_call_sell": -5e6 * factor, "hedge_put_buy": -5e6 * factor,
+                         "hedge_put_sell": 0.0, "buy_contracts": 60.0, "sell_contracts": 40.0,
+                         "delta_prints": 10.0, "no_delta_prints": 0.0})
+    if labeled:
+        tape["mult_source"] = "courtier"
+    (tmp_path / "tape" / "NQ").mkdir(parents=True, exist_ok=True)
     tape.to_parquet(tmp_path / "tape" / "NQ" / f"{day}.parquet")
+
+
+def _script():
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
     import excess_report
-    ev, _ = excess_report.run(excess_report.load_sessions("NQ"), "A", 100, 60, 120)
-    assert len(ev) == 1
-    e = ev.iloc[0]
-    assert e["sens"] == "baissier" and e["couleur"] == "rouge" and e["segment"] == "cash"
-    assert e["hit_10"]
-    rt = excess_report.retests(ev)
-    assert len(rt) == 1 and rt.iloc[0]["couleur_exces"] == "rouge"
-    assert rt.iloc[0]["rempli"] and rt.iloc[0]["continuation"] == 0.0
-    md = excess_report.report("NQ", 100, 60, 120)
-    assert "Variante A" in md and "rouge" in md and "aucun EM disponible" in md
-    assert "Second test" in md and "Le gris détaillé" in md
-    # le 25/09 est exclu d'office
-    assert "2026-09-25" in excess_report.EXCLUDED_DAYS
+    return excess_report
+
+
+def test_script_bout_en_bout(tmp_path, monkeypatch):
+    from gex.config import SETTINGS
+    monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
+    _ecrire_seance(tmp_path, "2026-10-07", labeled=True)
+    _ecrire_seance(tmp_path, "2026-10-06", labeled=False, factor=5.0)   # ancien, ×5
+    er = _script()
+    sessions, seuil = er.load_sessions("NQ")
+    assert [s["day"] for s in sessions] == ["2026-10-06", "2026-10-07"]
+    # delta moyen des barres vérifiées : 1e7 / (100 × ~19 950 × 20) ≈ 0,25
+    assert seuil == pytest.approx(0.25 * np.sqrt(5), rel=0.02)
+    assert set(sessions[0]["flow"]["grp"]) == {"x5"}
+    ev, _ = er.run(sessions, "A", 100, 60, 120)
+    assert len(ev) == 2
+    by = ev.set_index("day")
+    assert by.loc["2026-10-07", "flux"] == "vérifié"
+    assert by.loc["2026-10-06", "flux"] == "delta moyen"
+    assert (ev["couleur"] == "rouge").all() and (ev["segment"] == "cash").all()
+    assert ev["hit_10"].all()
+    # ticks : délai en minutes réelles, pas en bougies
+    rt = er.retests(ev)
+    assert len(rt) == 2 and (rt["couleur_exces"] == "rouge").all()
+    assert rt["rempli"].all() and (rt["continuation"] == 0.0).all()
+    md = er.report("NQ", 100, 60, 120)
+    assert "Contrôle d'échelle" in md and "Flux vérifié" in md and "anciennes séances" in md
+    assert "Second test" in md and "aucun EM disponible" in md
+    # sans les anciennes barres : une seule séance
+    only, _ = er.load_sessions("NQ", use_old=False)
+    assert [s["day"] for s in only] == ["2026-10-07"]
+    assert "2026-09-25" in er.EXCLUDED_DAYS
+
+
+def test_ancienne_seance_a_echelle_changeante(tmp_path, monkeypatch):
+    """Un changement d'échelle en cours de séance (×5 puis juste) : les
+    fenêtres qui chevauchent la bascule sont « sans flux »."""
+    f = pd.DataFrame({"ts": 60.0 * np.arange(120), "net": -1.0, "gross": 1.0,
+                      "labeled": False, "usable": True,
+                      "implied": np.r_[np.full(60, 1.25), np.full(60, 0.25)]})
+    out = _script().apply_scale(f, threshold=0.56, use_old=True)
+    assert set(out["grp"][:50]) == {"x5"} and set(out["grp"][70:]) == {"x1"}
+    g = out["grp"].to_numpy(object)
+    args = (out["ts"].to_numpy(), out["net"].to_numpy(), out["gross"].to_numpy(),
+            out["ok"].to_numpy(bool))
+    assert excess.flow_color(*args, t=60 * 66, excess_dir=-1, grp=g)[0] == "sans flux"
+    assert excess.flow_color(*args, t=60 * 100, excess_dir=-1, grp=g)[0] == "rouge"
+    # sans les anciennes barres : rien n'est exploitable
+    assert not _script().apply_scale(f, 0.56, use_old=False)["ok"].any()
+
+
+def test_tick_path_retire_les_repetitions():
+    ts, p = excess.tick_path(np.arange(6.0), np.array([1, 1, 2, 2, 2, 1.0]))
+    assert ts.tolist() == [0, 2, 5] and p.tolist() == [1, 2, 1]
+
+
+def test_outcome_en_ticks_delais_en_minutes():
+    ts = np.array([0.0, 30, 90, 200])
+    p = np.array([950.0, 945, 962, 940])
+    r = excess.outcome(p, p, 0, 950.0, 1, horizon=2, ts=ts)
+    assert r["hit_10"] and r["min_to_10"] == pytest.approx(1.5)
+    assert r["mae"] == 5.0                    # 940 est au-delà de l'horizon de 2 min
 
 
 # --- second test et gris détaillé ---------------------------------------------------

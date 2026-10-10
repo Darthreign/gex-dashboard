@@ -40,6 +40,23 @@ TARGETS = (10.0, 15.0, 20.0)
 MAE_MARKS = (25.0, 50.0, 100.0)
 
 
+def _end(n: int, i: int, minutes: float, ts: np.ndarray | None) -> int:
+    """Index de fin (exclu) d'un horizon de `minutes` après le point `i` :
+    en bougies 1 min (`ts` absent) ou en temps réel sur des ticks."""
+    if ts is None:
+        return min(n, i + 1 + int(minutes))
+    return int(np.searchsorted(ts, ts[i] + minutes * 60, side="right"))
+
+
+def tick_path(ts: np.ndarray, price: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Chemin de prix tick par tick, sans les ticks qui répètent le prix
+    précédent (même chemin, moins de points). Entrées triées par heure."""
+    if not len(price):
+        return ts, price
+    keep = np.concatenate([[True], price[1:] != price[:-1]])
+    return ts[keep], price[keep]
+
+
 def find_excesses(high: np.ndarray, low: np.ndarray, excess_pts: float,
                   swing_pts: float) -> list[dict]:
     """Excès depuis le dernier swing confirmé. Retour : {i, dir, swing, level}
@@ -71,15 +88,21 @@ def find_excesses(high: np.ndarray, low: np.ndarray, excess_pts: float,
 def flow_color(minute_ts: np.ndarray, net: np.ndarray, gross: np.ndarray,
                ok: np.ndarray, t: float, excess_dir: int, ratio: float = 0.35,
                recent_min: int = 5, prev_min: int = 10,
-               weaken: float = 0.5) -> tuple[str, dict]:
-    """Couleur du voyant à l'instant `t` (début de la bougie de l'excès, epoch
-    s). Fenêtres : [t - recent, t) et [t - recent - prev, t - recent). Une
-    minute sans barre = aucun print = flux nul ; une barre non vérifiée
-    (`ok` faux) dans les fenêtres = « sans flux »."""
+               weaken: float = 0.5, grp: np.ndarray | None = None) -> tuple[str, dict]:
+    """Couleur du voyant à l'instant `t` (epoch s, DÉBUT d'une minute : seules
+    les barres de tape déjà closes sont lues). Fenêtres : [t - recent, t) et
+    [t - recent - prev, t - recent). Une minute sans barre = aucun print =
+    flux nul ; une barre non exploitable (`ok` faux) dans les fenêtres =
+    « sans flux ». `grp` (facultatif) : échelle de chaque barre ; des
+    échelles différentes dans les fenêtres = « sans flux » (les rapports
+    net / brut ne sont justes qu'à échelle commune)."""
     r0, p0 = t - recent_min * 60, t - (recent_min + prev_min) * 60
     in_r = (minute_ts >= r0) & (minute_ts < t)
     in_p = (minute_ts >= p0) & (minute_ts < r0)
-    if not (in_r | in_p).any() or (~ok[in_r | in_p]).any():
+    win = in_r | in_p
+    if not win.any() or (~ok[win]).any():
+        return "sans flux", {}
+    if grp is not None and len(set(grp[win])) > 1:
         return "sans flux", {}
     net_r, gross_r = float(net[in_r].sum()), float(np.abs(gross[in_r]).sum())
     net_p, gross_p = float(net[in_p].sum()), float(np.abs(gross[in_p]).sum())
@@ -99,6 +122,22 @@ def flow_color(minute_ts: np.ndarray, net: np.ndarray, gross: np.ndarray,
     return "gris", detail
 
 
+def scale_classes(implied: np.ndarray, usable: np.ndarray, threshold: float,
+                  window: int = 31) -> np.ndarray:
+    """Échelle des barres de tape NON vérifiables (avant le correctif du
+    multiplicateur, sans prints bruts) : delta moyen implicite = brut /
+    (contrats × prix du NQ × valeur réelle du point). Juste, il reste sous 1
+    (souvent 0,2-0,5) ; valorisé ×5, il est 5 fois plus grand. Médiane
+    glissante sur `window` barres exploitables, comparée à `threshold` (calé
+    sur les barres vérifiées) : "x1", "x5", ou "" (aucune barre exploitable).
+    Sert seulement à savoir si une fenêtre a une échelle COMMUNE."""
+    s = pd.Series(np.where(usable, implied, np.nan), dtype=float)
+    med = s.rolling(window, center=True, min_periods=5).median().ffill().bfill()
+    out = np.where(med < threshold, "x1", "x5").astype(object)
+    out[med.isna().to_numpy()] = ""
+    return out
+
+
 def gris_nuance(support_ratio: float, ratio: float = 0.35, weak: float = 0.20) -> str:
     """Découpage DESCRIPTIF du gris (le seuil du voyant n'est pas modifié) :
     soutien ou opposition entre `weak` et `ratio`, ou flux quasi neutre."""
@@ -113,14 +152,16 @@ def gris_nuance(support_ratio: float, ratio: float = 0.35, weak: float = 0.20) -
 
 def find_retest(high: np.ndarray, low: np.ndarray, i: int, excess_dir: int,
                 reaction_pts: float = 15.0, retest_pts: float = 10.0,
-                max_wait: int = 120) -> dict | None:
+                max_wait: int = 120, ts: np.ndarray | None = None) -> dict | None:
     """Second test après l'excès franchi en bougie `i` : l'extrême E suit
     l'excès jusqu'à une première réaction d'au moins `reaction_pts` contre
     lui, puis le prix revient à moins de `retest_pts` de E. Retour :
     {t, extreme, reaction_i} (t = bougie du retour) ou None dans `max_wait`
     minutes. Dans une même bougie, la réaction n'est retenue qu'avec un
-    extrême déjà fixé (prudent : l'ordre intra-bougie est inconnu)."""
-    end = min(len(high), i + 1 + max_wait)
+    extrême déjà fixé (prudent : l'ordre intra-bougie est inconnu). Avec
+    `ts`, les points sont des ticks (high = low = prix) et l'attente est en
+    temps réel."""
+    end = _end(len(high), i, max_wait, ts)
     ext = low[i] if excess_dir < 0 else high[i]
     reacted = None
     for k in range(i + 1, end):
@@ -140,12 +181,12 @@ def find_retest(high: np.ndarray, low: np.ndarray, i: int, excess_dir: int,
 
 def retest_outcome(high: np.ndarray, low: np.ndarray, t: int, extreme: float,
                    fade_dir: int, entry_offset: float = 3.0, horizon: int = 120,
-                   targets=TARGETS) -> dict:
+                   targets=TARGETS, ts: np.ndarray | None = None) -> dict:
     """Au second test (bougie `t`) : CONTINUATION au-delà de l'extrême
     précédent (le prix va-t-il plus loin ?) et, si l'ordre à `entry_offset`
     points de l'extrême est touché, le même suivi que `outcome` depuis ce
     prix d'entrée."""
-    end = min(len(high), t + horizon)
+    end = min(len(high), t + horizon) if ts is None else _end(len(high), t, horizon, ts)
     hi, lo = high[t:end], low[t:end]
     beyond = (extreme - lo) if fade_dir > 0 else (hi - extreme)
     res = {"continuation": float(max(0.0, beyond.max())) if len(hi) else 0.0}
@@ -155,7 +196,8 @@ def retest_outcome(high: np.ndarray, low: np.ndarray, t: int, extreme: float,
     res["rempli"] = bool(len(idx))
     if len(idx):
         f = t + int(idx[0])
-        res.update(outcome(high, low, f, entry, fade_dir, max(1, end - f - 1), targets))
+        left = max(1, end - f - 1) if ts is None else (ts[t] + horizon * 60 - ts[f]) / 60
+        res.update(outcome(high, low, f, entry, fade_dir, left, targets, ts))
     return res
 
 
@@ -189,13 +231,14 @@ def summarize_retests(events: pd.DataFrame, key: str = "couleur", order=COLORS,
 
 
 def outcome(high: np.ndarray, low: np.ndarray, i: int, level: float, fade_dir: int,
-            horizon: int, targets=TARGETS) -> dict:
+            horizon: float, targets=TARGETS, ts: np.ndarray | None = None) -> dict:
     """Après le franchissement au prix `level` dans la bougie `i` : excursion
     adverse (pire prix contre le fade, bougie `i` comprise — le franchissement
     précède forcément l'extrême de la bougie) et retours favorables (à partir
     de la bougie suivante seulement : dans la bougie `i`, l'ordre est
-    inconnu)."""
-    end = min(len(high), i + 1 + horizon)
+    inconnu). Avec `ts` (ticks), l'horizon et les délais sont en minutes
+    réelles et l'ordre des prix est exact."""
+    end = _end(len(high), i, horizon, ts)
     adv0 = (level - low[i]) if fade_dir > 0 else (high[i] - level)
     hi, lo = high[i + 1:end], low[i + 1:end]
     fav = (hi - level) if fade_dir > 0 else (level - lo)
@@ -207,7 +250,8 @@ def outcome(high: np.ndarray, low: np.ndarray, i: int, level: float, fade_dir: i
         if len(hit):
             j = int(hit[0])
             res[f"hit_{k:g}"] = True
-            res[f"min_to_{k:g}"] = j + 1
+            res[f"min_to_{k:g}"] = (j + 1 if ts is None
+                                    else (ts[i + 1 + j] - ts[i]) / 60)
             res[f"mae_before_{k:g}"] = float(run_adv[j + 1])   # pire avant le retour
         else:
             res[f"hit_{k:g}"] = False
