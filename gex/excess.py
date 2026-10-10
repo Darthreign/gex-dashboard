@@ -65,22 +65,23 @@ def find_excesses(high: np.ndarray, low: np.ndarray, excess_pts: float,
     out = []
     leg = 0                                   # 0 : pas encore de swing confirmé
     ext_hi, ext_lo = high[0], low[0]
-    swing, fired = None, False
+    hi_i = lo_i = 0
+    swing, swing_i, fired = None, None, False
     for i in range(len(high)):
         h, lo = float(high[i]), float(low[i])
-        if leg >= 0:
-            ext_hi = max(ext_hi, h)
-        if leg <= 0:
-            ext_lo = min(ext_lo, lo)
+        if leg >= 0 and h > ext_hi:
+            ext_hi, hi_i = h, i
+        if leg <= 0 and lo < ext_lo:
+            ext_lo, lo_i = lo, i
         if leg >= 0 and ext_hi - lo >= swing_pts:          # sommet confirmé
-            swing, leg, fired, ext_lo = ext_hi, -1, False, lo
+            swing, swing_i, leg, fired, ext_lo, lo_i = ext_hi, hi_i, -1, False, lo, i
         elif leg <= 0 and h - ext_lo >= swing_pts:         # creux confirmé
-            swing, leg, fired, ext_hi = ext_lo, 1, False, h
+            swing, swing_i, leg, fired, ext_hi, hi_i = ext_lo, lo_i, 1, False, h, i
         if leg and not fired:
             reach = (h - swing) if leg > 0 else (swing - lo)
             if reach >= excess_pts:
                 fired = True
-                out.append({"i": i, "dir": leg, "swing": swing,
+                out.append({"i": i, "dir": leg, "swing": swing, "swing_i": swing_i,
                             "level": swing + leg * excess_pts})
     return out
 
@@ -138,6 +139,54 @@ def scale_classes(implied: np.ndarray, usable: np.ndarray, threshold: float,
     return out
 
 
+def phase_support(minute_ts: np.ndarray, net: np.ndarray, gross: np.ndarray,
+                  ok: np.ndarray, t0: float, t1: float, excess_dir: int,
+                  grp: np.ndarray | None = None) -> dict:
+    """Soutien des dealers à l'excès sur une PHASE [t0, t1) (epoch s) :
+    minutes de tape CLOSES entièrement dans la phase (début >= minute de t0,
+    fin <= minute de t1). `support` = net × sens de l'excès / brut, entre -1
+    (contre l'excès) et +1 (dans son sens) ; NaN si aucune minute, aucun flux,
+    barre non exploitable ou échelles mélangées."""
+    m0, m1 = np.floor(t0 / 60) * 60, np.floor(t1 / 60) * 60
+    win = (minute_ts >= m0) & (minute_ts < m1)
+    out = {"support": np.nan, "gross_per_min": np.nan, "minutes": (m1 - m0) / 60}
+    if m1 <= m0 or not win.any() or (~ok[win]).any() \
+            or (grp is not None and len(set(grp[win])) > 1):
+        return out
+    g = float(np.abs(gross[win]).sum())
+    if g > 0:
+        out["support"] = float(net[win].sum()) * excess_dir / g
+        out["gross_per_min"] = g / out["minutes"]
+    return out
+
+
+def tercile_edges(values: pd.Series) -> tuple[float, float]:
+    """Bornes des terciles, calées sur l'échantillon d'APPRENTISSAGE."""
+    v = pd.Series(values).dropna()
+    return (float(v.quantile(1 / 3)), float(v.quantile(2 / 3))) if len(v) else (np.nan, np.nan)
+
+
+def tercile(x: float, edges: tuple[float, float]) -> str:
+    if x is None or np.isnan(x) or np.isnan(edges[0]):
+        return ""
+    return "bas" if x < edges[0] else ("haut" if x >= edges[1] else "milieu")
+
+
+def support_situation(t_exces: str, t_reaction: str) -> str:
+    """Lecture de l'utilisateur : le soutien de l'excès a-t-il faibli ?"""
+    if not t_exces or not t_reaction:
+        return "sans flux"
+    if t_exces == "haut":
+        return "soutien maintenu" if t_reaction == "haut" else "soutien qui faiblit"
+    if t_exces == "bas":
+        return "jamais de soutien"
+    return "intermédiaire"
+
+
+SITUATIONS = ("soutien maintenu", "soutien qui faiblit", "intermédiaire",
+              "jamais de soutien", "sans flux")
+
+
 def gris_nuance(support_ratio: float, ratio: float = 0.35, weak: float = 0.20) -> str:
     """Découpage DESCRIPTIF du gris (le seuil du voyant n'est pas modifié) :
     soutien ou opposition entre `weak` et `ratio`, ou flux quasi neutre."""
@@ -156,14 +205,14 @@ def find_retest(high: np.ndarray, low: np.ndarray, i: int, excess_dir: int,
     """Second test après l'excès franchi en bougie `i` : l'extrême E suit
     l'excès jusqu'à une première réaction d'au moins `reaction_pts` contre
     lui, puis le prix revient à moins de `retest_pts` de E. Retour :
-    {t, extreme, reaction_i} (t = bougie du retour) ou None dans `max_wait`
+    {t, extreme, extreme_i, reaction_i} (t = bougie du retour) ou None dans `max_wait`
     minutes. Dans une même bougie, la réaction n'est retenue qu'avec un
     extrême déjà fixé (prudent : l'ordre intra-bougie est inconnu). Avec
     `ts`, les points sont des ticks (high = low = prix) et l'attente est en
     temps réel."""
     end = _end(len(high), i, max_wait, ts)
     ext = low[i] if excess_dir < 0 else high[i]
-    reacted = None
+    ext_i, reacted = i, None
     for k in range(i + 1, end):
         h, lo = float(high[k]), float(low[k])
         if reacted is None:
@@ -171,11 +220,13 @@ def find_retest(high: np.ndarray, low: np.ndarray, i: int, excess_dir: int,
             if back >= reaction_pts:
                 reacted = k
                 continue
-            ext = min(ext, lo) if excess_dir < 0 else max(ext, h)
+            if (lo < ext) if excess_dir < 0 else (h > ext):
+                ext, ext_i = (lo if excess_dir < 0 else h), k
         else:
             near = (lo <= ext + retest_pts) if excess_dir < 0 else (h >= ext - retest_pts)
             if near:
-                return {"t": k, "extreme": float(ext), "reaction_i": reacted}
+                return {"t": k, "extreme": float(ext), "extreme_i": ext_i,
+                        "reaction_i": reacted}
     return None
 
 

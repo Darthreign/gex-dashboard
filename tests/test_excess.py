@@ -178,10 +178,14 @@ def test_script_bout_en_bout(tmp_path, monkeypatch):
     # ticks : délai en minutes réelles, pas en bougies
     rt = er.retests(ev)
     assert len(rt) == 2 and (rt["couleur_exces"] == "rouge").all()
+    # dealers vendeurs pendant toute la baisse : soutien de l'excès baissier = +1
+    v = rt[rt["day"] == "2026-10-07"].iloc[0]
+    assert v["sup_exces"] == pytest.approx(1.0) and v["sup_reaction"] == pytest.approx(1.0)
+    assert v["min_exces"] > 0 and v["min_reaction"] > 0
     assert rt["rempli"].all() and (rt["continuation"] == 0.0).all()
     md = er.report("NQ", 100, 60, 120)
     assert "Contrôle d'échelle" in md and "Flux vérifié" in md and "anciennes séances" in md
-    assert "Second test" in md and "aucun EM disponible" in md
+    assert "Second test" in md and "aucun EM disponible" in md and "Piste 1" in md
     # sans les anciennes barres : une seule séance
     only, _ = er.load_sessions("NQ", use_old=False)
     assert [s["day"] for s in only] == ["2026-10-07"]
@@ -278,3 +282,64 @@ def test_stabilite_par_trimestre():
     t = er.stability(rt)
     assert t.loc["2026Q1", ("n", "rouge")] == 1 and t.loc["2026Q2", ("n", "rouge")] == 2
     assert t.loc["2026Q2", ("cont>=50_%", "rouge")] == 50
+
+
+# --- piste 1 : soutien pendant l'excès et pendant la réaction ----------------------
+
+def test_indices_du_swing_et_de_lextreme():
+    hi, lo = _path([1000, 1050, 940, 960, 945, 1000])
+    e = excess.find_excesses(hi, lo, 100, 60)[0]
+    assert hi[e["swing_i"]] == 1050
+    rt = excess.find_retest(hi, lo, e["i"], -1, 15, 10)
+    assert lo[rt["extreme_i"]] == 940 and rt["extreme"] == 940
+
+
+def test_soutien_par_phase():
+    ts = 60.0 * np.arange(30)
+    net = np.r_[np.full(10, -10.0), np.full(20, 5.0)]
+    gross = np.full(30, 10.0)
+    ok = np.ones(30, bool)
+    # excès baissier : dealers vendeurs pendant 10 min -> soutien +1
+    a = excess.phase_support(ts, net, gross, ok, 0, 600, -1)
+    assert a["support"] == pytest.approx(1.0) and a["minutes"] == 10
+    b = excess.phase_support(ts, net, gross, ok, 600, 1800, -1)
+    assert b["support"] == pytest.approx(-0.5)
+    # la minute en cours au second test n'est pas lue
+    assert excess.phase_support(ts, net, gross, ok, 600, 630, -1)["minutes"] == 0
+    assert np.isnan(excess.phase_support(ts, net, gross, ok, 600, 630, -1)["support"])
+    ok[3] = False
+    assert np.isnan(excess.phase_support(ts, net, gross, ok, 0, 600, -1)["support"])
+
+
+def test_situations():
+    assert excess.support_situation("haut", "haut") == "soutien maintenu"
+    assert excess.support_situation("haut", "bas") == "soutien qui faiblit"
+    assert excess.support_situation("haut", "milieu") == "soutien qui faiblit"
+    assert excess.support_situation("bas", "haut") == "jamais de soutien"
+    assert excess.support_situation("milieu", "bas") == "intermédiaire"
+    assert excess.support_situation("", "bas") == "sans flux"
+    assert excess.tercile(0.9, (0.1, 0.5)) == "haut" and excess.tercile(np.nan, (0.1, 0.5)) == ""
+
+
+def test_analyse_piste1_terciles_calees_sur_lapprentissage():
+    er = _script()
+    rng = np.random.default_rng(0)
+    days = [f"2026-0{m}-{d:02d}" for m in (1, 2) for d in range(1, 29)]   # 56 jours
+    rows = []
+    for d in days:
+        for _ in range(3):
+            rows.append({"day": d, "sens": rng.choice(["haussier", "baissier"]),
+                         "sup_exces": rng.uniform(-1, 1), "sup_reaction": rng.uniform(-1, 1),
+                         "continuation": rng.uniform(0, 150), "rempli": True, "mae": 10.0,
+                         **{f"hit_{k:g}": True for k in excess.TARGETS}})
+    rt = pd.DataFrame(rows)
+    # des valeurs extrêmes en TEST ne doivent pas déplacer les bornes
+    rt2 = rt.copy()
+    rt2.loc[rt2["day"] >= "2026-02-01", "sup_exces"] = 5.0
+    l1 = "\n".join(er.support_analysis(rt, "2026-02-01"))
+    l2 = "\n".join(er.support_analysis(rt2, "2026-02-01"))
+    b1 = l1.split("Terciles")[1].split("`")[0]
+    assert b1 == l2.split("Terciles")[1].split("`")[0]
+    assert "TEST (le seul qui compte)" in l1 and "soutien maintenu" in l1
+    assert "Trop peu" in "\n".join(er.support_analysis(rt[rt["day"] < "2026-01-10"],
+                                                       "2026-01-05"))

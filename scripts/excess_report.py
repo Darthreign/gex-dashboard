@@ -26,7 +26,11 @@ d'options NQ (le 25/09/2026 est exclu) :
    d'au moins 15 pts puis retour à moins de 10 pts de l'extrême (dans les
    120 min) ; voyant lu à ce moment, continuation au-delà de l'extrême, et
    suivi d'un ordre à 3 pts de l'extrême s'il est touché ;
-6. le gris découpé selon la force du flux (descriptif, seuil inchangé).
+6. le gris découpé selon la force du flux (descriptif, seuil inchangé) ;
+7. PISTE 1 : soutien des dealers pendant la jambe de l'excès (dernier swing
+   -> extrême) et pendant la réaction (extrême -> second test), en terciles
+   calés sur la première moitié des séances, résultat lu sur la seconde
+   (`--split` pour choisir la coupure).
 
 Source du flux, présentée À PART :
 - « vérifié » : barres étiquetées (`mult_source` : correctif ou capture
@@ -222,10 +226,79 @@ def session_events(day: str, px_ts: np.ndarray, px: np.ndarray, flow: pd.DataFra
                              "sens": row["sens"], "couleur": c2, "nuance": n2, "flux": src2,
                              "couleur_exces": color,
                              "attente_min": (px_ts[t] - px_ts[i]) / 60,
+                             **_phases(flow, px_ts[e["swing_i"]], px_ts[rt["extreme_i"]],
+                                       px_ts[t], e["dir"]),
                              **excess.retest_outcome(px, px, t, rt["extreme"], -e["dir"],
                                                      ENTRY_OFFSET, horizon, ts=px_ts)}
         rows.append(row)
     return rows
+
+
+def _phases(flow: pd.DataFrame, t_swing: float, t_ext: float, t_test: float,
+            excess_dir: int) -> dict:
+    """Soutien des dealers pendant la jambe de l'excès (dernier swing ->
+    extrême) et pendant la réaction (extrême -> second test)."""
+    args = (flow["ts"].to_numpy(float), flow["net"].to_numpy(float),
+            flow["gross"].to_numpy(float), flow["ok"].to_numpy(bool))
+    grp = flow["grp"].to_numpy(object)
+    a = excess.phase_support(*args, t_swing, t_ext, excess_dir, grp)
+    b = excess.phase_support(*args, t_ext, t_test, excess_dir, grp)
+    return {"sup_exces": a["support"], "sup_reaction": b["support"],
+            "brut_min_exces": a["gross_per_min"], "brut_min_reaction": b["gross_per_min"],
+            "min_exces": a["minutes"], "min_reaction": b["minutes"]}
+
+
+def support_analysis(rt: pd.DataFrame, split_day: str) -> list[str]:
+    """Piste 1 : le soutien de l'excès a-t-il faibli pendant la réaction ?
+    Terciles calés sur l'APPRENTISSAGE (séances < split_day), résultat lu sur
+    le TEST (séances >= split_day), sans retouche."""
+    if rt.empty or "sup_exces" not in rt:
+        return ["_(aucun second test)_", ""]
+    train, test = rt[rt["day"] < split_day], rt[rt["day"] >= split_day]
+    if train["day"].nunique() < 20 or test["day"].nunique() < 20:
+        return [f"_Trop peu de séances de part et d'autre du {split_day} "
+                f"({train['day'].nunique()} / {test['day'].nunique()}) : il en faut au "
+                "moins 20 de chaque côté._", ""]
+    ea, eb = excess.tercile_edges(train["sup_exces"]), excess.tercile_edges(train["sup_reaction"])
+
+    def label(df):
+        te = df["sup_exces"].map(lambda x: excess.tercile(x, ea))
+        tr = df["sup_reaction"].map(lambda x: excess.tercile(x, eb))
+        return df.assign(t_exces=te, t_reaction=tr,
+                         situation=[excess.support_situation(a, b) for a, b in zip(te, tr)])
+    train, test = label(train), label(test)
+    lines = [f"Apprentissage : {train['day'].min()} → {train['day'].max()} "
+             f"({train['day'].nunique()} séances) · test : {test['day'].min()} → "
+             f"{test['day'].max()} ({test['day'].nunique()} séances).", "",
+             "Soutien = flux net des dealers dans le sens de l'excès / flux brut (-1 contre, "
+             "+1 pour). Phase excès : dernier swing -> extrême ; phase réaction : extrême -> "
+             "second test. Terciles calés sur l'apprentissage : excès "
+             f"[{ea[0]:.2f} ; {ea[1]:.2f}], réaction [{eb[0]:.2f} ; {eb[1]:.2f}]. "
+             "`soutien maintenu` = excès et réaction dans le tercile haut ; `soutien qui "
+             "faiblit` = excès haut, réaction milieu ou bas ; `jamais de soutien` = excès "
+             "bas.", ""]
+    for name, df in (("APPRENTISSAGE (sert à caler, ne prouve rien)", train),
+                     ("TEST (le seul qui compte)", test)):
+        lines += [f"#### {name}", "",
+                  _table(excess.summarize_retests(df, key="situation",
+                                                  order=excess.SITUATIONS)), ""]
+    for sens in ("haussier", "baissier"):
+        lines += [f"#### TEST — excès {sens} "
+                  f"(fade = {'vente' if sens == 'haussier' else 'achat'})", "",
+                  _table(excess.summarize_retests(test[test["sens"] == sens], key="situation",
+                                                  order=excess.SITUATIONS)), ""]
+    grid = test[(test["t_exces"] != "") & (test["t_reaction"] != "")]
+    if not grid.empty:
+        order = ["bas", "milieu", "haut"]
+        pct = grid.assign(c50=100 * (grid["continuation"] >= 50)).pivot_table(
+            index="t_exces", columns="t_reaction", values="c50", aggfunc="mean")
+        cnt = grid.pivot_table(index="t_exces", columns="t_reaction", values="continuation",
+                               aggfunc="size")
+        lines += ["#### TEST — continuation d'au moins 50 pts (%), soutien pendant l'excès "
+                  "(lignes) × pendant la réaction (colonnes)", "",
+                  _table(pct.reindex(index=order, columns=order)), "", "Nombre de cas :", "",
+                  _table(cnt.reindex(index=order, columns=order)), ""]
+    return lines
 
 
 def retests(ev: pd.DataFrame) -> pd.DataFrame:
@@ -371,7 +444,7 @@ def _retest_block(rt: pd.DataFrame) -> list[str]:
 
 def report(symbol: str, excess_pts: float, swing_pts: float, horizon: int,
            use_old: bool = True, flux: str = "live", start: str | None = None,
-           end: str | None = None) -> str:
+           end: str | None = None, split_day: str | None = None) -> str:
     sessions, threshold = load_sessions(symbol, use_old, flux, start, end)
     lines = [f"# Excès et soutien des market makers — {symbol}"
              + (" (tape reconstruit Databento)" if flux == "databento" else ""),
@@ -414,6 +487,10 @@ def report(symbol: str, excess_pts: float, swing_pts: float, horizon: int,
                  "delta moyen": "Flux des anciennes séances (échelle par le delta moyen)",
                  "ensemble": "Ensemble (à n'additionner que si les deux blocs concordent)"}[src]
         lines += [f"### {title}", ""] + _block(e_sub) + _retest_block(r_sub)
+    split = split_day or sessions[len(sessions) // 2]["day"]
+    lines += ["## Piste 1 — le soutien a-t-il faibli entre l'excès et le second test ?", ""]
+    lines += support_analysis(rt if flux != "live" or rt.empty
+                              else rt[rt["flux"] == "vérifié"], split)
     evb, info = run(sessions, "B", excess_pts, swing_pts, horizon)
     lines += ["## Variante B — en EM (ensemble, au franchissement)", ""]
     if info.get("erreur"):
@@ -443,13 +520,15 @@ def main(argv: list[str] | None = None) -> None:
                     help="tape lu par le voyant : live (défaut) ou databento (reconstruit)")
     ap.add_argument("--start", help="première séance (AAAA-MM-JJ)")
     ap.add_argument("--end", help="dernière séance (AAAA-MM-JJ)")
+    ap.add_argument("--split", help="première séance de TEST pour la piste 1 "
+                                    "(défaut : séance du milieu)")
     args = ap.parse_args(argv)
     outdir = SETTINGS.data_dir / "reports"
     outdir.mkdir(parents=True, exist_ok=True)
     for sym in args.symbols:
         md = report(sym.upper(), args.excess, args.swing, args.horizon,
                     use_old=not args.verifiees_seulement, flux=args.flux,
-                    start=args.start, end=args.end)
+                    start=args.start, end=args.end, split_day=args.split)
         tag = ("_databento" if args.flux == "databento" else "") \
             + (f"_{args.start or 'debut'}_{args.end or 'fin'}" if args.start or args.end else "")
         path = outdir / f"exces_{sym.upper()}{tag}_{datetime.now(ET):%Y-%m-%d}.md"
