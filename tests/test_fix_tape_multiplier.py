@@ -85,3 +85,18 @@ def test_correction_exacte_avec_sauvegarde(donnees):
     fix.run("NQ", apply=True)
     assert store.load_tape("NQ", DAY)["net_delta"].tolist() == pytest.approx(
         juste["net_delta"].tolist())
+
+
+def test_journee_entierement_juste_etiquetee(tmp_path, monkeypatch, donnees):
+    """Une journée sans aucune barre fausse est quand même étiquetée
+    « verifie » (défaut du 10/10 : le 09/10 restait sans étiquette)."""
+    juste = store.load_tape("NQ", DAY)
+    for c in fix.DOLLAR_COLS:
+        juste.loc[[0, 1], c] = juste.loc[[0, 1], c] / 5
+    store._write_atomic(juste, SETTINGS.data_dir / "tape" / "NQ" / f"{DAY}.parquet")
+    r = fix.run("NQ", apply=True)
+    assert "fausse (×5)" not in r.columns
+    corr = store.load_tape("NQ", DAY)
+    assert corr["mult_source"].tolist()[:3] == ["verifie"] * 3
+    assert pd.isna(corr["mult_source"].iloc[3])
+    assert (SETTINGS.data_dir / "backups" / "tape" / "NQ" / f"{DAY}.parquet").exists()

@@ -145,8 +145,11 @@ def run(symbol: str, apply: bool = False) -> pd.DataFrame:
         t, fixed = res
         counts = t["statut"].value_counts().to_dict()
         n_wrong = int(t["statut"].str.startswith("fausse").sum())
+        n_good = int((t["statut"] == "juste").sum())
         rows.append({"jour": day, "barres": len(t), **counts})
-        if apply and n_wrong:
+        # écrire aussi une journée ENTIÈREMENT juste : sinon ses barres ne sont
+        # jamais étiquetées « verifie » et restent inutilisables en aval
+        if apply and (n_wrong or n_good):
             src = SETTINGS.data_dir / "tape" / symbol / f"{day}.parquet"
             dst = SETTINGS.data_dir / "backups" / "tape" / symbol / f"{day}.parquet"
             dst.parent.mkdir(parents=True, exist_ok=True)
