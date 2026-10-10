@@ -156,6 +156,11 @@ class FlowBar:
     spread_contracts: float = 0.0   # jambes de combos, isolées volontairement
     spread_prints: int = 0
     undefined_prints: int = 0       # agresseur non renseigné : ni compté, ni caché
+    # multiplicateur utilisé pour les montants en dollars de la barre et sa
+    # provenance (contrat / courtier / specification, cf. multiplier_info) ;
+    # vide si aucun print n'a pu être valorisé
+    mult: float | None = None
+    mult_source: str | None = None
 
     def as_row(self, symbol: str, timestamp) -> dict:
         return {
@@ -177,6 +182,7 @@ class FlowBar:
             "spread_contracts": self.spread_contracts,
             "spread_prints": float(self.spread_prints),
             "undefined_prints": float(self.undefined_prints),
+            "mult": self.mult, "mult_source": self.mult_source,
             "source": "dxfeed",
         }
 
@@ -225,6 +231,24 @@ def strike_of(streamer_symbol: str) -> float | None:
 FUTURE_POINT_VALUE: dict[str, float] = {"NQ": 20.0, "ES": 50.0}
 
 
+def multiplier_info(symbol: str) -> tuple[float | None, str | None]:
+    """(multiplicateur $/point, provenance) — provenance : « contrat » (indices
+    et ETF, 100), « courtier » (valeur du point lue chez le courtier),
+    « specification » (repli sur la spécification CME), None si inconnu."""
+    kind = TRACKED.get(symbol)
+    if kind == "index":
+        return float(CONTRACT_MULTIPLIER), "contrat"
+    if kind == "future":
+        from .futopt import _multiplier_cache
+        live = _multiplier_cache.get(symbol)
+        if live:
+            return float(live), "courtier"
+        ref = FUTURE_POINT_VALUE.get(symbol)
+        if ref:
+            return float(ref), "specification"
+    return None, None
+
+
 def multiplier_of(symbol: str) -> float | None:
     """Multiplicateur $/point du contrat d'option, ou None s'il est inconnu.
 
@@ -240,17 +264,7 @@ def multiplier_of(symbol: str) -> float | None:
     ES sur 100 au lieu de 50 (×2). Un produit inconnu renvoie None : l'appelant
     n'en calcule aucune exposition en dollars (cf. `ingest_print`).
     """
-    kind = TRACKED.get(symbol)
-    if kind == "index":
-        return float(CONTRACT_MULTIPLIER)
-    if kind == "future":
-        from .futopt import _multiplier_cache
-        live = _multiplier_cache.get(symbol)
-        if live:
-            return float(live)
-        ref = FUTURE_POINT_VALUE.get(symbol)
-        return float(ref) if ref else None
-    return None
+    return multiplier_info(symbol)[0]
 
 
 def resolve_future_multiplier(symbol: str, access_token: str) -> float | None:
@@ -262,14 +276,22 @@ def resolve_future_multiplier(symbol: str, access_token: str) -> float | None:
     try:
         live = futopt.get_multiplier(symbol, access_token)
     except Exception as exc:  # noqa: BLE001 — le repli sur la spécification suffit
+        live = None
         log.warning("%s : valeur du point introuvable chez le courtier (%s) — "
                     "spécification du contrat utilisée", symbol, exc)
-        return multiplier_of(symbol)
+    else:
+        if not live:
+            log.warning("%s : le courtier n'a renvoyé aucune valeur du point — "
+                        "spécification du contrat utilisée", symbol)
     ref = FUTURE_POINT_VALUE.get(symbol)
     if live and ref and abs(live - ref) > 1e-9:
         log.warning("%s : valeur du point courtier %.2f ≠ spécification %.2f — "
                     "valeur courtier retenue", symbol, live, ref)
-    return multiplier_of(symbol)
+    mult, source = multiplier_info(symbol)
+    # ligne à chercher dans capture.log pour vérifier le démarrage
+    log.info("%s : valeur du point des options %s $ (%s)", symbol,
+             f"{mult:g}" if mult else "inconnue", source or "aucune source")
+    return mult
 
 
 def build_index_universe(symbol: str, spot: float, access_token: str,
@@ -456,13 +478,14 @@ class FlowTape:
             else:
                 bar.sell_contracts += size
 
-            mult = multiplier_of(symbol)
+            mult, mult_src = multiplier_info(symbol)
             if mult is None:
                 # Multiplicateur introuvable : le print reste compté en
                 # contrats (ci-dessus), mais aucune exposition en dollars n'est
                 # calculée — mieux vaut un trou signalé qu'un montant faux.
                 self._unpriced_print(symbol)
                 return
+            bar.mult, bar.mult_source = mult, mult_src
             # Prime encaissée par le dealer : + quand le preneur ACHÈTE (le
             # dealer vend et encaisse), − quand le preneur vend. En valeur
             # c'est la prime que paie le preneur, vue de l'autre côté.

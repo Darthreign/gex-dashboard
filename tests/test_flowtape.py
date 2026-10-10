@@ -582,3 +582,50 @@ def test_univers_resout_le_multiplicateur_avant_les_prints(cache_vide, monkeypat
     monkeypatch.setattr(idxopt, "reference_spot", lambda s: None)
     FlowTape()._build_universe()
     assert vus == ["ES", "NQ"]
+
+
+# --- provenance du multiplicateur : journal et données (10/10/2026) -------------
+
+def test_journal_au_demarrage_courtier(cache_vide, monkeypatch, caplog):
+    from gex import flowtape, futopt
+    monkeypatch.setattr(futopt, "get_multiplier",
+                        lambda code, tok: cache_vide.setdefault(code, 20.0))
+    with caplog.at_level("INFO", logger="gex.flowtape"):
+        flowtape.resolve_future_multiplier("NQ", "jeton")
+    assert any("NQ : valeur du point des options 20 $ (courtier)" in r.message
+               for r in caplog.records)
+
+
+@pytest.mark.parametrize("panne", ["exception", "sans_valeur"])
+def test_journal_repli_sur_la_specification(cache_vide, monkeypatch, caplog, panne):
+    from gex import flowtape, futopt
+
+    def get_multiplier(code, tok):
+        if panne == "exception":
+            raise ConnectionError("API indisponible")
+        return None                     # réponse sans contrat actif
+    monkeypatch.setattr(futopt, "get_multiplier", get_multiplier)
+    with caplog.at_level("INFO", logger="gex.flowtape"):
+        assert flowtape.resolve_future_multiplier("ES", "jeton") == 50.0
+    msgs = [r.message for r in caplog.records]
+    assert any("spécification du contrat utilisée" in m for m in msgs)    # avertissement
+    assert any("ES : valeur du point des options 50 $ (specification)" in m for m in msgs)
+
+
+def test_provenance_dans_les_barres(cache_vide):
+    t = _tape_fut()
+    t.ingest_print(_print(ES_C, "BUY", 1, price=10.0), now=60.0)
+    row = t.bars["ES"].as_row("ES", None)
+    assert row["mult"] == 50.0 and row["mult_source"] == "specification"
+    cache_vide["NQ"] = 20.0
+    t.ingest_print(_print(NQ_C, "BUY", 1, price=10.0), now=60.0)
+    assert t.bars["NQ"].as_row("NQ", None)["mult_source"] == "courtier"
+    t2 = _tape()
+    t2.ingest_print(_print(".SPXW260729C7400", "BUY", 1), now=60.0)
+    assert t2.bars["SPX"].as_row("SPX", None)["mult_source"] == "contrat"
+    # produit inconnu : aucune valorisation, provenance vide
+    t3 = FlowTape()
+    t3._by_stream = {".XYZ261009C100": "XYZ"}
+    t3.ingest_print(_print(".XYZ261009C100", "BUY", 1), now=60.0)
+    row = t3.bars["XYZ"].as_row("XYZ", None)
+    assert row["mult"] is None and row["mult_source"] is None
