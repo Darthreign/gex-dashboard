@@ -188,7 +188,16 @@ TR: dict[str, dict[str, str]] = {
         "flow_day_label": "Jour de flux :",
         "gflow_series_label": "Séries :",
         "heat_levels_label": "Niveaux :",
-        "heat_levels_gex_walls": "Murs GEX",
+        "heat_levels_gex_walls": "Murs GEX (net)",
+        "heat_lvl_call_wall": "Call Wall (γ calls)",
+        "heat_lvl_put_support": "Put Support (γ puts)",
+        "lvl_tip_call_wall": "Call Wall : plus forte concentration de gamma des CALLS au-dessus "
+                             "du spot (GEX des calls seuls, pas le GEX net)",
+        "lvl_tip_put_support": "Put Support : plus forte concentration de gamma des PUTS sous "
+                               "le spot (GEX des puts seuls, pas le GEX net)",
+        "lvl_tip_gex_wall": "Classé par |GEX net| (calls + puts). Calls {calls} · puts {puts} · "
+                            "brut {gross} $Bn",
+        "lvl_tip_gex_wall_short": "Mur classé par |GEX net| (calls + puts)",
         "last_session": "Dernière séance",
         "footer": "Données CBOE delayed (~15 min) — outil d'analyse, pas d'exécution.",
         "footer_rt": "Données dxFeed temps réel (compte courtier, usage personnel) — outil d'analyse, pas d'exécution.",
@@ -485,7 +494,16 @@ TR: dict[str, dict[str, str]] = {
         "flow_day_label": "Flow day:",
         "gflow_series_label": "Series:",
         "heat_levels_label": "Levels:",
-        "heat_levels_gex_walls": "GEX walls",
+        "heat_levels_gex_walls": "GEX walls (net)",
+        "heat_lvl_call_wall": "Call Wall (γ calls)",
+        "heat_lvl_put_support": "Put Support (γ puts)",
+        "lvl_tip_call_wall": "Call Wall: largest CALL gamma concentration above spot "
+                             "(calls-only GEX, not net GEX)",
+        "lvl_tip_put_support": "Put Support: largest PUT gamma concentration below spot "
+                               "(puts-only GEX, not net GEX)",
+        "lvl_tip_gex_wall": "Ranked by |net GEX| (calls + puts). Calls {calls} · puts {puts} · "
+                            "gross {gross} $Bn",
+        "lvl_tip_gex_wall_short": "Wall ranked by |net GEX| (calls + puts)",
         "last_session": "Last session",
         "footer": "CBOE delayed data (~15 min) — analysis tool, not for execution.",
         "footer_rt": "Real-time dxFeed data (broker account, personal use) — analysis tool, not for execution.",

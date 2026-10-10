@@ -360,8 +360,12 @@ def register_api(app) -> None:
                 df, s.spot, sticky="moneyness")["level"]),
             "hvl": _t(hvl),
             "key_levels": {k: _t(v) for k, v in keys.items()},
+            # GEX1-5 : classés par |GEX net| (`gex`, inchangé) ; décomposition en
+            # $ par 1 % (non transposée) : calls (≥ 0), puts (≤ 0), brut
             "gex_walls": [
-                {"strike": _t(float(r.strike)), "gex": float(r.gex), "expiry": str(r.expiry)}
+                {"strike": _t(float(r.strike)), "gex": float(r.gex), "expiry": str(r.expiry),
+                 "gex_calls": float(r.gex_calls), "gex_puts": float(r.gex_puts),
+                 "gex_gross": float(r.gex_gross)}
                 for r in levels.itertuples()
             ],
         })

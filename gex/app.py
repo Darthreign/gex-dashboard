@@ -274,10 +274,12 @@ def tv_levels_string(levels: pd.DataFrame | None, hvl: float | None,
     def add(value, label, kind, dedup=False):
         """dedup : n'écrit pas un mur déjà couvert par un niveau nommé.
 
-        Call Wall et Put Support sont choisis dans le même classement de
-        strikes que GEX1-5, et le flip tombe souvent sur un mur : sans ce
-        filtre, TradingView superpose des lignes dont les étiquettes se
-        recouvrent. Le niveau nommé l'emporte, étant le plus parlant.
+        Call Wall et Put Support (concentrations call / put) tombent souvent
+        sur un des murs GEX1-5 (classés au GEX net), et le flip aussi : sans
+        ce filtre, TradingView superpose des lignes dont les étiquettes se
+        recouvrent. Le niveau nommé l'emporte, étant le plus parlant. Les
+        libellés de l'export restent « Call Wall » / « Put Support » : un
+        script Pine peut les lire.
         """
         if value is None:
             return
@@ -1705,7 +1707,7 @@ def scalp_banner(symbol: str, ctx: dict, spot: float, lang: str,
     ], className=f"sc-banner sc-tone-{a['tone']}")
 
 
-def scalp_ladder(symbol: str, ctx: dict, spot: float) -> html.Div:
+def scalp_ladder(symbol: str, ctx: dict, spot: float, lang: str = "fr") -> html.Div:
     rungs = scalp.build_ladder(symbol, spot, ctx["zg"], ctx["hvl"], ctx["keys"], ctx["walls"])
     if not rungs:
         return html.Div("Niveaux indisponibles", className="hint")
@@ -1723,9 +1725,12 @@ def scalp_ladder(symbol: str, ctx: dict, spot: float) -> html.Div:
         if r is haut or r is bas:
             cls += " sc-next"
         gex = (f" {r.gex / 1e9:+.1f}".replace("-", "−") + " Bn") if r.gex is not None else ""
+        tip = {"cw": "lvl_tip_call_wall", "ps": "lvl_tip_put_support",
+               "gex": "lvl_tip_gex_wall_short"}.get(r.kind)
         rows.append(html.Div([
             html.Span([html.Span("", className="sc-dot", style={"background": color}),
-                       r.name, html.Span(gex, className="sc-gex")], className="sc-name"),
+                       r.name, html.Span(gex, className="sc-gex")], className="sc-name",
+                      title=t(lang, tip) if tip else None),
             html.Span(f"{r.price:,.0f}", className="sc-price"),
             html.Span(_sc_fmt(r.dist), className="sc-dist " + ("sc-pos" if r.dist >= 0 else "sc-neg")),
         ], className=cls))
@@ -2613,7 +2618,7 @@ def scalp_panels_snapshot(symbol: str, lang: str, window: int, min_size: float,
     spot = _scalp_live_spot(symbol, sctx)
     out["head"] = enc(scalp_head(symbol, lang, sctx, spot))
     if "ladder" in want:
-        out["ladder"] = enc(scalp_ladder(symbol, sctx, spot))
+        out["ladder"] = enc(scalp_ladder(symbol, sctx, spot, lang))
     if "price" in want:
         spec = lwspec.fig_to_spec(scalp_price_fig(symbol, sctx, spot))
         spec["key"] = f"scalp-price-{symbol}"
@@ -4241,8 +4246,9 @@ def create_app() -> Dash:
         html.Div(id="native-overlay", className="native-overlay", style={"display": "none"}),
     ])
 
-    def _chip(children, accent):
-        return html.Span(children, className="chip", style={"--chip-accent": accent})
+    def _chip(children, accent, title=None):
+        return html.Span(children, className="chip", style={"--chip-accent": accent},
+                         title=title)
 
     def levels_strip(levels: pd.DataFrame | None, lang: str,
                      hvl: float | None = None, zg: float | None = None,
@@ -4265,6 +4271,10 @@ def create_app() -> Dash:
             items.append(_chip([html.B("HVL ", style={"color": C["hvl"]}),
                                 f"{xf(hvl):.0f}"], C["hvl"]))
         # niveaux directionnels (support/résistance) et bornes de move attendu
+        # info-bulle : ce que mesure chaque niveau (concentration call / put,
+        # ou GEX net pour GEX1-5)
+        tips = {"call_wall": t(lang, "lvl_tip_call_wall"),
+                "put_support": t(lang, "lvl_tip_put_support")}
         for key, color, label in (("call_wall", C["cw"], "Call Wall"),
                                   ("put_support", C["ps"], "Put Support"),
                                   ("d1_min", C["d1"], "1D Min"),
@@ -4272,15 +4282,18 @@ def create_app() -> Dash:
             v = (keys or {}).get(key)
             if v is not None:
                 items.append(_chip([html.B(f"{label} ", style={"color": color}),
-                                    f"{xf(v):.0f}"], color))
+                                    f"{xf(v):.0f}"], color, title=tips.get(key)))
         for lv in levels.itertuples():
             side = t(lang, "side_call") if lv.gex > 0 else t(lang, "side_put")
+            tip = (t(lang, "lvl_tip_gex_wall", calls=f"{lv.gex_calls / 1e9:+.1f}",
+                     puts=f"{lv.gex_puts / 1e9:+.1f}", gross=f"{lv.gex_gross / 1e9:.1f}")
+                   if hasattr(lv, "gex_gross") else t(lang, "lvl_tip_gex_wall_short"))
             items.append(_chip(
                 [html.B(f"{labels[lv.strike]} ", style={"color": C["lvl"]}),
                  f"{xf(lv.strike):.0f} ",
                  html.Span(f"({lv.gex / 1e9:+.1f} $Bn {side})",
                            style={"color": C["ink2"], "fontSize": "11px"})],
-                "rgba(255,255,255,0.10)",
+                "rgba(255,255,255,0.10)", title=tip,
             ))
         return items
 
@@ -5450,8 +5463,8 @@ def create_app() -> Dash:
                             {"label": t(lang, "legend_tape_puts"), "value": "puts"}]
         heat_levels_opts = [{"label": "Gamma Flip", "value": "zero_gamma"},
                            {"label": "HVL", "value": "hvl"},
-                           {"label": "Call Wall", "value": "call_wall"},
-                           {"label": "Put Support", "value": "put_support"},
+                           {"label": t(lang, "heat_lvl_call_wall"), "value": "call_wall"},
+                           {"label": t(lang, "heat_lvl_put_support"), "value": "put_support"},
                            {"label": "1D Min/Max", "value": "d1"},
                            {"label": t(lang, "heat_levels_gex_walls"), "value": "gex_walls"}]
         # échelles : le sous-jacent natif, puis les deux futures (la

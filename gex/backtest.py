@@ -170,7 +170,10 @@ def session_levels(symbol: str, day: str, spot: float | None = None) -> dict[str
     ref = store.previous_close_spot(symbol, day) or spot
     if spot is not None:
         keys = metrics.key_levels(df, spot, ref_spot=ref)
-        out.update({k: v for k, v in keys.items() if v is not None})
+        # mêmes niveaux nommés qu'avant l'ajout des repères de GEX net
+        # (net_gex_max_above/min_below) : le périmètre testé ne change pas
+        out.update({k: v for k, v in keys.items()
+                    if v is not None and k in ("call_wall", "put_support", "d1_min", "d1_max")})
         zg = metrics.zero_gamma(df, spot)
         if zg is not None:
             out["gamma_flip"] = zg

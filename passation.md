@@ -100,6 +100,13 @@ Règle demandée : **OPRA = données live, CBOE = toutes les minutes** (CBOE est
 - Pas branchés (restent sur la salve) : l'API `/api/v1/...`, le digest et le bot Discord.
 - Vérifié dans Chromium sur une chaîne NQ synthétique au spot mouvant : 12 mises à jour GEX/DEX en ~18 s, tuiles au spot live, aucune erreur. **À vérifier en séance réelle** : charge CPU du dashboard avec plusieurs symboles ouverts.
 
+## Audit externe : multiplicateur NQ/ES du flux et murs gamma (10/10)
+
+Un audit externe a été fait sur `main` (45 commits de retard sur cette branche) : la moitié de ses points étaient déjà traités ici (Black-76 via le portage q = r, échéances AM, horloge de variance, flip robuste, book estimé). Deux défauts confirmés et corrigés :
+- **Multiplicateur des options sur futures dans le flux** (`flowtape.multiplier_of`) : cache vide (démarrage de la capture, capture séparée sans moteur) -> repli sur 100, soit NQ ×5 et ES ×2 sur la prime, le delta, le gamma et la pression de couverture en dollars. Désormais : valeur courtier si connue, sinon spécification CME (`FUTURE_POINT_VALUE` : NQ 20 $, ES 50 $), lue dès la construction de l'univers ; produit inconnu -> aucune exposition en dollars, prints comptés en contrats et signalés (`unpriced_prints`). Les barres de tape écrites avant ce correctif pendant ces fenêtres restent fausses sur disque.
+- **Call Wall / Put Support** (`metrics.key_levels`) : calculés sur le GEX NET, contrairement à la documentation. Désormais sur la concentration de gamma call / put séparée (`metrics.gex_by_type` : `gex_calls`, `gex_puts`, `gex_net`, `gex_gross` = Σ|GEX par contrat|). L'ancienne définition reste disponible (`net_gex_max_above` / `net_gex_min_below`). GEX1-5 : classement inchangé (|GEX net|), décomposition calls/puts/brut ajoutée (colonnes, API `gex_walls`, info-bulles). Libellés : info-bulles sur le bandeau et l'échelle /scalp, « (γ calls) » / « (γ puts) » sur la heatmap et le bot ; export TradingView inchangé (un script Pine peut lire les libellés). Le backtest garde son périmètre de niveaux. `python scripts/compare_walls.py` compare avant/après sur les snapshots réels.
+- Pas encore faits (validés avec l'utilisateur, à la suite) : couverture consolidée NQ+NDX+QQQ, libellés EM/flip, comparaison du gamma 0DTE avec/sans plancher.
+
 ## Lecture edge /scalp : gamma négatif, veto du flux, taille de trade (09/10)
 
 Suite au rapport d'edge et à l'expérience de l'utilisateur (scalp de retracements de 5-10 pts sur NQ) :

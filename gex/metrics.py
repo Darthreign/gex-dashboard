@@ -519,6 +519,45 @@ def gex_at_spot(df: pd.DataFrame, ref_spot: float,
     return pd.Series(gex, index=d["strike"].to_numpy()).groupby(level=0).sum()
 
 
+def gex_by_type(df: pd.DataFrame, ref_spot: float | None = None,
+                weight_col: str = "open_interest") -> pd.DataFrame:
+    """GEX par strike, décomposé par type d'option (index = strike) :
+
+    - `gex_calls` : GEX des calls (≥ 0) — concentration de gamma call ;
+    - `gex_puts`  : GEX des puts (≤ 0, convention du projet : put négatif) —
+      sa valeur absolue est la concentration de gamma put ;
+    - `gex_net`   : calls + puts, le GEX net signé habituel ;
+    - `gex_gross` : calls + |puts| = Σ |GEX par contrat|, l'exposition brute
+      avant compensation (même définition que `positioning.book_summary`).
+
+    `ref_spot` : gamma recalculé à ce spot (cf. `gex_at_spot`, mêmes contrats
+    retenus) ; sinon le GEX déjà stocké dans `df`.
+    """
+    cols = ["gex_calls", "gex_puts", "gex_net", "gex_gross"]
+    if ref_spot:
+        d = df[(df["iv"] > 1e-4) & (df[weight_col] > 0)]
+        if d.empty:
+            return pd.DataFrame(columns=cols, dtype=float)
+        g = greeks.gamma(ref_spot, d["strike"].to_numpy(), d["t_years"].to_numpy(),
+                         rates.current_rate(), d["iv"].to_numpy(), carry(d))
+        is_call = (d["type"] == "C").to_numpy()
+        gex = greeks.gex_dollars(np.where(is_call, 1.0, -1.0), g,
+                                 d[weight_col].to_numpy(), multiplier(d), ref_spot)
+    else:
+        d = df
+        if d.empty:
+            return pd.DataFrame(columns=cols, dtype=float)
+        is_call = (d["type"] == "C").to_numpy()
+        gex = d["gex"].to_numpy(dtype=float)
+    strikes = d["strike"].to_numpy()
+    calls = pd.Series(np.where(is_call, gex, 0.0), index=strikes).groupby(level=0).sum()
+    puts = pd.Series(np.where(is_call, 0.0, gex), index=strikes).groupby(level=0).sum()
+    out = pd.DataFrame({"gex_calls": calls, "gex_puts": puts})
+    out["gex_net"] = out["gex_calls"] + out["gex_puts"]
+    out["gex_gross"] = out["gex_calls"] - out["gex_puts"]
+    return out
+
+
 def gex_by_strike_weighted(df: pd.DataFrame, spot: float,
                            weight_col: str = "open_interest") -> pd.Series:
     """GEX par strike, pondéré par l'open interest ou par le volume du jour.
@@ -795,6 +834,11 @@ def top_gex_levels(df: pd.DataFrame, n: int = 5,
     agg = agg.sort_values("gex", key=abs, ascending=False).reset_index(drop=True)
     agg["rank"] = agg.index + 1
     agg["expiry"] = nearest
+    # Décomposition des murs retenus (le classement, lui, reste sur |GEX net|) :
+    # un strike où calls et puts se compensent a un net faible mais un brut fort.
+    parts = gex_by_type(sub, ref_spot)
+    for col in ("gex_calls", "gex_puts", "gex_gross"):
+        agg[col] = agg["strike"].map(parts[col]).fillna(0.0).to_numpy(dtype=float)
     return agg
 
 
@@ -845,10 +889,20 @@ def key_levels(df: pd.DataFrame, spot: float,
                all_expiries: bool = False) -> dict[str, float | None]:
     """Niveaux directionnels (esprit MenthorQ) :
 
-    - call_wall  : plus forte concentration de gamma call AU-DESSUS du spot
-                   (résistance)
-    - put_support: plus forte concentration de gamma put SOUS le spot (support)
+    - call_wall  : plus forte concentration de gamma CALL au-dessus du spot
+                   (GEX des seuls calls, `gex_by_type`) — pas le GEX net ;
+    - put_support: plus forte concentration de gamma PUT sous le spot (|GEX
+                   des seuls puts|) — pas le GEX net ;
+    - net_gex_max_above / net_gex_min_below : strike au GEX NET le plus
+      positif au-dessus / le plus négatif en dessous (ancienne définition des
+      deux murs jusqu'au 10/10/2026, conservée sous un nom explicite) ;
     - d1_max/d1_min : bornes de move attendu (straddle ATM)
+
+    Pourquoi pas le net : un strike où beaucoup de gamma call est compensé par
+    encore plus de gamma put a un GEX net faible ou négatif — il disparaissait
+    du Call Wall alors que la concentration de calls y est réelle. Ces niveaux
+    décrivent l'open interest sous la convention de positionnement retenue ;
+    ils ne prédisent pas à eux seuls une réaction du prix.
 
     Contrairement au classement GEX1-5 (non directionnel), ces niveaux ne sont
     cherchés que du côté où ils font sens comme support/résistance.
@@ -858,6 +912,7 @@ def key_levels(df: pd.DataFrame, spot: float,
     """
     out: dict[str, float | None] = {
         "call_wall": None, "put_support": None, "d1_min": None, "d1_max": None,
+        "net_gex_max_above": None, "net_gex_min_below": None,
     }
     if df.empty:
         return out
@@ -866,14 +921,23 @@ def key_levels(df: pd.DataFrame, spot: float,
     # Le CLASSEMENT des murs se fait au spot de référence (structure figée) ;
     # le côté où on les cherche dépend en revanche du spot COURANT, une
     # résistance n'ayant de sens qu'au-dessus du marché du moment.
-    agg = gex_at_spot(sub, ref_spot) if ref_spot else sub.groupby("strike")["gex"].sum()
+    parts = gex_by_type(sub, ref_spot)
+    calls = parts.loc[parts.index >= spot, "gex_calls"]
+    calls = calls[calls > 0]
+    if len(calls):
+        out["call_wall"] = float(calls.idxmax())
+    puts = -parts.loc[parts.index <= spot, "gex_puts"]
+    puts = puts[puts > 0]
+    if len(puts):
+        out["put_support"] = float(puts.idxmax())
 
+    agg = gex_at_spot(sub, ref_spot) if ref_spot else sub.groupby("strike")["gex"].sum()
     above = agg[(agg.index >= spot) & (agg > 0)]
     if len(above):
-        out["call_wall"] = float(above.idxmax())
+        out["net_gex_max_above"] = float(above.idxmax())
     below = agg[(agg.index <= spot) & (agg < 0)]
     if len(below):
-        out["put_support"] = float(below.idxmin())
+        out["net_gex_min_below"] = float(below.idxmin())
 
     move = expected_move(df, spot)
     if move is not None:
