@@ -480,3 +480,105 @@ def test_print_brut_garde_avec_son_contexte_avant_tout_filtre():
     assert a["exch"] == "C" and a["cond"] == "@" and a["ttype"] == "NEW"
     assert b["side"] is None and c["spread"] is True
     assert b["ts"] == b["ts_recv"]
+
+
+# --- multiplicateur des options sur futures (correctif du 10/10/2026) ---------
+# Avant : cache `futopt._multiplier_cache` vide (démarrage de la capture, ou
+# capture séparée sans moteur) -> repli silencieux sur 100 : NQ ×5, ES ×2.
+
+ES_C = "./EWN26C7500:XCME"
+NQ_C = "./QNEZ26C21000:XCME"
+
+
+@pytest.fixture()
+def cache_vide(monkeypatch):
+    from gex import futopt
+    monkeypatch.setattr(futopt, "_multiplier_cache", {})
+    return futopt._multiplier_cache
+
+
+def _tape_fut() -> FlowTape:
+    t = FlowTape()
+    t._by_stream = {ES_C: "ES", NQ_C: "NQ"}
+    t._spot.update({"ES": 7500.0, "NQ": 21000.0})
+    t._delta.update({ES_C: 0.5, NQ_C: 0.4})
+    t._gamma.update({ES_C: 0.002, NQ_C: 0.0005})
+    return t
+
+
+@pytest.mark.parametrize("sym,contrat,pv,spot,delta", [
+    ("ES", ES_C, 50.0, 7500.0, 0.5), ("NQ", NQ_C, 20.0, 21000.0, 0.4)])
+def test_future_cache_vide_valeur_du_point_du_contrat(cache_vide, sym, contrat, pv, spot, delta):
+    from gex.flowtape import multiplier_of
+    assert multiplier_of(sym) == pv
+    t = _tape_fut()
+    t.ingest_print(_print(contrat, "BUY", 2, price=10.0), now=60.0)
+    bar = t.bars[sym]
+    # exposition en dollars, pas seulement le multiplicateur
+    assert bar.net_premium == pytest.approx(2 * 10.0 * pv)
+    assert bar.net_delta == pytest.approx(-2 * delta * pv * spot)          # dealer court
+    assert bar.hedge_call_buy == pytest.approx(2 * delta * pv * spot)
+    rec = t.recent_prints(sym)[0]
+    assert rec["notional"] == pytest.approx(10.0 * 2 * pv)
+
+
+def test_future_cache_initialise_prioritaire(cache_vide):
+    from gex.flowtape import multiplier_of
+    cache_vide.update({"NQ": 20.0, "ES": 50.0})
+    assert multiplier_of("NQ") == 20.0 and multiplier_of("ES") == 50.0
+    t = _tape_fut()
+    t.ingest_print(_print(NQ_C, "SELL", 1, price=100.0), now=60.0)
+    assert t.bars["NQ"].net_premium == pytest.approx(-100.0 * 20.0)
+
+
+def test_indices_et_etf_inchanges(cache_vide):
+    from gex.flowtape import multiplier_of
+    assert all(multiplier_of(s) == 100.0 for s in ("SPX", "NDX", "SPY", "QQQ"))
+
+
+def test_produit_inconnu_aucun_montant_en_dollars(cache_vide, caplog):
+    from gex.flowtape import multiplier_of
+    assert multiplier_of("XYZ") is None
+    t = FlowTape()
+    t._by_stream = {".XYZ261009C100": "XYZ"}
+    t._spot["XYZ"] = 100.0
+    t._delta[".XYZ261009C100"] = 0.5
+    with caplog.at_level("WARNING"):
+        t.ingest_print(_print(".XYZ261009C100", "BUY", 3), now=60.0)
+        t.ingest_print(_print(".XYZ261009C100", "BUY", 3), now=61.0)
+    bar = t.bars["XYZ"]
+    assert bar.net_contracts == 3 + 3                  # compté en contrats
+    assert bar.net_premium == 0.0 and bar.net_delta == 0.0 and bar.hedge_call_buy == 0.0
+    assert t.unpriced_prints() == {"XYZ": 2}
+    assert sum("multiplicateur du contrat inconnu" in r.message for r in caplog.records) == 1
+    assert t.recent_prints("XYZ")[0]["notional"] is None
+
+
+def test_capture_separee_sans_moteur(cache_vide, monkeypatch):
+    """La capture séparée ne collecte aucune chaîne : seule la construction de
+    l'univers peut renseigner le multiplicateur. Elle interroge le courtier ;
+    s'il ne répond pas, la spécification du contrat prend le relais."""
+    from gex import flowtape, futopt
+    monkeypatch.setattr(futopt, "get_multiplier",
+                        lambda code, tok: cache_vide.setdefault(code, {"NQ": 20.0, "ES": 50.0}[code]))
+    assert flowtape.resolve_future_multiplier("NQ", "jeton") == 20.0
+    assert cache_vide == {"NQ": 20.0}
+
+    def panne(code, tok):
+        raise ConnectionError("API indisponible")
+    monkeypatch.setattr(futopt, "get_multiplier", panne)
+    assert flowtape.resolve_future_multiplier("ES", "jeton") == 50.0     # repli spécification
+    t = _tape_fut()
+    t.ingest_print(_print(ES_C, "BUY", 1, price=10.0), now=60.0)
+    assert t.bars["ES"].net_premium == pytest.approx(500.0)
+
+
+def test_univers_resout_le_multiplicateur_avant_les_prints(cache_vide, monkeypatch):
+    from gex import flowtape, futopt, idxopt
+    vus = []
+    monkeypatch.setattr(flowtape, "quote_token", lambda: ("t", "u", "acc"))
+    monkeypatch.setattr(flowtape, "resolve_future_multiplier", lambda s, a: vus.append(s))
+    monkeypatch.setattr(futopt, "_reference_spot", lambda s, a: None)
+    monkeypatch.setattr(idxopt, "reference_spot", lambda s: None)
+    FlowTape()._build_universe()
+    assert vus == ["ES", "NQ"]

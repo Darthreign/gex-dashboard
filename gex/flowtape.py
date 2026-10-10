@@ -218,15 +218,58 @@ def strike_of(streamer_symbol: str) -> float | None:
     return None
 
 
-def multiplier_of(symbol: str) -> float:
-    """Multiplicateur $/point du contrat d'option.
+# Valeur du point des futures suivis, spécification CME : E-mini Nasdaq-100
+# 20 $ × l'indice, E-mini S&P 500 50 $ × l'indice. Une option sur ces futures
+# porte sur UN contrat : même valeur du point. Mêmes valeurs que
+# moc.FAMILIES["fut_mult"]. Référence tant que l'API courtier n'a pas répondu.
+FUTURE_POINT_VALUE: dict[str, float] = {"NQ": 20.0, "ES": 50.0}
 
-    100 pour les indices et ETF ; le notionnel du future pour NQ/ES, où un
-    point ne vaut pas la même chose (20 $ sur NQ, 50 sur ES). Sans cette
-    distinction, les primes ne seraient pas comparables d'un marché à l'autre.
+
+def multiplier_of(symbol: str) -> float | None:
+    """Multiplicateur $/point du contrat d'option, ou None s'il est inconnu.
+
+    100 pour les indices et ETF ; la valeur du point du future pour NQ/ES (20 $
+    sur NQ, 50 sur ES), sans quoi primes et expositions ne seraient pas
+    comparables d'un marché à l'autre. Pour un future : celle lue chez le
+    courtier (`futopt.get_multiplier`, mise en cache) si elle est connue,
+    sinon la spécification du contrat (`FUTURE_POINT_VALUE`).
+
+    ⚠️ Jamais de 100 par défaut pour un future : jusqu'au 10/10/2026, un cache
+    vide (démarrage de la capture, ou capture séparée sans moteur, qui ne
+    collecte aucune chaîne) faisait retomber NQ sur 100 au lieu de 20 (×5) et
+    ES sur 100 au lieu de 50 (×2). Un produit inconnu renvoie None : l'appelant
+    n'en calcule aucune exposition en dollars (cf. `ingest_print`).
     """
-    from .futopt import _multiplier_cache
-    return float(_multiplier_cache.get(symbol, CONTRACT_MULTIPLIER))
+    kind = TRACKED.get(symbol)
+    if kind == "index":
+        return float(CONTRACT_MULTIPLIER)
+    if kind == "future":
+        from .futopt import _multiplier_cache
+        live = _multiplier_cache.get(symbol)
+        if live:
+            return float(live)
+        ref = FUTURE_POINT_VALUE.get(symbol)
+        return float(ref) if ref else None
+    return None
+
+
+def resolve_future_multiplier(symbol: str, access_token: str) -> float | None:
+    """Lit chez le courtier la valeur du point du future (mise en cache pour
+    `multiplier_of`) dès la construction de l'univers, avant le premier print.
+    En cas d'échec réseau, la spécification du contrat sert de repli ; un écart
+    entre les deux est journalisé (il signalerait un mauvais contrat)."""
+    from . import futopt
+    try:
+        live = futopt.get_multiplier(symbol, access_token)
+    except Exception as exc:  # noqa: BLE001 — le repli sur la spécification suffit
+        log.warning("%s : valeur du point introuvable chez le courtier (%s) — "
+                    "spécification du contrat utilisée", symbol, exc)
+        return multiplier_of(symbol)
+    ref = FUTURE_POINT_VALUE.get(symbol)
+    if live and ref and abs(live - ref) > 1e-9:
+        log.warning("%s : valeur du point courtier %.2f ≠ spécification %.2f — "
+                    "valeur courtier retenue", symbol, live, ref)
+    return multiplier_of(symbol)
 
 
 def build_index_universe(symbol: str, spot: float, access_token: str,
@@ -310,6 +353,8 @@ class FlowTape:
     _vol_day: str = ""
     _vol_seq: int = 0
     _vol_changed: dict[str, int] = field(default_factory=dict)
+    # prints dont le multiplicateur est inconnu (cf. multiplier_of)
+    _unpriced: dict[str, int] = field(default_factory=dict)
     _started: bool = False
     _state: str = "off"
 
@@ -412,6 +457,12 @@ class FlowTape:
                 bar.sell_contracts += size
 
             mult = multiplier_of(symbol)
+            if mult is None:
+                # Multiplicateur introuvable : le print reste compté en
+                # contrats (ci-dessus), mais aucune exposition en dollars n'est
+                # calculée — mieux vaut un trou signalé qu'un montant faux.
+                self._unpriced_print(symbol)
+                return
             # Prime encaissée par le dealer : + quand le preneur ACHÈTE (le
             # dealer vend et encaisse), − quand le preneur vend. En valeur
             # c'est la prime que paie le preneur, vue de l'autre côté.
@@ -461,6 +512,20 @@ class FlowTape:
                 elif typ == "P":
                     bar.net_gamma_puts += g
 
+    def _unpriced_print(self, symbol: str) -> None:
+        """Print sans multiplicateur connu (appelé sous `self.lock`) : compté,
+        et signalé une fois par sous-jacent dans le journal."""
+        n = self._unpriced.get(symbol, 0) + 1
+        self._unpriced[symbol] = n
+        if n == 1:
+            log.warning("%s : multiplicateur du contrat inconnu — prints comptés en "
+                        "contrats, sans exposition en dollars", symbol)
+
+    def unpriced_prints(self) -> dict[str, int]:
+        """Prints ignorés pour le calcul en dollars, par sous-jacent (diagnostic)."""
+        with self.lock:
+            return dict(self._unpriced)
+
     def _count_volume(self, stream: str, size: float, now: float) -> None:
         """Cumul de séance par contrat (appelé sous `self.lock`)."""
         from .tickcapture import _session_day
@@ -488,7 +553,8 @@ class FlowTape:
         """
         side = item.get("aggressorSide")
         px = float(price) if isinstance(price, (int, float)) and price == price else None
-        notional = (px * size * multiplier_of(symbol)) if px is not None else None
+        mult = multiplier_of(symbol)
+        notional = (px * size * mult) if px is not None and mult is not None else None
         buf = self._prints.get(symbol)
         if buf is None:
             buf = self._prints[symbol] = deque(maxlen=PRINT_BUFFER)
@@ -738,6 +804,7 @@ class FlowTape:
         for symbol, kind in TRACKED.items():
             try:
                 if kind == "future":
+                    resolve_future_multiplier(symbol, access)
                     spot = futopt._reference_spot(symbol, access)
                     syms = (build_future_universe(symbol, spot, access)
                             if spot else [])
