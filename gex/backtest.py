@@ -241,3 +241,82 @@ def run(symbol: str, days: list[str] | None = None) -> pd.DataFrame:
         for o in evaluate_session(levels, path, day, symbol):
             outcomes.append({**asdict(o), "resolution": res})
     return pd.DataFrame(outcomes)
+
+
+# ------------------------------------------- comparaison des définitions de murs
+# Correctif du 10/10/2026 : Call Wall / Put Support sur la concentration de
+# gamma call / put (nouvelle définition) au lieu du GEX net (ancienne,
+# conservée sous net_gex_max_above / net_gex_min_below). Même mesure que le
+# reste du module, mêmes précautions : niveaux du DÉBUT de séance, tenue
+# rapportée aux seules séances où le niveau a été touché.
+
+WALL_DEFINITIONS = {
+    "Call Wall (concentration)": "call_wall",
+    "Call Wall (net, ancien)": "net_gex_max_above",
+    "Put Support (concentration)": "put_support",
+    "Put Support (net, ancien)": "net_gex_min_below",
+}
+
+
+def opening_chain(chain_key: str, day: str) -> pd.DataFrame | None:
+    """Chaîne connue à l'ouverture : premier snapshot du jour, sinon dernier
+    de la séance précédente (cf. `session_levels`)."""
+    df = store.load_first_snapshot(chain_key, day)
+    if df is None or df.empty:
+        prev = store.load_previous_snapshot(chain_key, day)
+        df = prev[1] if prev else None
+    return df if df is not None and not df.empty else None
+
+
+def wall_levels(symbol: str, day: str, open_px: float, bucket: str = "Tout",
+                chain_key: str | None = None) -> dict[str, float]:
+    """Les deux définitions des murs pour une séance, au périmètre `bucket`,
+    exactement comme les calcule le dashboard (`metrics.compute_levels` :
+    magnitude au spot structurel = clôture de la veille, côté à l'ouverture)."""
+    df = opening_chain(chain_key or symbol, day)
+    if df is None:
+        return {}
+    structural = store.previous_close_spot(symbol, day) or open_px
+    keys = metrics.compute_levels(df, structural, open_px, bucket=bucket,
+                                  today=pd.Timestamp(day).date())["keys"]
+    return {name: float(keys[k]) for name, k in WALL_DEFINITIONS.items()
+            if keys.get(k) is not None}
+
+
+def compare_walls(symbol: str, days: list[str] | None = None, bucket: str = "Tout",
+                  chain_key: str | None = None, min_bars: int = 120) -> pd.DataFrame:
+    """Une ligne par (séance, définition) : issue du niveau (cf. LevelOutcome),
+    distance à l'ouverture et indicateur « les deux définitions diffèrent ce
+    jour-là ». Séances de semaine avec bougies 1 min seulement (au moins
+    `min_bars` minutes) : un parcours de snapshots ne voit pas les mèches."""
+    days = days or store.price_days(symbol)
+    rows: list[dict] = []
+    for day in days:
+        if pd.Timestamp(day).weekday() >= 5 or path_resolution(symbol, day) != "1min":
+            continue
+        path = session_path(symbol, day)
+        if len(path) < 4 * min_bars:
+            continue
+        open_px = float(path[0])
+        lv = wall_levels(symbol, day, open_px, bucket, chain_key)
+        if not lv:
+            continue
+        diff = {"call": lv.get("Call Wall (concentration)") != lv.get("Call Wall (net, ancien)"),
+                "put": lv.get("Put Support (concentration)") != lv.get("Put Support (net, ancien)")}
+        for o in evaluate_session(lv, path, day, symbol):
+            fam = "call" if o.name.startswith("Call") else "put"
+            rows.append({**asdict(o), "bucket": bucket,
+                         "distance_pct": abs(o.level - open_px) / open_px,
+                         "definitions_differ": diff[fam]})
+    return pd.DataFrame(rows)
+
+
+def summarize_walls(df: pd.DataFrame) -> pd.DataFrame:
+    """`summarize` + distance médiane à l'ouverture (un niveau proche est
+    touché plus souvent : à lire avant de comparer les taux de test)."""
+    s = summarize(df)
+    if df.empty or s.empty:
+        return s
+    dist = df.groupby("name", sort=False)["distance_pct"].median()
+    s["median_distance_pct"] = s["name"].map(dist).to_numpy()
+    return s
