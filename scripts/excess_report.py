@@ -4,6 +4,7 @@
     python scripts/excess_report.py --excess 100 --swing 60 --horizon 120
     python scripts/excess_report.py --verifiees-seulement
     python scripts/excess_report.py --flux databento   # tape reconstruit (Databento)
+    python scripts/excess_report.py --start 2026-09-28 --end 2026-10-09
 
 Pour chaque séance CME (18h00 la veille -> 17h00 ET) ayant des ticks NQ
 (capture live `data/ticks`, sinon `data/import/ticks_full`) et du tape
@@ -239,8 +240,9 @@ def _tick_days(symbol: str) -> set[str]:
     return set(store.tick_days(symbol)) | hist
 
 
-def load_sessions(symbol: str, use_old: bool = True,
-                  flux: str = "live") -> tuple[list[dict], float | None]:
+def load_sessions(symbol: str, use_old: bool = True, flux: str = "live",
+                  start: str | None = None,
+                  end: str | None = None) -> tuple[list[dict], float | None]:
     tdays = tape_days(symbol, flux)
     # une séance lit le tape de son jour ET de la veille (soirée Globex)
     wanted = {d for d in _tick_days(symbol)
@@ -249,7 +251,8 @@ def load_sessions(symbol: str, use_old: bool = True,
     excluded = EXCLUDED_DAYS if flux == "live" else set()
     out = []
     for day in sorted(wanted - excluded):
-        if date.fromisoformat(day).weekday() >= 5:
+        if date.fromisoformat(day).weekday() >= 5 or (start and day < start) \
+                or (end and day > end):
             continue
         px_ts, px = session_path(symbol, day)
         if len(px) < 1000:
@@ -345,8 +348,9 @@ def _retest_block(rt: pd.DataFrame) -> list[str]:
 
 
 def report(symbol: str, excess_pts: float, swing_pts: float, horizon: int,
-           use_old: bool = True, flux: str = "live") -> str:
-    sessions, threshold = load_sessions(symbol, use_old, flux)
+           use_old: bool = True, flux: str = "live", start: str | None = None,
+           end: str | None = None) -> str:
+    sessions, threshold = load_sessions(symbol, use_old, flux, start, end)
     lines = [f"# Excès et soutien des market makers — {symbol}"
              + (" (tape reconstruit Databento)" if flux == "databento" else ""),
              f"_{datetime.now(ET):%Y-%m-%d %H:%M} — prix tick par tick ; excès {excess_pts:g} "
@@ -409,13 +413,17 @@ def main(argv: list[str] | None = None) -> None:
                     help="ignorer les anciennes barres de tape non vérifiées")
     ap.add_argument("--flux", choices=sorted(TAPE_ROOTS), default="live",
                     help="tape lu par le voyant : live (défaut) ou databento (reconstruit)")
+    ap.add_argument("--start", help="première séance (AAAA-MM-JJ)")
+    ap.add_argument("--end", help="dernière séance (AAAA-MM-JJ)")
     args = ap.parse_args(argv)
     outdir = SETTINGS.data_dir / "reports"
     outdir.mkdir(parents=True, exist_ok=True)
     for sym in args.symbols:
         md = report(sym.upper(), args.excess, args.swing, args.horizon,
-                    use_old=not args.verifiees_seulement, flux=args.flux)
-        tag = "_databento" if args.flux == "databento" else ""
+                    use_old=not args.verifiees_seulement, flux=args.flux,
+                    start=args.start, end=args.end)
+        tag = ("_databento" if args.flux == "databento" else "") \
+            + (f"_{args.start or 'debut'}_{args.end or 'fin'}" if args.start or args.end else "")
         path = outdir / f"exces_{sym.upper()}{tag}_{datetime.now(ET):%Y-%m-%d}.md"
         path.write_text(md, encoding="utf-8")
         print(md)

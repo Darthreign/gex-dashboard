@@ -185,6 +185,8 @@ def test_script_bout_en_bout(tmp_path, monkeypatch):
     # sans les anciennes barres : une seule séance
     only, _ = er.load_sessions("NQ", use_old=False)
     assert [s["day"] for s in only] == ["2026-10-07"]
+    borne, _ = er.load_sessions("NQ", start="2026-10-07", end="2026-10-07")
+    assert [s["day"] for s in borne] == ["2026-10-07"]
     assert "2026-09-25" in er.EXCLUDED_DAYS
 
 
