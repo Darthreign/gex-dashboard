@@ -38,6 +38,7 @@ import pandas as pd
 COLORS = ("vert", "orange", "rouge", "gris", "sans flux")
 TARGETS = (10.0, 15.0, 20.0)
 MAE_MARKS = (25.0, 50.0, 100.0)
+RECALL_MARKS = (25.0, 50.0)     # « mauvaise passe » : le prix est parti de 25 / 50 pts contre
 
 
 def _end(n: int, i: int, minutes: float, ts: np.ndarray | None) -> int:
@@ -183,6 +184,8 @@ def support_situation(t_exces: str, t_reaction: str) -> str:
     return "intermédiaire"
 
 
+INTENSITY_LABELS = {"bas": "flux qui s'éteint", "milieu": "flux stable",
+                    "haut": "flux qui enfle", "": "sans flux"}
 SITUATIONS = ("soutien maintenu", "soutien qui faiblit", "intermédiaire",
               "jamais de soutien", "sans flux")
 
@@ -277,6 +280,12 @@ def summarize_retests(events: pd.DataFrame, key: str = "couleur", order=COLORS,
             row[f"retour_{k:g}_%"] = 100 * f[f"hit_{k:g}"].mean() if len(f) else np.nan
         row["mae_med"] = f["mae"].median() if len(f) else np.nan
         row["mae_p90"] = f["mae"].quantile(0.90) if len(f) else np.nan
+        for d in RECALL_MARKS:
+            if f"pire_{d:g}" in f:
+                bad = f[f[f"pire_{d:g}"].astype(bool)]
+                row[f"pire{d:g}_n"] = len(bad)
+                row[f"rappel{d:g}_%"] = (100 * bad[f"rappel_{d:g}"].astype(float).mean()
+                                         if len(bad) else np.nan)
         rows.append(row)
     return pd.DataFrame(rows).set_index(key) if rows else pd.DataFrame()
 
@@ -296,6 +305,24 @@ def outcome(high: np.ndarray, low: np.ndarray, i: int, level: float, fade_dir: i
     adv = (level - lo) if fade_dir > 0 else (hi - level)
     run_adv = np.maximum.accumulate(np.concatenate([[max(adv0, 0.0)], adv]))
     res = {"bars_after": len(hi), "mae": float(run_adv[-1])}
+    # force de rappel : une fois parti de d pts contre, le prix revient-il au
+    # prix d'entrée (de quoi sortir sans perte) ? Indice 0 = bougie / tick
+    # d'entrée ; le retour n'est cherché qu'APRÈS le point le plus défavorable
+    # atteint à ce moment-là.
+    all_adv = np.concatenate([[adv0], adv])
+    for d in RECALL_MARKS:
+        bad = np.flatnonzero(all_adv >= d)
+        res[f"pire_{d:g}"] = bool(len(bad))
+        res[f"rappel_{d:g}"] = np.nan
+        res[f"rappel_min_{d:g}"] = np.nan
+        if len(bad):
+            kb = int(bad[0])
+            back = np.flatnonzero(fav[kb:] >= 0)
+            res[f"rappel_{d:g}"] = bool(len(back))
+            if len(back):
+                j = kb + int(back[0])
+                res[f"rappel_min_{d:g}"] = (j - kb + 1 if ts is None
+                                            else (ts[i + 1 + j] - ts[i + kb]) / 60)
     for k in targets:
         hit = np.flatnonzero(fav >= k)
         if len(hit):

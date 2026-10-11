@@ -182,6 +182,7 @@ def test_script_bout_en_bout(tmp_path, monkeypatch):
     v = rt[rt["day"] == "2026-10-07"].iloc[0]
     assert v["sup_exces"] == pytest.approx(1.0) and v["sup_reaction"] == pytest.approx(1.0)
     assert v["min_exces"] > 0 and v["min_reaction"] > 0
+    assert v["intensite"] == pytest.approx(1.0)        # flux brut constant
     assert rt["rempli"].all() and (rt["continuation"] == 0.0).all()
     md = er.report("NQ", 100, 60, 120)
     assert "Contrôle d'échelle" in md and "Flux vérifié" in md and "anciennes séances" in md
@@ -330,6 +331,7 @@ def test_analyse_piste1_terciles_calees_sur_lapprentissage():
         for _ in range(3):
             rows.append({"day": d, "sens": rng.choice(["haussier", "baissier"]),
                          "sup_exces": rng.uniform(-1, 1), "sup_reaction": rng.uniform(-1, 1),
+                         "intensite": rng.uniform(0.2, 3),
                          "continuation": rng.uniform(0, 150), "rempli": True, "mae": 10.0,
                          **{f"hit_{k:g}": True for k in excess.TARGETS}})
     rt = pd.DataFrame(rows)
@@ -341,5 +343,35 @@ def test_analyse_piste1_terciles_calees_sur_lapprentissage():
     b1 = l1.split("Terciles")[1].split("`")[0]
     assert b1 == l2.split("Terciles")[1].split("`")[0]
     assert "TEST (le seul qui compte)" in l1 and "soutien maintenu" in l1
+    assert "intensité du flux" in l1 and "flux qui enfle" in l1
     assert "Trop peu" in "\n".join(er.support_analysis(rt[rt["day"] < "2026-01-10"],
                                                        "2026-01-05"))
+
+
+def test_force_de_rappel():
+    # achat à 950 : le prix descend à 920 (30 pts contre) puis revient à 951
+    ts = np.array([0.0, 60, 120, 180, 240])
+    p = np.array([950.0, 935, 920, 940, 951])
+    r = excess.outcome(p, p, 0, 950.0, 1, horizon=10, ts=ts)
+    assert r["pire_25"] and r["rappel_25"] and r["rappel_min_25"] == pytest.approx(2.0)
+    assert not r["pire_50"] and np.isnan(r["rappel_50"])
+    # parti de 60 pts contre, jamais revenu
+    p2 = np.array([950.0, 920, 890, 900, 910])
+    r2 = excess.outcome(p2, p2, 0, 950.0, 1, horizon=10, ts=ts)
+    assert r2["pire_50"] and r2["rappel_50"] is False and r2["rappel_25"] is False
+    # le retour n'est cherché qu'après la mauvaise passe : un +10 AVANT ne compte pas
+    p3 = np.array([950.0, 962, 930, 920, 925])
+    r3 = excess.outcome(p3, p3, 0, 950.0, 1, horizon=10, ts=ts)
+    assert r3["hit_10"] and r3["pire_25"] and r3["rappel_25"] is False
+
+
+def test_resume_rappel():
+    rt = pd.DataFrame({"day": ["d1", "d2", "d3"], "couleur": ["rouge"] * 3,
+                       "continuation": [60.0, 70.0, 5.0], "rempli": [True, True, True],
+                       "mae": [40.0, 80.0, 5.0],
+                       **{f"hit_{k:g}": [True, False, True] for k in excess.TARGETS},
+                       "pire_25": [True, True, False], "rappel_25": [True, False, np.nan],
+                       "pire_50": [False, True, False], "rappel_50": [np.nan, False, np.nan]})
+    s = excess.summarize_retests(rt)
+    assert s.loc["rouge", "pire25_n"] == 2 and s.loc["rouge", "rappel25_%"] == 50
+    assert s.loc["rouge", "pire50_n"] == 1 and s.loc["rouge", "rappel50_%"] == 0

@@ -243,7 +243,10 @@ def _phases(flow: pd.DataFrame, t_swing: float, t_ext: float, t_test: float,
     grp = flow["grp"].to_numpy(object)
     a = excess.phase_support(*args, t_swing, t_ext, excess_dir, grp)
     b = excess.phase_support(*args, t_ext, t_test, excess_dir, grp)
+    ga, gb = a["gross_per_min"], b["gross_per_min"]
     return {"sup_exces": a["support"], "sup_reaction": b["support"],
+            # flux brut par minute pendant la réaction / pendant l'excès
+            "intensite": gb / ga if ga and ga > 0 and np.isfinite(gb) else np.nan,
             "brut_min_exces": a["gross_per_min"], "brut_min_reaction": b["gross_per_min"],
             "min_exces": a["minutes"], "min_reaction": b["minutes"]}
 
@@ -287,6 +290,18 @@ def support_analysis(rt: pd.DataFrame, split_day: str) -> list[str]:
                   f"(fade = {'vente' if sens == 'haussier' else 'achat'})", "",
                   _table(excess.summarize_retests(test[test["sens"] == sens], key="situation",
                                                   order=excess.SITUATIONS)), ""]
+    ei = excess.tercile_edges(train["intensite"]) if "intensite" in train else (np.nan, np.nan)
+    if not np.isnan(ei[0]):
+        test = test.assign(intensite_t=test["intensite"].map(
+            lambda x: excess.INTENSITY_LABELS[excess.tercile(x, ei)]))
+        lines += ["#### TEST — intensité du flux (information)", "",
+                  "Flux brut par minute pendant la réaction ÷ pendant l'excès ; terciles calés "
+                  f"sur l'apprentissage [{ei[0]:.2f} ; {ei[1]:.2f}]. `pire25_n` / `rappel25_%` : "
+                  "ordres remplis partis d'au moins 25 pts contre, et part de ceux qui sont "
+                  "ensuite REVENUS au prix d'entrée (de quoi sortir sans perte) ; idem 50.", "",
+                  _table(excess.summarize_retests(
+                      test, key="intensite_t",
+                      order=tuple(excess.INTENSITY_LABELS.values()))), ""]
     grid = test[(test["t_exces"] != "") & (test["t_reaction"] != "")]
     if not grid.empty:
         order = ["bas", "milieu", "haut"]
