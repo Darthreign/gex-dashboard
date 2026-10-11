@@ -951,3 +951,11 @@ body.sc-keywords-only .sc-edge-status { display: none; }
 /* bandeau /scalp : couverture des dealers à contre-sens du mouvement */
 .sc-edge-brake { color: var(--ink); background: rgba(25, 158, 112, 0.35); padding: 0 5px;
                  border-radius: 3px; letter-spacing: 0.02em; }
+
+/* bandeau /scalp : second test d'un excès (cf. gex/secondtest.py) */
+.sc-second { margin-top: 4px; font-size: 13px; padding: 2px 6px; border-radius: 3px;
+             border-left: 3px solid var(--muted); }
+.sc-second.sc-risk-eleve { border-left-color: #d64545; background: rgba(214, 69, 69, 0.14); }
+.sc-second.sc-risk-moyen { border-left-color: #e0a030; background: rgba(224, 160, 48, 0.14); }
+.sc-second.sc-risk-faible { border-left-color: #199e70; background: rgba(25, 158, 112, 0.14); }
+.sc-second .sc-st-risk { font-weight: 600; }

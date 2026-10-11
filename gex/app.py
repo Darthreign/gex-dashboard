@@ -1524,6 +1524,41 @@ def scalp_absorption(symbol: str) -> dict | None:
     return CAPTURE.absorption_now(symbol)
 
 
+def scalp_second_test(symbol: str) -> dict | None:
+    """Second test d'excès en cours d'affichage (cf. gex/secondtest.py) — même
+    logique double-mode que `scalp_absorption_recent`."""
+    from . import flowtape
+    from .capturebus import remote_url
+    if remote_url():
+        getter = getattr(flowtape.TAPE, "second_test", None)
+        return getter(symbol) if getter else None
+    from .tickcapture import CAPTURE
+    return CAPTURE.second_test(symbol)
+
+
+def scalp_second_test_line(ev: dict, zone: str | None, lang: str) -> html.Div:
+    """Ligne d'avertissement du bandeau : ce que l'étude d'un an dit de ce
+    second test (zone /scalp × durée de la réaction)."""
+    from . import secondtest
+    zone_k = {"accelerateur": "accélérateur"}.get(zone or "", zone or "")
+    a = secondtest.assess(ev, zone_k, datetime.now(ET).date())
+    head = t(lang, "sc_st_head", sens=t(lang, f"sc_st_{ev['sens']}"),
+             cls=t(lang, f"sc_st_{a['duree_class']}"), duree=ev["duree_s"],
+             zone=t(lang, f"sc_zone_{zone or 'inconnu'}"))
+    if a["expiry_week"]:
+        parts, risk = [head, " — ", t(lang, "sc_st_expiry")], "inconnu"
+    elif a["risk"] == "inconnu":
+        parts, risk = [head, " — ", t(lang, "sc_st_nozone")], "inconnu"
+    else:
+        risk = a["risk"]
+        row = a["row"]
+        tail = (t(lang, "sc_st_stats", c100=row["cont100_pct"], c50=row["cont50_pct"],
+                  p90=row["cont_p90"], n=row["n"]) if row else " — " + t(lang, "sc_st_nostats"))
+        parts = [html.Span(t(lang, f"sc_st_risk_{risk}"), className="sc-st-risk"),
+                 " · ", head, tail]
+    return html.Div(parts, className=f"sc-second sc-risk-{risk}", title=t(lang, "sc_st_tip"))
+
+
 def scalp_absorption_recent(symbol: str) -> list[dict]:
     """Derniers niveaux d'absorption détectés pour `symbol` (jusqu'à 3, le plus
     récent d'abord) — même logique double-mode que `scalp_absorption`."""
@@ -1697,6 +1732,9 @@ def scalp_banner(symbol: str, ctx: dict, spot: float, lang: str,
             er = scalp_edge_reading(symbol, ctx, spot, net, gross)
             log_scalp_setup(symbol, er, spot)
             main.append(scalp_edge_line(er, lang))
+            ev = scalp_second_test(symbol) if symbol == "NQ" else None
+            if ev:
+                main.append(scalp_second_test_line(ev, er.get("zone"), lang))
         except Exception:  # noqa: BLE001 — la lecture ne doit jamais casser le bandeau
             log.exception("Lecture normalisée /scalp v2 indisponible (%s)", symbol)
     return html.Div([

@@ -81,6 +81,10 @@ async def _handler(ws, tape: FlowTape, ticks=None) -> None:
             # tant que fraîches) — TOUJOURS incluse aussi, même liste vide.
             payload["absorption_recent"] = {s: r for s in ("NQ", "ES")
                                             if (r := ticks.absorption_recent(s))}
+            # second test d'excès en cours d'affichage (cf. gex/secondtest.py) —
+            # toujours inclus, même vide, pour que le miroir l'efface à temps
+            payload["second_test"] = {s: e for s in ("NQ",)
+                                      if (e := ticks.second_test(s)) is not None}
         await ws.send(json.dumps(payload))
         await asyncio.sleep(PUSH_INTERVAL_S)
 
@@ -163,6 +167,7 @@ class RemoteTape:
         self._last_price: dict[str, float] = {}
         self._absorption: dict[str, dict] = {}
         self._absorption_recent: dict[str, list] = {}
+        self._second_test: dict[str, dict] = {}
         self._status: tuple[str, int] = ("connecting", 0)
         self._vol: dict[str, float] = {}
         self._vol_day = ""
@@ -238,6 +243,8 @@ class RemoteTape:
                 self._absorption = msg["absorption"] or {}
             if "absorption_recent" in msg:
                 self._absorption_recent = msg["absorption_recent"] or {}
+            if "second_test" in msg:
+                self._second_test = msg["second_test"] or {}
             self._last_msg = time.time() if now is None else now
 
     # -- lecture (même interface que FlowTape) ----------------------------
@@ -291,6 +298,11 @@ class RemoteTape:
         ou None. Se vide dès que la capture ne la considère plus fraîche."""
         with self.lock:
             return self._absorption.get(symbol)
+
+    def second_test(self, symbol: str) -> dict | None:
+        """Second test d'excès relayé depuis `TickCapture.second_test`, ou None."""
+        with self.lock:
+            return self._second_test.get(symbol)
 
     def absorption_recent(self, symbol: str) -> list[dict]:
         """Derniers niveaux détectés relayés depuis `TickCapture.absorption_recent`

@@ -59,6 +59,7 @@ séances : des tendances, pas une preuve (voir les intervalles à 95 %).
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -388,6 +389,36 @@ def support_analysis(rt: pd.DataFrame, split_day: str) -> list[str]:
     return lines
 
 
+def write_live_stats(test: pd.DataFrame, edges: tuple[float, float]) -> Path | None:
+    """Table relue par /scalp (gex/secondtest.py) : zone /scalp (collecte
+    rapide, comme en direct) × durée de la réaction, moitié TEST."""
+    from gex import secondtest
+    if "g_regime_tdb2" not in test or test.empty:
+        return None
+    cls = test["duree_reaction_s"].map(lambda x: secondtest.duree_class(x, edges))
+    table: dict = {}
+    for (zone, c), g in test.assign(_c=cls).groupby(["g_regime_tdb2", "_c"]):
+        if zone not in ("frein", "transition", "accélérateur") or len(g) < 20:
+            continue
+        f = g[g["rempli"].astype(bool)]
+        table.setdefault(zone, {})[c] = {
+            "n": int(len(g)), "seances": int(g["day"].nunique()),
+            "cont50_pct": round(100 * float((g["continuation"] >= 50).mean()), 1),
+            "cont100_pct": round(100 * float((g["continuation"] >= 100).mean()), 1),
+            "cont_p90": round(float(g["continuation"].quantile(0.9)), 0),
+            "retour10_pct": round(100 * float(f["hit_10"].astype(float).mean()), 1)
+            if len(f) else None}
+    out = {"generated": datetime.now(ET).isoformat(timespec="seconds"),
+           "periode_test": [str(test["day"].min()), str(test["day"].max())],
+           "duree_edges": [float(edges[0]), float(edges[1])],
+           "definition_zone": "zone /scalp, chaîne de la collecte rapide (2 j de bourse)",
+           "table": table}
+    path = secondtest.stats_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
+    return path
+
+
 def gamma_analysis(rt: pd.DataFrame, split_day: str, sessions: list[dict]) -> list[str]:
     """Piste 2 : régime (frein / accélérateur), mur du côté de l'excès (distance
     à l'extrême, taille). Bornes calées sur l'apprentissage, lecture sur le
@@ -435,6 +466,8 @@ def gamma_analysis(rt: pd.DataFrame, split_day: str, sessions: list[dict]) -> li
     if "duree_reaction_s" in train:
         ed = excess.tercile_edges(train["duree_reaction_s"])
         dl = {"bas": "express", "milieu": "normale", "haut": "lente", "": "inconnue"}
+        write_live_stats(test, ed)
+
         def rd(df):
             return df.assign(regime_duree=df["g_regime"] + " / réaction " + df[
                 "duree_reaction_s"].map(lambda x: dl[excess.tercile(x, ed)]))
