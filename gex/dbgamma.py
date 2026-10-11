@@ -9,8 +9,12 @@ Par séance CME, UNIQUEMENT avec ce qui était publié AVANT son ouverture
   plausible, sinon recalculée depuis le PRIX DE RÈGLEMENT de la veille
   (`SETTLEMENT_PRICE`) et du prix du NQ à 16h00 ET (ticks de l'utilisateur) ;
   à défaut, interpolée par strike dans la même échéance ;
-- options sur le contrat suivi par le continu de ticks (dbtape), échéances à
-  45 jours au plus.
+- options sur TOUS les trimestriels NQ, échéances à 45 jours au plus : la
+  semaine qui précède une échéance trimestrielle, les hebdomadaires portent
+  encore sur le contrat sortant alors que le continu de ticks suit déjà le
+  suivant. Chaque option est évaluée au prix de SON sous-jacent, déduit du
+  continu par le portage théorique (r − dividende ≈ 0,7 %) entre les deux
+  échéances — approximation de quelques points sur un écart de ~200.
 
 Au second test (instant t, prix S) : GEX de chaque option à S, convention
 dealer du tableau de bord (call +, put −, Γ × OI × 20 $ × S² × 0,01), d'où :
@@ -38,6 +42,11 @@ MAX_DAYS_TO_EXPIRY = 45
 STALE_DAYS = 5                   # une statistique plus vieille n'est pas reprise
 FLIP_GRID = np.linspace(-0.04, 0.04, 81)
 STRIKE_WINDOW = 0.10
+QDIV = 0.007                     # rendement en dividendes approché du Nasdaq-100
+MONTHS = {"H": 3, "M": 6, "U": 9, "Z": 12}
+# définition du tableau de bord (futopt.filter_chain, collecte large) et de sa
+# zone /scalp (edge.regime_zone)
+TDB_WINDOW, TDB_MAX_DAYS = 0.08, 14
 MULT = 20.0
 SETTLE_ET = time(16, 0)          # règlement des contrats sur indices CME
 
@@ -94,6 +103,20 @@ def load_raw(raw_dir) -> tuple[pd.DataFrame, pd.DataFrame]:
     return d, s
 
 
+def future_expiry(code: str, ref: date) -> pd.Timestamp | None:
+    """Échéance (3e vendredi, 9h30 ET) d'un trimestriel NQ « NQZ6 » / « NQZ26 »,
+    l'année étant la plus proche de `ref` compatible avec le chiffre donné."""
+    u = str(code).strip().upper()
+    if len(u) < 4 or not u.startswith("NQ") or u[2] not in MONTHS or not u[3:].isdigit():
+        return None
+    digits = u[3:]
+    base = ref.year - ref.year % (10 ** len(digits))
+    year = min((base + int(digits) + k * 10 ** len(digits) for k in (-1, 0, 1)),
+               key=lambda y: abs(y - ref.year))
+    d = dbtape._third_friday(year, MONTHS[u[2]])
+    return pd.Timestamp(datetime.combine(d, time(9, 30)), tz=ET).tz_convert("UTC")
+
+
 def session_chain(stats: pd.DataFrame, defs: pd.DataFrame, session: str,
                   prev_close: float | None, prev_settle_ts: float | None,
                   rate: float) -> pd.DataFrame:
@@ -117,10 +140,17 @@ def session_chain(stats: pd.DataFrame, defs: pd.DataFrame, session: str,
     c = defs.merge(last.reset_index(), on="instrument_id", how="inner")
     exp = pd.to_datetime(c["expiration"], utc=True)
     c = c[(exp > start) & (exp <= start + pd.Timedelta(days=MAX_DAYS_TO_EXPIRY))
-          & c["underlying"].map(lambda u: dbtape.same_contract(u, code))
           & (c["oi"] > 0)].copy()
+    ref = date.fromisoformat(session)
+    t_cont = future_expiry(code, ref)
+    und_exp = c["underlying"].map(lambda u: future_expiry(u, ref))
+    c = c[und_exp.notna().to_numpy()].copy()
     if c.empty:
         return c
+    years = (pd.to_datetime(und_exp[und_exp.notna()]) - t_cont).dt.total_seconds() \
+        .to_numpy(float) / YEAR_SECONDS
+    # prix du sous-jacent de l'option = continu × portage entre les échéances
+    c["fwd"] = np.exp((rate - QDIV) * years)
     c["iv_source"] = ""
     # 1. volatilité publiée (décimale ou en %, selon la source)
     vol = c["vol"].astype(float)
@@ -136,7 +166,8 @@ def session_chain(stats: pd.DataFrame, defs: pd.DataFrame, session: str,
         t = np.maximum(_secs(c.loc[need, "expiration"]) - prev_settle_ts, 300.0) \
             / YEAR_SECONDS
         price = c.loc[need, "settle"].to_numpy(float)
-        iv = greeks.implied_vol(np.nan_to_num(price, nan=-1.0), prev_close,
+        iv = greeks.implied_vol(np.nan_to_num(price, nan=-1.0),
+                                prev_close * c.loc[need, "fwd"].to_numpy(float),
                                 c.loc[need, "strike"].to_numpy(float), t, rate,
                                 (c.loc[need, "type"] == "C").to_numpy(), q=rate)
         got = np.isfinite(iv)
@@ -156,13 +187,14 @@ def session_chain(stats: pd.DataFrame, defs: pd.DataFrame, session: str,
         rest = c["iv"].isna()
         c.loc[rest, "iv"] = c["iv"].median()
         c.loc[rest, "iv_source"] = "médiane"
-    return c[["strike", "type", "expiration", "oi", "iv", "iv_source"]] \
+    return c[["strike", "type", "expiration", "oi", "iv", "iv_source", "fwd"]] \
         .dropna(subset=["iv"]).reset_index(drop=True)
 
 
 def _gex(chain: pd.DataFrame, spot, t_epoch: float, rate: float) -> np.ndarray:
     """GEX par option (lignes) à un ou plusieurs prix (colonnes)."""
-    s = np.atleast_1d(np.asarray(spot, float))[None, :]
+    fwd = chain["fwd"].to_numpy(float) if "fwd" in chain else np.ones(len(chain))
+    s = fwd[:, None] * np.atleast_1d(np.asarray(spot, float))[None, :]
     k = chain["strike"].to_numpy(float)[:, None]
     t = (np.maximum(_secs(chain["expiration"]) - t_epoch, 300.0) / YEAR_SECONDS)[:, None]
     iv = chain["iv"].to_numpy(float)[:, None]
@@ -179,24 +211,15 @@ def view(chain: pd.DataFrame, t_epoch: float, spot: float, extreme: float,
     if chain is None or chain.empty:
         return out
     # strikes à ± 10 % : au-delà, le gamma est négligeable (et le calcul long)
-    chain = chain[(chain["strike"] - spot).abs() <= STRIKE_WINDOW * spot]
+    chain = select(chain, t_epoch, spot, "45j")
     if chain.empty:
         return out
-    grid = spot * (1 + FLIP_GRID)
-    gx = _gex(chain, np.r_[spot, grid], t_epoch, rate)
-    net = gx.sum(axis=0)
-    out["gex_net"] = float(net[0])
-    out["regime"] = "frein" if net[0] > 0 else "accélérateur"
-    curve = net[1:]
-    flips = np.flatnonzero(np.sign(curve[:-1]) != np.sign(curve[1:]))
-    if len(flips):
-        x = []
-        for j in flips:                          # interpolation linéaire du zéro
-            a, b = curve[j], curve[j + 1]
-            x.append(grid[j] + (grid[j + 1] - grid[j]) * a / (a - b))
-        flip = min(x, key=lambda v: abs(v - spot))
+    net0, flip, gx = _net_and_flip(chain, t_epoch, spot, rate)
+    out["gex_net"] = net0
+    out["regime"] = "frein" if net0 > 0 else "accélérateur"
+    if flip is not None:
         out["dist_flip"] = float(spot - flip)    # > 0 : au-dessus du flip
-    per = pd.DataFrame({"strike": chain["strike"].to_numpy(float),
+    per = pd.DataFrame({"strike": _equiv_strike(chain),
                         "type": chain["type"].to_numpy(), "gex": gx[:, 0]})
     calls = per[per["type"] == "C"].groupby("strike")["gex"].sum()
     puts = -per[per["type"] == "P"].groupby("strike")["gex"].sum()
@@ -208,4 +231,95 @@ def view(chain: pd.DataFrame, t_epoch: float, spot: float, extreme: float,
         out["mur"] = wall
         out["dist_mur"] = (wall - extreme) * excess_dir   # > 0 : encore devant
         out["part_mur"] = float(side.max() / gross)
+    return out
+
+
+def _equiv_strike(chain: pd.DataFrame) -> np.ndarray:
+    """Strike ramené au prix du continu (options sur un autre trimestriel)."""
+    fwd = chain["fwd"].to_numpy(float) if "fwd" in chain else np.ones(len(chain))
+    return chain["strike"].to_numpy(float) / fwd
+
+
+def select(chain: pd.DataFrame, t_epoch: float, spot: float, mode: str) -> pd.DataFrame:
+    """Sous-chaîne selon la définition : « 45j » (étude : échéances <= 45 j,
+    strikes ± 10 %), « tdb » (tableau de bord : <= 14 jours calendaires,
+    ± 8 %), « 0dte » (échéances du jour ET de t)."""
+    k = _equiv_strike(chain)
+    exp = pd.to_datetime(chain["expiration"], utc=True)
+    if mode == "45j":
+        keep = np.abs(k - spot) <= STRIKE_WINDOW * spot
+    elif mode == "tdb":
+        today = pd.Timestamp(t_epoch, unit="s", tz="UTC").tz_convert(ET).normalize()
+        keep = (np.abs(k - spot) <= TDB_WINDOW * spot) & (
+            exp.dt.tz_convert(ET).dt.normalize()
+            <= today + pd.Timedelta(days=TDB_MAX_DAYS)).to_numpy()
+    elif mode == "0dte":
+        day = pd.Timestamp(t_epoch, unit="s", tz="UTC").tz_convert(ET).date()
+        keep = (np.abs(k - spot) <= TDB_WINDOW * spot) & (
+            exp.dt.tz_convert(ET).dt.date == day).to_numpy()
+    else:
+        raise ValueError(mode)
+    return chain[keep]
+
+
+def _net_and_flip(chain: pd.DataFrame, t_epoch: float, spot: float, rate: float):
+    """(GEX net au prix, Gamma Flip le plus proche ou None, GEX par option)."""
+    grid = spot * (1 + FLIP_GRID)
+    gx = _gex(chain, np.r_[spot, grid], t_epoch, rate)
+    net = gx.sum(axis=0)
+    curve = net[1:]
+    flips = np.flatnonzero(np.sign(curve[:-1]) != np.sign(curve[1:]))
+    flip = None
+    if len(flips):
+        x = [grid[j] + (grid[j + 1] - grid[j]) * curve[j] / (curve[j] - curve[j + 1])
+             for j in flips]                     # interpolation linéaire du zéro
+        flip = float(min(x, key=lambda v: abs(v - spot)))
+    return float(net[0]), flip, gx
+
+
+def expected_move(chain: pd.DataFrame, t_epoch: float, spot: float, rate: float) -> float | None:
+    """Straddle ATM de l'échéance la plus proche (même définition que l'EM
+    du tableau de bord), au prix et à l'instant donnés."""
+    live = chain[pd.to_datetime(chain["expiration"], utc=True).map(lambda e: e.timestamp())
+                 > t_epoch]
+    if live.empty:
+        return None
+    first = live[live["expiration"] == live["expiration"].min()]
+    k = _equiv_strike(first)
+    atm = first.iloc[[int(np.argmin(np.abs(k - spot)))]]
+    t = max(_secs(atm["expiration"])[0] - t_epoch, 300.0) / YEAR_SECONDS
+    f = spot * float(atm["fwd"].iloc[0]) if "fwd" in atm else spot
+    kk, iv = float(atm["strike"].iloc[0]), float(atm["iv"].iloc[0])
+    return float(greeks.call_price(f, kk, t, rate, iv, rate)
+                 + greeks.put_price(f, kk, t, rate, iv, rate))
+
+
+def regimes(chain: pd.DataFrame, t_epoch: float, spot: float, rate: float) -> dict:
+    """Le régime selon trois définitions, au même instant et au même prix :
+    - « 45j » : signe du GEX net, étude (toutes échéances <= 45 j) ;
+    - « tdb » : la ZONE /scalp, recalculée comme au tableau de bord
+      (edge.regime_zone : Gamma Flip de la chaîne <= 14 j ± 8 %, GEX 0DTE,
+      bande ± 0,15 EM) — frein / transition / accélérateur ;
+    - « 0dte » : signe du GEX des seules échéances du jour."""
+    from . import edge
+    out = {"regime_45j": "inconnu", "regime_tdb": "inconnu", "regime_0dte": "inconnu",
+           "flip_tdb": np.nan}
+    if chain is None or chain.empty:
+        return out
+    c45 = select(chain, t_epoch, spot, "45j")
+    if not c45.empty:
+        out["regime_45j"] = "frein" if _net_and_flip(c45, t_epoch, spot, rate)[0] > 0 \
+            else "accélérateur"
+    c0 = select(chain, t_epoch, spot, "0dte")
+    gex0 = _net_and_flip(c0, t_epoch, spot, rate)[0] if not c0.empty else None
+    if gex0 is not None:
+        out["regime_0dte"] = "frein" if gex0 > 0 else "accélérateur"
+    ct = select(chain, t_epoch, spot, "tdb")
+    if not ct.empty:
+        _, flip, _ = _net_and_flip(ct, t_epoch, spot, rate)
+        out["flip_tdb"] = flip if flip is not None else np.nan
+        em = expected_move(chain, t_epoch, spot, rate)
+        zone, _ = edge.regime_zone(spot, flip, em or 0.0, gex0,
+                                   edge.EdgeParams().flip_band_em)
+        out["regime_tdb"] = {"accelerateur": "accélérateur"}.get(zone, zone)
     return out

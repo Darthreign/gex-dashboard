@@ -41,6 +41,8 @@ def test_concordance(tmp_path, monkeypatch):
     assert (c["zone_scalp"] == "frein").all()
     s = compare_regime.summarize(c)
     assert s["zone_scalp_egale_regime_%"] == 100.0
+    assert c["zone_recalculee"].isin(["frein", "transition", "accélérateur"]).all()
+    assert "zone_recalculee_egale_zone_scalp_%" in s
     assert s["meme_signe_gex_%"] == pytest.approx(50.0)          # 2e ligne : signe opposé
     md = compare_regime.report()
     assert "Synthèse" in md and "zone_scalp_egale_regime_%" in md

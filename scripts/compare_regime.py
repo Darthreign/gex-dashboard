@@ -14,7 +14,12 @@ l'ouverture). Trois comparaisons :
    niveaux, en points ;
 3. LA question pratique : la zone affichée par /scalp (edge.regime_zone :
    frein / transition / accélérateur, Gamma Flip + GEX 0DTE, bande ± 0,15 EM)
-   contre le régime de l'étude (signe du GEX net reconstruit).
+   contre le régime de l'étude (signe du GEX net reconstruit) ;
+4. contrôle de l'émulation : la zone /scalp RECALCULÉE depuis l'open
+   interest Databento (dbgamma.regimes, définition « tdb ») contre la zone
+   réellement calculée par le tableau de bord — si elles concordent, le test
+   sur l'année de la définition « tableau de bord » (rapport d'excès) vaut
+   pour la vraie zone /scalp.
 
 Lecture seule ; rapport dans data/reports/regime_concordance_NQ_<date>.md.
 Il faut les fichiers Databento `definition` + `statistics` (cache de
@@ -78,6 +83,7 @@ def compare(rows: pd.DataFrame, defs: pd.DataFrame, stats: pd.DataFrame) -> pd.D
         for r in g.itertuples():
             s = float(r.spot)
             v = dbgamma.view(chain, r.ts.timestamp(), s, s, 1, rate)
+            emu = dbgamma.regimes(chain, r.ts.timestamp(), s, rate)
             zg = _num(getattr(r, "zero_gamma", None))
             gex0 = _num(getattr(r, "net_gex_0dte", None))
             zone = edge.regime_zone(s, zg, em, gex0, band)[0] if em else "inconnu"
@@ -86,7 +92,8 @@ def compare(rows: pd.DataFrame, defs: pd.DataFrame, stats: pd.DataFrame) -> pd.D
                 "seance": session, "ts": r.ts, "spot": s,
                 "gex_tdb": _num(r.net_gex), "gex_db": v["gex_net"],
                 "flip_tdb": zg, "flip_db": flip_db,
-                "zone_scalp": zone, "regime_etude": v["regime"]})
+                "zone_scalp": zone, "regime_etude": v["regime"],
+                "zone_recalculee": emu["regime_tdb"], "flip_recalcule": emu["flip_tdb"]})
     return pd.DataFrame(out)
 
 
@@ -100,7 +107,12 @@ def summarize(c: pd.DataFrame) -> dict:
           & c["regime_etude"].isin(("frein", "accélérateur"))]
     zone = float((z["zone_scalp"].str.replace("accelerateur", "accélérateur")
                   == z["regime_etude"]).mean()) if len(z) else np.nan
+    e = c[c["zone_scalp"].isin(("frein", "accelerateur", "transition"))
+          & (c["zone_recalculee"] != "inconnu")] if "zone_recalculee" in c else c.iloc[0:0]
+    emu = float((e["zone_scalp"].str.replace("accelerateur", "accélérateur")
+                 == e["zone_recalculee"]).mean()) if len(e) else np.nan
     return {"lignes": len(c), "seances": c["seance"].nunique(),
+            "zone_recalculee_egale_zone_scalp_%": 100 * emu,
             "meme_signe_gex_%": 100 * sign, "meme_cote_du_flip_%": 100 * side,
             "ecart_flip_med_pts": float((f["flip_tdb"] - f["flip_db"]).abs().median())
             if len(f) else np.nan,

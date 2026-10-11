@@ -79,7 +79,14 @@ def test_contrat_et_echeance_filtres():
     d.loc[1, "expiration"] = START - pd.Timedelta(hours=1)    # déjà expirée
     c = dbgamma.session_chain(_stats({i: 10.0 for i in range(1, 6)},
                                      {i: 0.2 for i in range(1, 6)}), d, SESSION, None, None, R)
-    assert sorted(c["strike"]) == [19900.0, 20000.0, 20100.0]
+    # le contrat suivant reste, évalué à son propre prix (portage > 0)
+    assert sorted(c["strike"]) == [19900.0, 20000.0, 20100.0, 20200.0]
+    by = c.set_index("strike")
+    assert by.loc[20200, "fwd"] > 1.005 and by.loc[20000, "fwd"] == pytest.approx(1.0)
+    d.loc[2, "underlying"] = "ESZ6"                          # pas un NQ : écarté
+    c = dbgamma.session_chain(_stats({i: 10.0 for i in range(1, 6)},
+                                     {i: 0.2 for i in range(1, 6)}), d, SESSION, None, None, R)
+    assert 20100.0 not in set(c["strike"])
 
 
 def _chain(rows):
@@ -126,6 +133,9 @@ def test_rapport_piste2(tmp_path, monkeypatch):
     md = excess_report.report("NQ", 100, 60, 120, gamma=True)
     assert "Piste 2" in md and "Chaînes reconstituées : 1 séances" in md
     assert rt["duree_reaction_s"] > 0
+    assert rt["g_regime_45j"] in ("frein", "accélérateur")
+    # ni flip dans la fenêtre ni 0DTE : la zone /scalp serait « inconnu » aussi
+    assert rt["g_regime_tdb"] in ("frein", "transition", "accélérateur", "inconnu")
     # sans OI : arrêt explicite
     monkeypatch.setattr(excess_report, "gamma_context",
                         lambda raw=None: (pd.DataFrame(), pd.DataFrame()))
@@ -170,7 +180,10 @@ def test_stabilite_et_duree_dans_lanalyse():
         for _ in range(3):
             reg = rng.choice(["frein", "accélérateur"])
             rows.append({"day": d, "sens": rng.choice(["haussier", "baissier"]),
-                         "g_regime": reg, "g_dist_mur": rng.uniform(-50, 600),
+                         "g_regime": reg, "g_regime_45j": reg,
+                         "g_regime_tdb": rng.choice(["frein", "transition", "accélérateur"]),
+                         "g_regime_0dte": rng.choice(["frein", "accélérateur"]),
+                         "g_dist_mur": rng.uniform(-50, 600),
                          "g_part_mur": rng.uniform(0.01, 0.1),
                          "duree_reaction_s": rng.uniform(5, 900),
                          "continuation": rng.uniform(0, 150), "rempli": True, "mae": 10.0,
@@ -181,3 +194,32 @@ def test_stabilite_et_duree_dans_lanalyse():
     assert "stabilité par trimestre" in lines and "2026Q1" in lines and "2026Q2" in lines
     assert "accélérateur / réaction" in lines and "APPRENTISSAGE — régime" in lines
     assert "APPRENTISSAGE — régime et durée" in lines
+    assert "trois définitions" in lines and "TEST — zone /scalp" in lines
+    assert "Zone /scalp recalculée = régime de l'étude" in lines
+
+
+def test_echeance_des_trimestriels():
+    from datetime import date
+    e = dbgamma.future_expiry("NQZ6", date(2026, 10, 7))
+    assert e.tz_convert("America/New_York").strftime("%Y-%m-%d %H:%M") == "2026-12-18 09:30"
+    assert dbgamma.future_expiry("NQH7", date(2026, 12, 20)).year == 2027
+    assert dbgamma.future_expiry("NQZ26", date(2026, 10, 7)).year == 2026
+    assert dbgamma.future_expiry("ESZ6", date(2026, 10, 7)) is None
+
+
+def test_trois_definitions_du_regime():
+    t = (START + pd.Timedelta(hours=16)).timestamp()       # mercredi 10h00 ET
+    far = pd.Timestamp("2026-11-13 20:00", tz="UTC")       # au-delà de 14 jours
+    today = pd.Timestamp("2026-10-07 20:00", tz="UTC")     # 0DTE
+    c = pd.DataFrame({"strike": [20000.0, 20000.0, 20000.0], "type": ["C", "P", "P"],
+                      "expiration": [today, EXP, far], "oi": [100.0, 2000.0, 90000.0],
+                      "iv": [0.2, 0.2, 0.2], "iv_source": "publiée", "fwd": 1.0})
+    assert len(dbgamma.select(c, t, 20000, "0dte")) == 1
+    assert len(dbgamma.select(c, t, 20000, "tdb")) == 2
+    assert len(dbgamma.select(c, t, 20000, "45j")) == 3
+    r = dbgamma.regimes(c, t, 20000.0, R)
+    assert r["regime_0dte"] == "frein"                     # seul le call du jour
+    assert r["regime_45j"] == "accélérateur"               # le gros put lointain domine
+    assert r["regime_tdb"] in ("frein", "transition", "accélérateur")
+    em = dbgamma.expected_move(c, t, 20000.0, R)
+    assert 0 < em < 200                                    # straddle 0DTE, quelques heures

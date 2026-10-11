@@ -254,8 +254,10 @@ def _gamma(chain: pd.DataFrame | None, t: float, spot: float, extreme: float,
     """Piste 2 : positionnement gamma au second test (colonnes g_*)."""
     if chain is None:
         return {}
-    v = dbgamma.view(chain, t, spot, extreme, excess_dir, rates.current_rate())
-    return {f"g_{k}": val for k, val in v.items()}
+    r = rates.current_rate()
+    v = dbgamma.view(chain, t, spot, extreme, excess_dir, r)
+    return {**{f"g_{k}": val for k, val in v.items()},
+            **{f"g_{k}": val for k, val in dbgamma.regimes(chain, t, spot, r).items()}}
 
 
 def _phases(flow: pd.DataFrame, t_swing: float, t_ext: float, t_test: float,
@@ -441,6 +443,22 @@ def gamma_analysis(rt: pd.DataFrame, split_day: str, sessions: list[dict]) -> li
                   _table(excess.summarize_retests(rd(train), key="regime_duree", order=())),
                   "", "#### TEST — régime et durée de la réaction", "",
                   _table(excess.summarize_retests(test, key="regime_duree", order=())), ""]
+    if "g_regime_tdb" in known:
+        lines += ["#### Le régime selon trois définitions (même instant, même prix)", "",
+                  "`45j` = étude (toutes échéances <= 45 j) ; `tdb` = zone /scalp recalculée "
+                  "comme au tableau de bord (Gamma Flip de la chaîne <= 14 j ± 8 %, GEX 0DTE, "
+                  "bande ± 0,15 EM) ; `0dte` = échéances du jour seules.", ""]
+        order3 = ("frein", "transition", "accélérateur", "inconnu")
+        for key, name in (("g_regime_45j", "étude (45 j)"), ("g_regime_tdb", "zone /scalp"),
+                          ("g_regime_0dte", "0DTE seul")):
+            for part, df in (("APPRENTISSAGE", train), ("TEST", test)):
+                lines += [f"{part} — {name} :", "",
+                          _table(excess.summarize_retests(df, key=key, order=order3)), ""]
+        both = test[test["g_regime_tdb"].isin(("frein", "accélérateur"))]
+        if len(both):
+            lines += [f"Zone /scalp recalculée = régime de l'étude (hors transition) : "
+                      f"{100 * (both['g_regime_tdb'] == both['g_regime_45j']).mean():.0f} % "
+                      f"des seconds tests du TEST.", ""]
     for key, title, order in (
             ("g_regime", "régime", ("frein", "accélérateur")),
             ("regime_fade", "régime et sens du fade", ()),
