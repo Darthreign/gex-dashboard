@@ -32,7 +32,11 @@ d'options NQ (le 25/09/2026 est exclu) :
    calés sur la première moitié des séances, résultat lu sur la seconde
    (`--split` pour choisir la coupure). Avec `--flux databento` et le tape à
    la seconde (data/tape_databento_1s), bornes exactes à la seconde, et flux
-   des 30 / 60 / 120 dernières secondes avant le second test.
+   des 30 / 60 / 120 dernières secondes avant le second test ;
+8. PISTE 2 (`--gamma`) : positionnement gamma des dealers au second test
+   (régime frein / accélérateur, mur du côté de l'excès : distance à
+   l'extrême et taille), reconstitué depuis l'open interest Databento
+   (gex/dbgamma.py), même découpage apprentissage / test.
 
 Source du flux, présentée À PART :
 - « vérifié » : barres étiquetées (`mult_source` : correctif ou capture
@@ -64,7 +68,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from gex import excess, store  # noqa: E402
+from gex import dbgamma, excess, rates, store  # noqa: E402
 from gex.config import SETTINGS  # noqa: E402
 from gex.edge_report import _epoch, _straddle_em  # noqa: E402
 from gex.flowtape import FUTURE_POINT_VALUE  # noqa: E402
@@ -213,7 +217,8 @@ def _read(flow: pd.DataFrame, t: float, excess_dir: int) -> tuple[str, str, str]
 
 def session_events(day: str, px_ts: np.ndarray, px: np.ndarray, flow: pd.DataFrame,
                    excess_pts: float, swing_pts: float, horizon: int,
-                   fine: pd.DataFrame | None = None) -> list[dict]:
+                   fine: pd.DataFrame | None = None,
+                   chain: pd.DataFrame | None = None) -> list[dict]:
     rows = []
     for e in excess.find_excesses(px, px, excess_pts, swing_pts):
         i = e["i"]
@@ -235,10 +240,20 @@ def session_events(day: str, px_ts: np.ndarray, px: np.ndarray, flow: pd.DataFra
                              "attente_min": (px_ts[t] - px_ts[i]) / 60,
                              **_phases(flow, px_ts[e["swing_i"]], px_ts[rt["extreme_i"]],
                                        px_ts[t], e["dir"], fine),
+                             **_gamma(chain, px_ts[t], px[t], rt["extreme"], e["dir"]),
                              **excess.retest_outcome(px, px, t, rt["extreme"], -e["dir"],
                                                      ENTRY_OFFSET, horizon, ts=px_ts)}
         rows.append(row)
     return rows
+
+
+def _gamma(chain: pd.DataFrame | None, t: float, spot: float, extreme: float,
+           excess_dir: int) -> dict:
+    """Piste 2 : positionnement gamma au second test (colonnes g_*)."""
+    if chain is None:
+        return {}
+    v = dbgamma.view(chain, t, spot, extreme, excess_dir, rates.current_rate())
+    return {f"g_{k}": val for k, val in v.items()}
 
 
 def _phases(flow: pd.DataFrame, t_swing: float, t_ext: float, t_test: float,
@@ -353,6 +368,56 @@ def support_analysis(rt: pd.DataFrame, split_day: str) -> list[str]:
     return lines
 
 
+def gamma_analysis(rt: pd.DataFrame, split_day: str, sessions: list[dict]) -> list[str]:
+    """Piste 2 : régime (frein / accélérateur), mur du côté de l'excès (distance
+    à l'extrême, taille). Bornes calées sur l'apprentissage, lecture sur le
+    test, comme la piste 1."""
+    chains = [s["chain"] for s in sessions if s.get("chain") is not None
+              and not s["chain"].empty]
+    if rt.empty or "g_regime" not in rt or not chains:
+        return ["_(aucune chaîne reconstituée : open interest ou définitions absents)_", ""]
+    src = pd.concat(chains)["iv_source"].value_counts(normalize=True).mul(100).round(1)
+    known = rt[rt["g_regime"] != "inconnu"]
+    lines = [f"Chaînes reconstituées : {len(chains)} séances sur {len(sessions)} ; seconds "
+             f"tests avec un positionnement : {len(known)} sur {len(rt)}. Origine de la "
+             "volatilité (% des options) : "
+             + ", ".join(f"{k} {v}" for k, v in src.items()) + ".", "",
+             "Régime : GEX net des dealers au prix du second test (> 0 frein, < 0 "
+             "accélérateur). Mur : Call Wall (excès haussier) ou Put Support (excès baissier) "
+             "au sens du tableau de bord ; distance = mur − extrême dans le sens de l'excès "
+             "(négative : l'extrême a déjà dépassé le mur) ; taille = part du GEX brut.", ""]
+    train, test = known[known["day"] < split_day], known[known["day"] >= split_day]
+    if train["day"].nunique() < 20 or test["day"].nunique() < 20:
+        return lines + [f"_Trop peu de séances de part et d'autre du {split_day}._", ""]
+    pos = train.loc[train["g_dist_mur"] >= 0, "g_dist_mur"]
+    ed, es = excess.tercile_edges(pos), excess.tercile_edges(train["g_part_mur"])
+
+    def mur(x):
+        if x is None or np.isnan(x):
+            return "pas de mur"
+        if x < 0:
+            return "mur déjà dépassé"
+        return {"bas": "mur tout proche", "milieu": "mur proche",
+                "haut": "mur loin"}[excess.tercile(x, ed)]
+    size = {"bas": "petit mur", "milieu": "mur moyen", "haut": "gros mur", "": "pas de mur"}
+    test = test.assign(
+        regime_fade=test["g_regime"] + " / fade " + np.where(test["sens"] == "haussier",
+                                                             "vendeur", "acheteur"),
+        position_mur=test["g_dist_mur"].map(mur),
+        taille_mur=test["g_part_mur"].map(lambda x: size[excess.tercile(x, es)]))
+    lines += [f"Bornes (apprentissage) : distance au mur [{ed[0]:.0f} ; {ed[1]:.0f}] pts, "
+              f"taille [{es[0]:.3f} ; {es[1]:.3f}] du GEX brut.", ""]
+    for key, title, order in (
+            ("g_regime", "régime", ("frein", "accélérateur")),
+            ("regime_fade", "régime et sens du fade", ()),
+            ("position_mur", "position du mur par rapport à l'extrême",
+             ("mur déjà dépassé", "mur tout proche", "mur proche", "mur loin", "pas de mur")),
+            ("taille_mur", "taille du mur", tuple(size.values()))):
+        lines += [f"#### TEST — {title}", "",
+                  _table(excess.summarize_retests(test, key=key, order=order)), ""]
+    return lines
+
+
 def retests(ev: pd.DataFrame) -> pd.DataFrame:
     if ev.empty or "retest" not in ev:
         return pd.DataFrame()
@@ -365,9 +430,29 @@ def _tick_days(symbol: str) -> set[str]:
     return set(store.tick_days(symbol)) | hist
 
 
+def _prev_close(symbol: str, day: str, all_days: list[str], cache: dict):
+    """(prix du NQ au règlement 16h00 ET de la séance précédente, heure)."""
+    prev = [d for d in all_days if d < day]
+    if not prev:
+        return None, None
+    p = prev[-1]
+    if p not in cache:
+        cache.clear()
+        cache[p] = session_path(symbol, p)
+    ts, px = cache[p]
+    st = dbgamma.settle_ts(p)
+    j = int(np.searchsorted(ts, st, side="right")) - 1 if len(ts) else -1
+    return (float(px[j]), st) if j >= 0 and st - ts[j] <= 900 else (None, None)
+
+
+def gamma_context(raw: Path | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(définitions, statistiques) Databento pour la piste 2."""
+    return dbgamma.load_raw(raw or SETTINGS.data_dir / "import" / "databento_raw")
+
+
 def load_sessions(symbol: str, use_old: bool = True, flux: str = "live",
-                  start: str | None = None,
-                  end: str | None = None) -> tuple[list[dict], float | None]:
+                  start: str | None = None, end: str | None = None,
+                  gamma: bool = False) -> tuple[list[dict], float | None]:
     if flux != "live":
         # tape reconstruit : une séance non étiquetée l'est pour un sous-jacent
         # incertain (roll), pas pour une question d'échelle — jamais utilisée
@@ -378,6 +463,15 @@ def load_sessions(symbol: str, use_old: bool = True, flux: str = "live",
               if d in tdays
               or (date.fromisoformat(d) - timedelta(days=1)).isoformat() in tdays}
     excluded = EXCLUDED_DAYS if flux == "live" else set()
+    defs = stats = None
+    if gamma:
+        defs, stats = gamma_context()
+        if defs.empty or stats.empty:
+            raise SystemExit("Piste 2 : il faut les fichiers Databento `definition` ET "
+                             "`statistics` dans data/import/databento_raw/")
+    all_days = sorted(d for d in _tick_days(symbol)
+                      if date.fromisoformat(d).weekday() < 5)
+    prev_cache: dict = {}
     out = []
     for day in sorted(wanted - excluded):
         if date.fromisoformat(day).weekday() >= 5 or (start and day < start) \
@@ -394,8 +488,13 @@ def load_sessions(symbol: str, use_old: bool = True, flux: str = "live",
             fine = session_flow(symbol, day, px_ts, px, "databento_1s")
             if not fine.empty:
                 fine = fine[fine["labeled"].astype(bool)].assign(ok=True, grp="x1")
+        chain = None
+        if gamma:
+            close, close_ts = _prev_close(symbol, day, all_days, prev_cache)
+            chain = dbgamma.session_chain(stats, defs, day, close, close_ts,
+                                          rates.current_rate())
         out.append({"day": day, "px_ts": px_ts, "px": px, "flow": flow, "fine": fine,
-                    "em": _straddle_em(symbol, day)})
+                    "chain": chain, "em": _straddle_em(symbol, day)})
     threshold = calibrate(out)
     for s in out:
         s["flow"] = apply_scale(s["flow"], threshold, use_old)
@@ -410,7 +509,7 @@ def run(sessions: list[dict], variant: str, excess_pts: float, swing_pts: float,
     if variant == "A":
         for s in sessions:
             rows += session_events(s["day"], s["px_ts"], s["px"], s["flow"], excess_pts,
-                                   swing_pts, horizon, s.get("fine"))
+                                   swing_pts, horizon, s.get("fine"), s.get("chain"))
         return pd.DataFrame(rows), info
     ems = [s["em"] for s in sessions if s["em"]]
     if not ems:
@@ -501,8 +600,9 @@ def _retest_block(rt: pd.DataFrame) -> list[str]:
 
 def report(symbol: str, excess_pts: float, swing_pts: float, horizon: int,
            use_old: bool = True, flux: str = "live", start: str | None = None,
-           end: str | None = None, split_day: str | None = None) -> str:
-    sessions, threshold = load_sessions(symbol, use_old, flux, start, end)
+           end: str | None = None, split_day: str | None = None,
+           gamma: bool = False) -> str:
+    sessions, threshold = load_sessions(symbol, use_old, flux, start, end, gamma)
     lines = [f"# Excès et soutien des market makers — {symbol}"
              + (" (tape reconstruit Databento)" if flux == "databento" else ""),
              f"_{datetime.now(ET):%Y-%m-%d %H:%M} — prix tick par tick ; excès {excess_pts:g} "
@@ -548,6 +648,9 @@ def report(symbol: str, excess_pts: float, swing_pts: float, horizon: int,
     lines += ["## Piste 1 — le soutien a-t-il faibli entre l'excès et le second test ?", ""]
     lines += support_analysis(rt if flux != "live" or rt.empty
                               else rt[rt["flux"] == "vérifié"], split)
+    if gamma:
+        lines += ["## Piste 2 — positionnement gamma au second test", ""]
+        lines += gamma_analysis(rt, split, sessions)
     evb, info = run(sessions, "B", excess_pts, swing_pts, horizon)
     lines += ["## Variante B — en EM (ensemble, au franchissement)", ""]
     if info.get("erreur"):
@@ -577,15 +680,18 @@ def main(argv: list[str] | None = None) -> None:
                     help="tape lu par le voyant : live (défaut) ou databento (reconstruit)")
     ap.add_argument("--start", help="première séance (AAAA-MM-JJ)")
     ap.add_argument("--end", help="dernière séance (AAAA-MM-JJ)")
-    ap.add_argument("--split", help="première séance de TEST pour la piste 1 "
+    ap.add_argument("--split", help="première séance de TEST pour les pistes 1 et 2 "
                                     "(défaut : séance du milieu)")
+    ap.add_argument("--gamma", action="store_true",
+                    help="piste 2 : positionnement gamma (fichiers Databento `statistics`)")
     args = ap.parse_args(argv)
     outdir = SETTINGS.data_dir / "reports"
     outdir.mkdir(parents=True, exist_ok=True)
     for sym in args.symbols:
         md = report(sym.upper(), args.excess, args.swing, args.horizon,
                     use_old=not args.verifiees_seulement, flux=args.flux,
-                    start=args.start, end=args.end, split_day=args.split)
+                    start=args.start, end=args.end, split_day=args.split,
+                    gamma=args.gamma)
         tag = ("_databento" if args.flux == "databento" else "") \
             + (f"_{args.start or 'debut'}_{args.end or 'fin'}" if args.start or args.end else "")
         path = outdir / f"exces_{sym.upper()}{tag}_{datetime.now(ET):%Y-%m-%d}.md"
