@@ -446,8 +446,24 @@ def _prev_close(symbol: str, day: str, all_days: list[str], cache: dict):
 
 
 def gamma_context(raw: Path | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """(définitions, statistiques) Databento pour la piste 2."""
-    return dbgamma.load_raw(raw or SETTINGS.data_dir / "import" / "databento_raw")
+    """(définitions, statistiques) Databento pour la piste 2. La première
+    lecture des fichiers bruts (plusieurs Go) est longue : seules les colonnes
+    utiles sont gardées dans data/import/databento_derived/, relues tant
+    qu'aucun fichier brut n'est plus récent."""
+    raw = raw or SETTINGS.data_dir / "import" / "databento_raw"
+    cache = SETTINGS.data_dir / "import" / "databento_derived"
+    files = list(raw.glob("*.dbn.zst")) + list(raw.glob("*.dbn")) if raw.exists() else []
+    newest = max((f.stat().st_mtime for f in files), default=0.0)
+    cd, cs = cache / "nq_option_definitions.parquet", cache / "nq_option_statistics.parquet"
+    if cd.exists() and cs.exists() and min(cd.stat().st_mtime, cs.stat().st_mtime) >= newest:
+        return pd.read_parquet(cd), pd.read_parquet(cs)
+    print("Piste 2 : lecture des fichiers bruts Databento (une seule fois, plusieurs minutes)…")
+    defs, stats = dbgamma.load_raw(raw)
+    if not defs.empty and not stats.empty:
+        cache.mkdir(parents=True, exist_ok=True)
+        defs.to_parquet(cd, index=False)
+        stats.to_parquet(cs, index=False)
+    return defs, stats
 
 
 def load_sessions(symbol: str, use_old: bool = True, flux: str = "live",

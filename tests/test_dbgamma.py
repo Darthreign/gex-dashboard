@@ -130,3 +130,29 @@ def test_rapport_piste2(tmp_path, monkeypatch):
                         lambda raw=None: (pd.DataFrame(), pd.DataFrame()))
     with pytest.raises(SystemExit):
         excess_report.load_sessions("NQ", gamma=True)
+
+
+def test_cache_des_fichiers_bruts(tmp_path, monkeypatch):
+    from gex.config import SETTINGS
+    monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import excess_report
+    raw = tmp_path / "import" / "databento_raw"
+    raw.mkdir(parents=True)
+    (raw / "x.dbn.zst").write_bytes(b"")
+    calls = []
+    stats = _stats({1: 10.0})
+
+    def fake(r):
+        calls.append(r)
+        return _defs(), stats
+    monkeypatch.setattr(excess_report.dbgamma, "load_raw", fake)
+    d1, s1 = excess_report.gamma_context()
+    d2, s2 = excess_report.gamma_context()                 # relu depuis le cache
+    assert len(calls) == 1 and len(d2) == len(d1) and len(s2) == len(s1)
+    import os
+    import time
+    later = time.time() + 10
+    os.utime(raw / "x.dbn.zst", (later, later))            # fichier brut plus récent
+    excess_report.gamma_context()
+    assert len(calls) == 2
