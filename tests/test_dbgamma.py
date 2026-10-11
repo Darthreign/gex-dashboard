@@ -180,3 +180,4 @@ def test_stabilite_et_duree_dans_lanalyse():
     lines = "\n".join(excess_report.gamma_analysis(rt, "2026-04-01", [{"chain": chain}]))
     assert "stabilité par trimestre" in lines and "2026Q1" in lines and "2026Q2" in lines
     assert "accélérateur / réaction" in lines and "APPRENTISSAGE — régime" in lines
+    assert "APPRENTISSAGE — régime et durée" in lines

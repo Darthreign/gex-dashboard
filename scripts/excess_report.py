@@ -330,8 +330,14 @@ def support_analysis(rt: pd.DataFrame, split_day: str) -> list[str]:
                 "haut": "réaction lente", "": "inconnue"}
         test = test.assign(duree_t=test["duree_reaction_s"].map(
             lambda x: dlab[excess.tercile(x, ed)]))
-        lines += ["#### TEST — durée de la réaction (prix seul : extrême -> second test)", "",
+        tr_d = train.assign(duree_t=train["duree_reaction_s"].map(
+            lambda x: dlab[excess.tercile(x, ed)]))
+        lines += ["#### Durée de la réaction (prix seul : extrême -> second test)", "",
                   f"Terciles calés sur l'apprentissage : [{ed[0]:.0f} s ; {ed[1]:.0f} s].", "",
+                  "APPRENTISSAGE :", "",
+                  _table(excess.summarize_retests(tr_d, key="duree_t",
+                                                  order=tuple(dlab.values()))), "",
+                  "TEST :", "",
                   _table(excess.summarize_retests(test, key="duree_t",
                                                   order=tuple(dlab.values()))), ""]
     ei = excess.tercile_edges(train["intensite"]) if "intensite" in train else (np.nan, np.nan)
@@ -427,9 +433,13 @@ def gamma_analysis(rt: pd.DataFrame, split_day: str, sessions: list[dict]) -> li
     if "duree_reaction_s" in train:
         ed = excess.tercile_edges(train["duree_reaction_s"])
         dl = {"bas": "express", "milieu": "normale", "haut": "lente", "": "inconnue"}
-        test = test.assign(regime_duree=test["g_regime"] + " / réaction " + test[
-            "duree_reaction_s"].map(lambda x: dl[excess.tercile(x, ed)]))
-        lines += ["#### TEST — régime et durée de la réaction", "",
+        def rd(df):
+            return df.assign(regime_duree=df["g_regime"] + " / réaction " + df[
+                "duree_reaction_s"].map(lambda x: dl[excess.tercile(x, ed)]))
+        test = rd(test)
+        lines += ["#### APPRENTISSAGE — régime et durée de la réaction (contrôle)", "",
+                  _table(excess.summarize_retests(rd(train), key="regime_duree", order=())),
+                  "", "#### TEST — régime et durée de la réaction", "",
                   _table(excess.summarize_retests(test, key="regime_duree", order=())), ""]
     for key, title, order in (
             ("g_regime", "régime", ("frein", "accélérateur")),
