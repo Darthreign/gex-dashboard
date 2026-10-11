@@ -80,18 +80,26 @@ def compare(rows: pd.DataFrame, defs: pd.DataFrame, stats: pd.DataFrame) -> pd.D
         if chain is None or chain.empty:
             continue
         em = _straddle_em(SYMBOL, session)
+        px_ts, px = excess_report.session_path(SYMBOL, session)
         for r in g.itertuples():
             s = float(r.spot)
-            v = dbgamma.view(chain, r.ts.timestamp(), s, s, 1, rate)
-            emu = dbgamma.regimes(chain, r.ts.timestamp(), s, rate)
+            # le spot du tableau de bord peut appartenir à un autre trimestriel
+            # que le continu de ticks (semaine d'échéance) : tout est ramené au
+            # prix du continu au même instant, comme dans l'étude
+            t = r.ts.timestamp()
+            j = int(np.searchsorted(px_ts, t, side="right")) - 1 if len(px_ts) else -1
+            cont = float(px[j]) if j >= 0 and t - px_ts[j] <= 300 else s
+            offset = cont - s
+            v = dbgamma.view(chain, t, cont, cont, 1, rate)
+            emu = dbgamma.regimes(chain, t, cont, rate)
             zg = _num(getattr(r, "zero_gamma", None))
             gex0 = _num(getattr(r, "net_gex_0dte", None))
             zone = edge.regime_zone(s, zg, em, gex0, band)[0] if em else "inconnu"
-            flip_db = s - v["dist_flip"] if np.isfinite(v["dist_flip"]) else np.nan
+            flip_db = cont - v["dist_flip"] if np.isfinite(v["dist_flip"]) else np.nan
             out.append({
-                "seance": session, "ts": r.ts, "spot": s,
+                "seance": session, "ts": r.ts, "spot": cont, "ecart_contrat": offset,
                 "gex_tdb": _num(r.net_gex), "gex_db": v["gex_net"],
-                "flip_tdb": zg, "flip_db": flip_db,
+                "flip_tdb": zg + offset if zg is not None else None, "flip_db": flip_db,
                 "zone_scalp": zone, "regime_etude": v["regime"],
                 "zone_recalculee": emu["regime_tdb"], "flip_recalcule": emu["flip_tdb"]})
     return pd.DataFrame(out)
@@ -117,7 +125,9 @@ def summarize(c: pd.DataFrame) -> dict:
             "ecart_flip_med_pts": float((f["flip_tdb"] - f["flip_db"]).abs().median())
             if len(f) else np.nan,
             "zone_scalp_egale_regime_%": 100 * zone,
-            "zone_scalp_transition_%": 100 * float((c["zone_scalp"] == "transition").mean())}
+            "zone_scalp_transition_%": 100 * float((c["zone_scalp"] == "transition").mean()),
+            "spot_autre_contrat_%": 100 * float((c["ecart_contrat"].abs() > 50).mean())
+            if "ecart_contrat" in c else np.nan}
 
 
 def per_session(c: pd.DataFrame) -> pd.DataFrame:
