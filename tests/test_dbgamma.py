@@ -125,6 +125,7 @@ def test_rapport_piste2(tmp_path, monkeypatch):
     assert rt["g_mur"] == 19850.0 and rt["g_dist_mur"] == pytest.approx(19890 - 19850, abs=1)
     md = excess_report.report("NQ", 100, 60, 120, gamma=True)
     assert "Piste 2" in md and "Chaînes reconstituées : 1 séances" in md
+    assert rt["duree_reaction_s"] > 0
     # sans OI : arrêt explicite
     monkeypatch.setattr(excess_report, "gamma_context",
                         lambda raw=None: (pd.DataFrame(), pd.DataFrame()))
@@ -156,3 +157,26 @@ def test_cache_des_fichiers_bruts(tmp_path, monkeypatch):
     os.utime(raw / "x.dbn.zst", (later, later))            # fichier brut plus récent
     excess_report.gamma_context()
     assert len(calls) == 2
+
+
+def test_stabilite_et_duree_dans_lanalyse():
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import excess_report
+    from gex import excess
+    rng = np.random.default_rng(1)
+    days = [f"2026-{m:02d}-{d:02d}" for m in (1, 2, 4, 5) for d in range(1, 13)]
+    rows = []
+    for d in days:
+        for _ in range(3):
+            reg = rng.choice(["frein", "accélérateur"])
+            rows.append({"day": d, "sens": rng.choice(["haussier", "baissier"]),
+                         "g_regime": reg, "g_dist_mur": rng.uniform(-50, 600),
+                         "g_part_mur": rng.uniform(0.01, 0.1),
+                         "duree_reaction_s": rng.uniform(5, 900),
+                         "continuation": rng.uniform(0, 150), "rempli": True, "mae": 10.0,
+                         **{f"hit_{k:g}": True for k in excess.TARGETS}})
+    rt = pd.DataFrame(rows)
+    chain = _chain([(20000, "C", 1)])
+    lines = "\n".join(excess_report.gamma_analysis(rt, "2026-04-01", [{"chain": chain}]))
+    assert "stabilité par trimestre" in lines and "2026Q1" in lines and "2026Q2" in lines
+    assert "accélérateur / réaction" in lines and "APPRENTISSAGE — régime" in lines

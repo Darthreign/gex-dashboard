@@ -238,6 +238,8 @@ def session_events(day: str, px_ts: np.ndarray, px: np.ndarray, flow: pd.DataFra
                              "sens": row["sens"], "couleur": c2, "nuance": n2, "flux": src2,
                              "couleur_exces": color,
                              "attente_min": (px_ts[t] - px_ts[i]) / 60,
+                             # extrême -> second test, sur le prix seul (tick par tick)
+                             "duree_reaction_s": px_ts[t] - px_ts[rt["extreme_i"]],
                              **_phases(flow, px_ts[e["swing_i"]], px_ts[rt["extreme_i"]],
                                        px_ts[t], e["dir"], fine),
                              **_gamma(chain, px_ts[t], px[t], rt["extreme"], e["dir"]),
@@ -322,6 +324,16 @@ def support_analysis(rt: pd.DataFrame, split_day: str) -> list[str]:
                   f"(fade = {'vente' if sens == 'haussier' else 'achat'})", "",
                   _table(excess.summarize_retests(test[test["sens"] == sens], key="situation",
                                                   order=excess.SITUATIONS)), ""]
+    if "duree_reaction_s" in train:
+        ed = excess.tercile_edges(train["duree_reaction_s"])
+        dlab = {"bas": "réaction express", "milieu": "réaction normale",
+                "haut": "réaction lente", "": "inconnue"}
+        test = test.assign(duree_t=test["duree_reaction_s"].map(
+            lambda x: dlab[excess.tercile(x, ed)]))
+        lines += ["#### TEST — durée de la réaction (prix seul : extrême -> second test)", "",
+                  f"Terciles calés sur l'apprentissage : [{ed[0]:.0f} s ; {ed[1]:.0f} s].", "",
+                  _table(excess.summarize_retests(test, key="duree_t",
+                                                  order=tuple(dlab.values()))), ""]
     ei = excess.tercile_edges(train["intensite"]) if "intensite" in train else (np.nan, np.nan)
     if not np.isnan(ei[0]):
         test = test.assign(intensite_t=test["intensite"].map(
@@ -407,6 +419,18 @@ def gamma_analysis(rt: pd.DataFrame, split_day: str, sessions: list[dict]) -> li
         taille_mur=test["g_part_mur"].map(lambda x: size[excess.tercile(x, es)]))
     lines += [f"Bornes (apprentissage) : distance au mur [{ed[0]:.0f} ; {ed[1]:.0f}] pts, "
               f"taille [{es[0]:.3f} ; {es[1]:.3f}] du GEX brut.", ""]
+    lines += ["#### APPRENTISSAGE — régime (pour vérifier que l'effet existe des deux côtés)",
+              "", _table(excess.summarize_retests(train, key="g_regime",
+                                                  order=("frein", "accélérateur"))), ""]
+    st = stability(known, key="g_regime", order=("frein", "accélérateur"))
+    lines += ["#### Régime — stabilité par trimestre (toutes séances)", "", _table(st), ""]
+    if "duree_reaction_s" in train:
+        ed = excess.tercile_edges(train["duree_reaction_s"])
+        dl = {"bas": "express", "milieu": "normale", "haut": "lente", "": "inconnue"}
+        test = test.assign(regime_duree=test["g_regime"] + " / réaction " + test[
+            "duree_reaction_s"].map(lambda x: dl[excess.tercile(x, ed)]))
+        lines += ["#### TEST — régime et durée de la réaction", "",
+                  _table(excess.summarize_retests(test, key="regime_duree", order=())), ""]
     for key, title, order in (
             ("g_regime", "régime", ("frein", "accélérateur")),
             ("regime_fade", "régime et sens du fade", ()),
@@ -579,7 +603,7 @@ def _block(ev: pd.DataFrame) -> list[str]:
     return lines
 
 
-def stability(rt: pd.DataFrame) -> pd.DataFrame:
+def stability(rt: pd.DataFrame, key: str = "couleur", order=excess.COLORS) -> pd.DataFrame:
     """Au second test, par trimestre : nombre de cas et part des
     continuations d'au moins 50 pts, par couleur — un effet réel doit se
     retrouver d'un trimestre à l'autre, pas seulement en moyenne."""
@@ -587,9 +611,9 @@ def stability(rt: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     q = pd.to_datetime(rt["day"]).dt.to_period("Q").astype(str)
     g = rt.assign(trimestre=q, c50=100 * (rt["continuation"] >= 50))
-    n = g.pivot_table(index="trimestre", columns="couleur", values="c50", aggfunc="size")
-    pct = g.pivot_table(index="trimestre", columns="couleur", values="c50", aggfunc="mean")
-    cols = [c for c in excess.COLORS if c in n.columns]
+    n = g.pivot_table(index="trimestre", columns=key, values="c50", aggfunc="size")
+    pct = g.pivot_table(index="trimestre", columns=key, values="c50", aggfunc="mean")
+    cols = [c for c in order if c in n.columns] or list(n.columns)
     return pd.concat({"n": n[cols], "cont>=50_%": pct[cols]}, axis=1)
 
 
