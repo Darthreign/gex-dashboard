@@ -447,10 +447,14 @@ def gamma_analysis(rt: pd.DataFrame, split_day: str, sessions: list[dict]) -> li
         lines += ["#### Le régime selon trois définitions (même instant, même prix)", "",
                   "`45j` = étude (toutes échéances <= 45 j) ; `tdb` = zone /scalp recalculée "
                   "comme au tableau de bord (Gamma Flip de la chaîne <= 14 j ± 8 %, GEX 0DTE, "
-                  "bande ± 0,15 EM) ; `0dte` = échéances du jour seules.", ""]
+                  "bande ± 0,15 EM) ; `tdb2` = la même zone sur la chaîne de la collecte "
+                  "rapide (2 jours de bourse) ; `0dte` = échéances du jour seules.", ""]
         order3 = ("frein", "transition", "accélérateur", "inconnu")
         for key, name in (("g_regime_45j", "étude (45 j)"), ("g_regime_tdb", "zone /scalp"),
+                          ("g_regime_tdb2", "zone /scalp, collecte rapide (2 j de bourse)"),
                           ("g_regime_0dte", "0DTE seul")):
+            if key not in train:
+                continue
             for part, df in (("APPRENTISSAGE", train), ("TEST", test)):
                 lines += [f"{part} — {name} :", "",
                           _table(excess.summarize_retests(df, key=key, order=order3)), ""]

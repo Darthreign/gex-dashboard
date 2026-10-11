@@ -47,6 +47,7 @@ MONTHS = {"H": 3, "M": 6, "U": 9, "Z": 12}
 # définition du tableau de bord (futopt.filter_chain, collecte large) et de sa
 # zone /scalp (edge.regime_zone)
 TDB_WINDOW, TDB_MAX_DAYS = 0.08, 14
+TDB_FAST_TRADING_DAYS = 2        # collecte rapide (futopt.FAST_TRADING_DAYS)
 MULT = 20.0
 SETTLE_ET = time(16, 0)          # règlement des contrats sur indices CME
 
@@ -242,7 +243,8 @@ def _equiv_strike(chain: pd.DataFrame) -> np.ndarray:
 
 def select(chain: pd.DataFrame, t_epoch: float, spot: float, mode: str) -> pd.DataFrame:
     """Sous-chaîne selon la définition : « 45j » (étude : échéances <= 45 j,
-    strikes ± 10 %), « tdb » (tableau de bord : <= 14 jours calendaires,
+    strikes ± 10 %), « tdb » (tableau de bord, collecte large : <= 14 jours
+    calendaires, ± 8 %), « tdb2 » (collecte rapide : <= 2 jours de bourse,
     ± 8 %), « 0dte » (échéances du jour ET de t)."""
     k = _equiv_strike(chain)
     exp = pd.to_datetime(chain["expiration"], utc=True)
@@ -253,6 +255,17 @@ def select(chain: pd.DataFrame, t_epoch: float, spot: float, mode: str) -> pd.Da
         keep = (np.abs(k - spot) <= TDB_WINDOW * spot) & (
             exp.dt.tz_convert(ET).dt.normalize()
             <= today + pd.Timedelta(days=TDB_MAX_DAYS)).to_numpy()
+    elif mode == "tdb2":
+        # fenêtre de la collecte RAPIDE, celle que /scalp lit entre deux
+        # collectes larges : échéances jusqu'à 2 jours de BOURSE
+        d = pd.Timestamp(t_epoch, unit="s", tz="UTC").tz_convert(ET).date()
+        left = TDB_FAST_TRADING_DAYS
+        while left:
+            d += timedelta(days=1)
+            if d.weekday() < 5:
+                left -= 1
+        keep = (np.abs(k - spot) <= TDB_WINDOW * spot) & (
+            exp.dt.tz_convert(ET).dt.date <= d).to_numpy()
     elif mode == "0dte":
         day = pd.Timestamp(t_epoch, unit="s", tz="UTC").tz_convert(ET).date()
         keep = (np.abs(k - spot) <= TDB_WINDOW * spot) & (
@@ -300,10 +313,12 @@ def regimes(chain: pd.DataFrame, t_epoch: float, spot: float, rate: float) -> di
     - « tdb » : la ZONE /scalp, recalculée comme au tableau de bord
       (edge.regime_zone : Gamma Flip de la chaîne <= 14 j ± 8 %, GEX 0DTE,
       bande ± 0,15 EM) — frein / transition / accélérateur ;
+    - « tdb2 » : la même zone sur la fenêtre de la collecte rapide (2 jours
+      de bourse), celle que /scalp lit le plus souvent en direct ;
     - « 0dte » : signe du GEX des seules échéances du jour."""
     from . import edge
-    out = {"regime_45j": "inconnu", "regime_tdb": "inconnu", "regime_0dte": "inconnu",
-           "flip_tdb": np.nan}
+    out = {"regime_45j": "inconnu", "regime_tdb": "inconnu", "regime_tdb2": "inconnu",
+           "regime_0dte": "inconnu", "flip_tdb": np.nan}
     if chain is None or chain.empty:
         return out
     c45 = select(chain, t_epoch, spot, "45j")
@@ -314,12 +329,17 @@ def regimes(chain: pd.DataFrame, t_epoch: float, spot: float, rate: float) -> di
     gex0 = _net_and_flip(c0, t_epoch, spot, rate)[0] if not c0.empty else None
     if gex0 is not None:
         out["regime_0dte"] = "frein" if gex0 > 0 else "accélérateur"
-    ct = select(chain, t_epoch, spot, "tdb")
-    if not ct.empty:
+    em = None
+    for mode, key in (("tdb", "regime_tdb"), ("tdb2", "regime_tdb2")):
+        ct = select(chain, t_epoch, spot, mode)
+        if ct.empty:
+            continue
         _, flip, _ = _net_and_flip(ct, t_epoch, spot, rate)
-        out["flip_tdb"] = flip if flip is not None else np.nan
-        em = expected_move(chain, t_epoch, spot, rate)
+        if mode == "tdb":
+            out["flip_tdb"] = flip if flip is not None else np.nan
+        if em is None:
+            em = expected_move(chain, t_epoch, spot, rate)
         zone, _ = edge.regime_zone(spot, flip, em or 0.0, gex0,
                                    edge.EdgeParams().flip_band_em)
-        out["regime_tdb"] = {"accelerateur": "accélérateur"}.get(zone, zone)
+        out[key] = {"accelerateur": "accélérateur"}.get(zone, zone)
     return out

@@ -216,10 +216,12 @@ def test_trois_definitions_du_regime():
                       "iv": [0.2, 0.2, 0.2], "iv_source": "publiée", "fwd": 1.0})
     assert len(dbgamma.select(c, t, 20000, "0dte")) == 1
     assert len(dbgamma.select(c, t, 20000, "tdb")) == 2
+    assert len(dbgamma.select(c, t, 20000, "tdb2")) == 2     # mer. -> ven. = 2 j de bourse
     assert len(dbgamma.select(c, t, 20000, "45j")) == 3
     r = dbgamma.regimes(c, t, 20000.0, R)
     assert r["regime_0dte"] == "frein"                     # seul le call du jour
     assert r["regime_45j"] == "accélérateur"               # le gros put lointain domine
     assert r["regime_tdb"] in ("frein", "transition", "accélérateur")
+    assert r["regime_tdb2"] in ("frein", "transition", "accélérateur")
     em = dbgamma.expected_move(c, t, 20000.0, R)
     assert 0 < em < 200                                    # straddle 0DTE, quelques heures
