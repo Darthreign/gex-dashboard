@@ -30,7 +30,9 @@ d'options NQ (le 25/09/2026 est exclu) :
 7. PISTE 1 : soutien des dealers pendant la jambe de l'excès (dernier swing
    -> extrême) et pendant la réaction (extrême -> second test), en terciles
    calés sur la première moitié des séances, résultat lu sur la seconde
-   (`--split` pour choisir la coupure).
+   (`--split` pour choisir la coupure). Avec `--flux databento` et le tape à
+   la seconde (data/tape_databento_1s), bornes exactes à la seconde, et flux
+   des 30 / 60 / 120 dernières secondes avant le second test.
 
 Source du flux, présentée À PART :
 - « vérifié » : barres étiquetées (`mult_source` : correctif ou capture
@@ -75,7 +77,9 @@ REACTION_PTS, RETEST_PTS, ENTRY_OFFSET = 15.0, 10.0, 3.0
 WINDOW_S = 15 * 60                    # fenêtres du voyant : 5 + 10 min
 CASH = (9 * 60 + 30, 16 * 60)
 SOURCES = ("vérifié", "delta moyen")
-TAPE_ROOTS = {"live": "tape", "databento": "tape_databento"}
+TAPE_ROOTS = {"live": "tape", "databento": "tape_databento",
+              "databento_1s": "tape_databento_1s"}
+FINE_WINDOWS_S = (30, 60, 120)        # flux lu juste avant le second test
 
 
 def _load_tape(symbol: str, day: str, flux: str) -> pd.DataFrame:
@@ -120,7 +124,7 @@ def session_flow(symbol: str, day: str, px_ts: np.ndarray, px: np.ndarray,
                  flux: str = "live") -> pd.DataFrame:
     """Barres de tape de la séance : epoch de début de minute, net, brut,
     `labeled` (multiplicateur vérifié), et delta moyen implicite."""
-    cols = ["ts", "net", "gross", "labeled", "implied", "usable"]
+    cols = ["ts", "net", "gross", "labeled", "implied", "usable", "prints"]
     start, end = _bounds(day)
     parts = [_load_tape(symbol, d, flux) for d in
              ((date.fromisoformat(day) - timedelta(days=1)).isoformat(), day)]
@@ -156,9 +160,11 @@ def session_flow(symbol: str, day: str, px_ts: np.ndarray, px: np.ndarray,
     with np.errstate(divide="ignore", invalid="ignore"):
         implied = gross / (contracts * spot * mult)
     usable = clean & (contracts > 0) & np.isfinite(implied) & (gross > 0)
+    prints = tape["delta_prints"].to_numpy(float) if "delta_prints" in tape \
+        else np.full(len(tape), np.nan)
     return pd.DataFrame({"ts": epoch, "net": tape[HEDGE].sum(axis=1).to_numpy(),
                          "gross": gross, "labeled": labeled, "implied": implied,
-                         "usable": usable})
+                         "usable": usable, "prints": prints})
 
 
 def calibrate(sessions: list[dict]) -> float | None:
@@ -206,7 +212,8 @@ def _read(flow: pd.DataFrame, t: float, excess_dir: int) -> tuple[str, str, str]
 
 
 def session_events(day: str, px_ts: np.ndarray, px: np.ndarray, flow: pd.DataFrame,
-                   excess_pts: float, swing_pts: float, horizon: int) -> list[dict]:
+                   excess_pts: float, swing_pts: float, horizon: int,
+                   fine: pd.DataFrame | None = None) -> list[dict]:
     rows = []
     for e in excess.find_excesses(px, px, excess_pts, swing_pts):
         i = e["i"]
@@ -227,7 +234,7 @@ def session_events(day: str, px_ts: np.ndarray, px: np.ndarray, flow: pd.DataFra
                              "couleur_exces": color,
                              "attente_min": (px_ts[t] - px_ts[i]) / 60,
                              **_phases(flow, px_ts[e["swing_i"]], px_ts[rt["extreme_i"]],
-                                       px_ts[t], e["dir"]),
+                                       px_ts[t], e["dir"], fine),
                              **excess.retest_outcome(px, px, t, rt["extreme"], -e["dir"],
                                                      ENTRY_OFFSET, horizon, ts=px_ts)}
         rows.append(row)
@@ -235,16 +242,26 @@ def session_events(day: str, px_ts: np.ndarray, px: np.ndarray, flow: pd.DataFra
 
 
 def _phases(flow: pd.DataFrame, t_swing: float, t_ext: float, t_test: float,
-            excess_dir: int) -> dict:
+            excess_dir: int, fine: pd.DataFrame | None = None) -> dict:
     """Soutien des dealers pendant la jambe de l'excès (dernier swing ->
-    extrême) et pendant la réaction (extrême -> second test)."""
-    args = (flow["ts"].to_numpy(float), flow["net"].to_numpy(float),
-            flow["gross"].to_numpy(float), flow["ok"].to_numpy(bool))
-    grp = flow["grp"].to_numpy(object)
-    a = excess.phase_support(*args, t_swing, t_ext, excess_dir, grp)
-    b = excess.phase_support(*args, t_ext, t_test, excess_dir, grp)
+    extrême), pendant la réaction (extrême -> second test) et, avec le tape à
+    la seconde, sur les dernières secondes avant le second test. Bornes
+    exactes à la seconde quand `fine` est fourni, à la minute sinon."""
+    use_fine = fine is not None and not fine.empty
+    src, b_s = (fine, 1.0) if use_fine else (flow, 60.0)
+    args = (src["ts"].to_numpy(float), src["net"].to_numpy(float),
+            src["gross"].to_numpy(float), src["ok"].to_numpy(bool))
+    kw = {"grp": src["grp"].to_numpy(object), "bucket_s": b_s,
+          "prints": src["prints"].to_numpy(float) if "prints" in src else None}
+    a = excess.phase_support(*args, t_swing, t_ext, excess_dir, **kw)
+    b = excess.phase_support(*args, t_ext, t_test, excess_dir, **kw)
     ga, gb = a["gross_per_min"], b["gross_per_min"]
-    return {"sup_exces": a["support"], "sup_reaction": b["support"],
+    out = {"pas_flux_s": b_s, "prints_exces": a["prints"], "prints_reaction": b["prints"]}
+    for w in FINE_WINDOWS_S:
+        c = excess.phase_support(*args, t_test - w, t_test, excess_dir, **kw) if use_fine \
+            else {"support": np.nan, "prints": np.nan}
+        out[f"sup_{w}s"], out[f"prints_{w}s"] = c["support"], c["prints"]
+    return {**out, "sup_exces": a["support"], "sup_reaction": b["support"],
             # flux brut par minute pendant la réaction / pendant l'excès
             "intensite": gb / ga if ga and ga > 0 and np.isfinite(gb) else np.nan,
             "brut_min_exces": a["gross_per_min"], "brut_min_reaction": b["gross_per_min"],
@@ -302,6 +319,26 @@ def support_analysis(rt: pd.DataFrame, split_day: str) -> list[str]:
                   _table(excess.summarize_retests(
                       test, key="intensite_t",
                       order=tuple(excess.INTENSITY_LABELS.values()))), ""]
+    if "pas_flux_s" in test:
+        fine_share = 100 * float((test["pas_flux_s"] == 1.0).mean())
+        lines += [f"Phases mesurées sur le flux à la seconde : {fine_share:.0f} % des seconds "
+                  "tests (le reste à la minute). Transactions par phase (médiane) : excès "
+                  f"{test['prints_exces'].median():.0f}, réaction "
+                  f"{test['prints_reaction'].median():.0f}.", ""]
+    for w in FINE_WINDOWS_S:
+        col = f"sup_{w}s"
+        if col not in train or train[col].notna().sum() < 30:
+            continue
+        ew = excess.tercile_edges(train[col])
+        lab = {"bas": "contre l'excès", "milieu": "neutre", "haut": "pour l'excès",
+               "": "sans flux"}
+        tw = test.assign(**{f"t_{w}s": test[col].map(lambda x: lab[excess.tercile(x, ew)])})
+        lines += [f"#### TEST — flux des {w} dernières secondes avant le second test", "",
+                  f"Soutien sur [second test − {w} s ; second test), terciles calés sur "
+                  f"l'apprentissage [{ew[0]:.2f} ; {ew[1]:.2f}] ; transactions dans la fenêtre "
+                  f"(médiane) : {test[f'prints_{w}s'].median():.0f}.", "",
+                  _table(excess.summarize_retests(tw, key=f"t_{w}s",
+                                                  order=tuple(lab.values()))), ""]
     grid = test[(test["t_exces"] != "") & (test["t_reaction"] != "")]
     if not grid.empty:
         order = ["bas", "milieu", "haut"]
@@ -352,7 +389,12 @@ def load_sessions(symbol: str, use_old: bool = True, flux: str = "live",
         flow = session_flow(symbol, day, px_ts, px, flux)
         if flow.empty or (not use_old and not flow["labeled"].any()):
             continue
-        out.append({"day": day, "px_ts": px_ts, "px": px, "flow": flow,
+        fine = None
+        if flux == "databento":
+            fine = session_flow(symbol, day, px_ts, px, "databento_1s")
+            if not fine.empty:
+                fine = fine[fine["labeled"].astype(bool)].assign(ok=True, grp="x1")
+        out.append({"day": day, "px_ts": px_ts, "px": px, "flow": flow, "fine": fine,
                     "em": _straddle_em(symbol, day)})
     threshold = calibrate(out)
     for s in out:
@@ -368,7 +410,7 @@ def run(sessions: list[dict], variant: str, excess_pts: float, swing_pts: float,
     if variant == "A":
         for s in sessions:
             rows += session_events(s["day"], s["px_ts"], s["px"], s["flow"], excess_pts,
-                                   swing_pts, horizon)
+                                   swing_pts, horizon, s.get("fine"))
         return pd.DataFrame(rows), info
     ems = [s["em"] for s in sessions if s["em"]]
     if not ems:
@@ -379,7 +421,7 @@ def run(sessions: list[dict], variant: str, excess_pts: float, swing_pts: float,
     for s in sessions:
         if s["em"]:
             rows += session_events(s["day"], s["px_ts"], s["px"], s["flow"], a * s["em"],
-                                   b * s["em"], horizon)
+                                   b * s["em"], horizon, s.get("fine"))
     return pd.DataFrame(rows), info
 
 

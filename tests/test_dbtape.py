@@ -183,5 +183,48 @@ def test_reconstruction_ecrit_les_seances(tmp_path, monkeypatch):
     b = pd.read_parquet(tmp_path / "tape_databento" / "NQ" / "2026-10-07.parquet")
     assert len(b) == 5 and b["buy_contracts"].sum() == 10      # 10 transactions, 5 minutes
     assert (b["mult_source"] == "databento").all() and (b["source"] == "databento").all()
+    f1 = pd.read_parquet(tmp_path / "tape_databento_1s" / "NQ" / "2026-10-07.parquet")
+    assert len(f1) == 10 and f1["buy_contracts"].sum() == 10   # une barre par seconde
     # bornes de séances
     assert databento_tape.build(start="2026-10-08", rate=R) == {}
+
+
+def test_barres_a_la_seconde_et_regroupement():
+    pc, _ = _price(20100, True)
+    tr = _trades([(T0 + pd.Timedelta(seconds=s), 1, pc, 1, "B") for s in (0, 0.5, 1, 61)])
+    defs = dbtape.definitions_table(_defs())
+    fine = dbtape.trades_to_bars(tr, defs, _spot, R, bucket="s")
+    assert len(fine) == 3 and fine["prints"].tolist() == [2, 1, 1]
+    minute = dbtape.trades_to_bars(tr, defs, _spot, R)
+    back = dbtape.regroup(fine, "min")
+    assert back["prints"].tolist() == minute["prints"].tolist() == [3, 1]
+    assert back["hedge_call_buy"].to_numpy() == pytest.approx(minute["hedge_call_buy"].to_numpy())
+
+
+def test_rapport_lit_le_flux_a_la_seconde(tmp_path, monkeypatch):
+    from gex.config import SETTINGS
+    monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
+    from test_excess import _ecrire_seance
+    _ecrire_seance(tmp_path, "2026-10-07", labeled=True)
+    live = pd.read_parquet(tmp_path / "tape" / "NQ" / "2026-10-07.parquet")
+    (tmp_path / "tape_databento" / "NQ").mkdir(parents=True)
+    live.assign(mult_source="databento").to_parquet(
+        tmp_path / "tape_databento" / "NQ" / "2026-10-07.parquet")
+    secs = pd.date_range("2026-10-07 09:30", periods=210 * 60, freq="1s")
+    fine = pd.DataFrame({"timestamp": secs, "hedge_call_buy": 0.0, "hedge_call_sell": -1e5,
+                         "hedge_put_buy": -1e5, "hedge_put_sell": 0.0, "delta_prints": 1.0,
+                         "no_delta_prints": 0.0, "buy_contracts": 1.0, "sell_contracts": 1.0,
+                         "mult_source": "databento"})
+    (tmp_path / "tape_databento_1s" / "NQ").mkdir(parents=True)
+    fine.to_parquet(tmp_path / "tape_databento_1s" / "NQ" / "2026-10-07.parquet")
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import excess_report
+    sessions, _ = excess_report.load_sessions("NQ", flux="databento")
+    ev, _ = excess_report.run(sessions, "A", 100, 60, 120)
+    rt = excess_report.retests(ev).iloc[0]
+    assert rt["pas_flux_s"] == 1.0
+    # dealers vendeurs à chaque seconde : soutien +1 de l'excès baissier, partout
+    for w in excess_report.FINE_WINDOWS_S:
+        assert rt[f"sup_{w}s"] == pytest.approx(1.0) and rt[f"prints_{w}s"] == w
+    assert rt["sup_reaction"] == pytest.approx(1.0)

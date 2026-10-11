@@ -331,7 +331,9 @@ def test_analyse_piste1_terciles_calees_sur_lapprentissage():
         for _ in range(3):
             rows.append({"day": d, "sens": rng.choice(["haussier", "baissier"]),
                          "sup_exces": rng.uniform(-1, 1), "sup_reaction": rng.uniform(-1, 1),
-                         "intensite": rng.uniform(0.2, 3),
+                         "intensite": rng.uniform(0.2, 3), "pas_flux_s": 1.0,
+                         "sup_30s": rng.uniform(-1, 1), "prints_30s": 25.0,
+                         "prints_exces": 400.0, "prints_reaction": 90.0,
                          "continuation": rng.uniform(0, 150), "rempli": True, "mae": 10.0,
                          **{f"hit_{k:g}": True for k in excess.TARGETS}})
     rt = pd.DataFrame(rows)
@@ -344,6 +346,7 @@ def test_analyse_piste1_terciles_calees_sur_lapprentissage():
     assert b1 == l2.split("Terciles")[1].split("`")[0]
     assert "TEST (le seul qui compte)" in l1 and "soutien maintenu" in l1
     assert "intensité du flux" in l1 and "flux qui enfle" in l1
+    assert "30 dernières secondes" in l1 and "pour l'excès" in l1 and "100 %" in l1
     assert "Trop peu" in "\n".join(er.support_analysis(rt[rt["day"] < "2026-01-10"],
                                                        "2026-01-05"))
 
@@ -375,3 +378,13 @@ def test_resume_rappel():
     s = excess.summarize_retests(rt)
     assert s.loc["rouge", "pire25_n"] == 2 and s.loc["rouge", "rappel25_%"] == 50
     assert s.loc["rouge", "pire50_n"] == 1 and s.loc["rouge", "rappel50_%"] == 0
+
+
+def test_soutien_par_phase_a_la_seconde():
+    ts = np.arange(100.0)
+    net = np.r_[np.full(50, -1.0), np.full(50, 1.0)]
+    gross, ok, prints = np.ones(100), np.ones(100, bool), np.full(100, 2.0)
+    r = excess.phase_support(ts, net, gross, ok, 20.4, 50.0, -1, bucket_s=1.0, prints=prints)
+    assert r["support"] == pytest.approx(1.0) and r["prints"] == 60    # secondes 20 à 49
+    r = excess.phase_support(ts, net, gross, ok, 40.0, 60.0, -1, bucket_s=1.0)
+    assert r["support"] == pytest.approx(0.0)

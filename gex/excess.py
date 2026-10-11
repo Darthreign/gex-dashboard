@@ -142,22 +142,26 @@ def scale_classes(implied: np.ndarray, usable: np.ndarray, threshold: float,
 
 def phase_support(minute_ts: np.ndarray, net: np.ndarray, gross: np.ndarray,
                   ok: np.ndarray, t0: float, t1: float, excess_dir: int,
-                  grp: np.ndarray | None = None) -> dict:
+                  grp: np.ndarray | None = None, bucket_s: float = 60.0,
+                  prints: np.ndarray | None = None) -> dict:
     """Soutien des dealers à l'excès sur une PHASE [t0, t1) (epoch s) :
-    minutes de tape CLOSES entièrement dans la phase (début >= minute de t0,
-    fin <= minute de t1). `support` = net × sens de l'excès / brut, entre -1
-    (contre l'excès) et +1 (dans son sens) ; NaN si aucune minute, aucun flux,
-    barre non exploitable ou échelles mélangées."""
-    m0, m1 = np.floor(t0 / 60) * 60, np.floor(t1 / 60) * 60
+    barres de tape (de `bucket_s` secondes : 60 pour le tape minute, 1 pour
+    le tape à la seconde) CLOSES dans la phase (début >= pas de t0, fin <= pas
+    de t1). `support` = net × sens de l'excès / brut, entre -1 (contre
+    l'excès) et +1 (dans son sens) ; NaN si aucune barre, aucun flux, barre
+    non exploitable ou échelles mélangées. `prints` : transactions valorisées
+    par barre, pour juger si la mesure repose sur assez de transactions."""
+    m0, m1 = np.floor(t0 / bucket_s) * bucket_s, np.floor(t1 / bucket_s) * bucket_s
     win = (minute_ts >= m0) & (minute_ts < m1)
-    out = {"support": np.nan, "gross_per_min": np.nan, "minutes": (m1 - m0) / 60}
+    out = {"support": np.nan, "gross_per_min": np.nan, "minutes": (m1 - m0) / 60,
+           "prints": float(prints[win].sum()) if prints is not None else np.nan}
     if m1 <= m0 or not win.any() or (~ok[win]).any() \
             or (grp is not None and len(set(grp[win])) > 1):
         return out
     g = float(np.abs(gross[win]).sum())
     if g > 0:
         out["support"] = float(net[win].sum()) * excess_dir / g
-        out["gross_per_min"] = g / out["minutes"]
+        out["gross_per_min"] = g / out["minutes"] if out["minutes"] > 0 else np.nan
     return out
 
 

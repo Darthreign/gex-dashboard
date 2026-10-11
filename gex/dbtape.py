@@ -103,10 +103,21 @@ def definitions_table(defs: pd.DataFrame) -> pd.DataFrame:
                          "underlying": d["underlying"].astype(str).to_numpy()})
 
 
+def regroup(partial: pd.DataFrame, bucket: str = "min") -> pd.DataFrame:
+    """Agrégats partiels ramenés à un pas plus large (ex. secondes -> minute)."""
+    if partial is None or partial.empty:
+        return partial
+    p = partial.assign(timestamp=pd.to_datetime(partial["timestamp"]).dt.floor(bucket))
+    return p.groupby(["session", "timestamp", "underlying"], as_index=False)[list(SUM_COLS)] \
+        .sum()
+
+
 def trades_to_bars(trades: pd.DataFrame, defs: pd.DataFrame, spot_at, rate: float,
-                   mult: float = 20.0) -> pd.DataFrame:
-    """Agrégats PARTIELS par (séance, minute, sous-jacent) — additifs, donc
-    calculables morceau par morceau. `trades` : index ts_recv (UTC), colonnes
+                   mult: float = 20.0, bucket: str = "min") -> pd.DataFrame:
+    """Agrégats PARTIELS par (séance, pas de temps, sous-jacent) — additifs,
+    donc calculables morceau par morceau. `bucket` : "min" (barres 1 min
+    comme le live) ou "s" (barres 1 s, pour lire le flux au plus près du
+    second test). `trades` : index ts_recv (UTC), colonnes
     instrument_id, price, size, side. `defs` : sortie de `definitions_table`.
     `spot_at(session, epoch_s) -> prix du future` (NaN si inconnu)."""
     t = trades.reset_index()
@@ -119,7 +130,7 @@ def trades_to_bars(trades: pd.DataFrame, defs: pd.DataFrame, spot_at, rate: floa
         return pd.DataFrame()
     session = session_of(ts).to_numpy()
     epoch = _secs(ts)
-    minute_et = ts.dt.tz_convert(ET).dt.floor("min").dt.tz_localize(None)
+    minute_et = ts.dt.tz_convert(ET).dt.floor(bucket).dt.tz_localize(None)
     side = t["side"].astype(str).to_numpy()
     sign = np.where(side == "B", 1.0, np.where(side == "A", -1.0, 0.0))
     size = t["size"].astype(float).to_numpy()

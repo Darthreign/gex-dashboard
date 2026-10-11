@@ -10,8 +10,12 @@ options NQ) dans data/import/databento_raw/ (*.dbn.zst, schéma lu dans le
 fichier), ticks NQ de l'utilisateur pour le prix du future (capture live,
 sinon data/import/ticks_full). Logique : gex/dbtape.py.
 
-Sortie : data/tape_databento/NQ/<séance>.parquet — À PART du tape live,
-`mult_source = "databento"` (vide pour une séance de roll incertaine).
+Sorties, À PART du tape live, `mult_source = "databento"` (vide pour une
+séance de roll incertaine) :
+- data/tape_databento/NQ/<séance>.parquet : barres 1 min, même format que le
+  live (voyant, comparaison) ;
+- data/tape_databento_1s/NQ/<séance>.parquet : barres 1 s (phases exactes à
+  la seconde et flux des dernières secondes avant le second test).
 Données Databento : usage personnel, jamais commitées.
 
 --compare : sur les séances présentes dans les deux tapes (live étiqueté),
@@ -51,8 +55,8 @@ def raw_dir() -> Path:
     return SETTINGS.data_dir / "import" / "databento_raw"
 
 
-def out_dir() -> Path:
-    return SETTINGS.data_dir / "tape_databento" / SYMBOL
+def out_dir(fine: bool = False) -> Path:
+    return SETTINGS.data_dir / ("tape_databento_1s" if fine else "tape_databento") / SYMBOL
 
 
 def _stores():
@@ -104,7 +108,7 @@ def build(start: str | None = None, end: str | None = None, rate: float | None =
         from gex import rates
         rate = rates.current_rate()
     spot = SpotCache()
-    partials = []
+    partials, fine = [], []
     for f, st in stores["trades"]:
         log.info("Lecture %s", f.name)
         for chunk in st.to_df(map_symbols=False, count=CHUNK):
@@ -117,11 +121,15 @@ def build(start: str | None = None, end: str | None = None, rate: float | None =
             if end:
                 keep &= sess <= end
             if keep.any():
-                partials.append(dbtape.trades_to_bars(chunk[keep], defs, spot, rate))
+                # une seule valorisation, à la seconde ; la minute s'en déduit
+                p1 = dbtape.trades_to_bars(chunk[keep], defs, spot, rate, bucket="s")
+                fine.append(p1)
+                partials.append(dbtape.regroup(p1, "min"))
     sessions = dbtape.finalize(partials)
-    out_dir().mkdir(parents=True, exist_ok=True)
-    for s, bars in sessions.items():
-        bars.to_parquet(out_dir() / f"{s}.parquet", index=False)
+    for is_fine, done in ((False, sessions), (True, dbtape.finalize(fine))):
+        out_dir(is_fine).mkdir(parents=True, exist_ok=True)
+        for s, bars in done.items():
+            bars.to_parquet(out_dir(is_fine) / f"{s}.parquet", index=False)
     return {s: (len(b), b["mult_source"].notna().all(), float(b["other_share"].iloc[0]))
             for s, b in sessions.items()}
 
