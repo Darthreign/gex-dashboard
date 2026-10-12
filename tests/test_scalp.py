@@ -206,3 +206,23 @@ def test_session_start_eth_apres_reouverture_globex():
     assert scalp.session_start(d(2026, 10, 12, 4, 0), True) == d(2026, 10, 11, 18, 0)
     # indices cash : toujours l'ouverture RTH
     assert scalp.session_start(d(2026, 10, 8, 18, 5), False) == d(2026, 10, 8, 9, 30)
+
+
+def test_flux_trop_faible_dit_pourquoi_sans_changer_la_lecture():
+    """Sous GROSS_MIN_MUSD : texte explicite (montant, seuil, dernière
+    transaction, hors séance) — l'état du bandeau reste celui d'avant."""
+    a = scalp.assess("NQ", 40.0, 2.0, 6.1, False, None)
+    assert a["state"] == "unsupported"
+    assert "flux trop faible pour lire un sens (6.1 M$ / 5 min, seuil 100 M$)" in a["detail"]
+    b = scalp.assess("NQ", 40.0, 0.0, 0.0, False, None, last_print_age_s=432.0,
+                     hors_seance=True)
+    assert b["state"] == "unsupported"
+    assert ("aucun flux de couverture · dernière transaction d'options il y a 7 min 12 s"
+            " (hors séance cash)") in b["detail"]
+    c = scalp.assess("NQ", 40.0, 0.0, 0.0, False, None)
+    assert "aucune transaction d'options depuis plus de 10 min" in c["detail"]
+    # au-dessus du seuil : flux net inchangé, pas de mention hors séance
+    d = scalp.assess("NQ", 40.0, 300.0, 400.0, False, None, hors_seance=True)
+    assert "flux net +300 M$" in d["detail"] and "hors séance" not in d["detail"]
+    e = scalp.assess("NQ", 40.0, 0.0, 0.0, False, None, "en", last_print_age_s=45.0)
+    assert "no hedging flow · last option trade 45 s ago" in e["detail"]

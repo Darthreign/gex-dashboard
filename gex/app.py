@@ -1702,6 +1702,17 @@ def scalp_inputs_swing(symbol: str, spot: float) -> tuple[float | None, float, f
     return move, net, gross
 
 
+def scalp_flow_context(symbol: str) -> tuple[float | None, bool]:
+    """(âge en s de la dernière transaction d'options gardée en mémoire par le
+    tape — 10 min, cf. FlowTape.SECONDS_KEPT — ou None, hors séance cash ?) :
+    seulement pour le texte du bandeau quand le flux est trop faible."""
+    from .flowtape import TAPE, FlowTape
+    now = time.time()
+    pts = TAPE.live_points(symbol, FlowTape.SECONDS_KEPT, now=now)
+    age = (now - pts[-1][0]) if pts else None
+    return age, scalp.session_state(datetime.now(ET))[0] in ("pre", "closed")
+
+
 def scalp_banner(symbol: str, ctx: dict, spot: float, lang: str,
                  absorb: dict | None = None, *, swing: bool = False,
                  edge: bool = False) -> html.Div:
@@ -1713,8 +1724,9 @@ def scalp_banner(symbol: str, ctx: dict, spot: float, lang: str,
     move, net, gross = (scalp_inputs_swing if swing else scalp_inputs)(symbol, spot)
     zg = ctx.get("zg")
     neg = bool(ctx.get("gamma")) and "Négatif" in ctx["gamma"]
+    age, hors_seance = scalp_flow_context(symbol)
     a = scalp.assess(symbol, move, net, gross, neg, (zg - spot) if zg is not None else None, lang,
-                     swing=swing)
+                     swing=swing, last_print_age_s=age, hors_seance=hors_seance)
     log_scalp_signal(symbol, a, spot, move, net, gross, basis=basis)
     recent = scalp_absorption_recent(symbol)
     log_absorption_levels(symbol, recent)

@@ -245,6 +245,13 @@ TR: dict[str, dict[str, str]] = {
                     "{gamma_txt}{toward_flip_txt}",
         "sc_flux_net": "flux net {net:+.0f} M$ ({ratio:.0%} à sens unique)",
         "sc_flux_none": "aucun flux de couverture",
+        # flux sous le seuil de lecture (scalp.GROSS_MIN_MUSD) : on le dit, avec
+        # l'ancienneté de la dernière transaction, plutôt que de laisser croire
+        # à une panne (demande explicite, 2026-10-12)
+        "sc_flux_faible": "flux trop faible pour lire un sens ({gross:.1f} M$ / 5 min, seuil {seuil:.0f} M$)",
+        "sc_flux_last": "dernière transaction d'options il y a {age}",
+        "sc_flux_none_long": "aucune transaction d'options depuis plus de 10 min",
+        "sc_flux_hors_seance": " (hors séance cash)",
         "sc_gamma_negatif": " · gamma négatif",
         "sc_gamma_positif": " · gamma positif",
         "sc_toward_flip": " · prix vers le Flip",
@@ -557,6 +564,10 @@ TR: dict[str, dict[str, str]] = {
                     "{gamma_txt}{toward_flip_txt}",
         "sc_flux_net": "net flow {net:+.0f} M$ ({ratio:.0%} one-sided)",
         "sc_flux_none": "no hedging flow",
+        "sc_flux_faible": "flow too thin to read a direction ({gross:.1f} M$ / 5 min, threshold {seuil:.0f} M$)",
+        "sc_flux_last": "last option trade {age} ago",
+        "sc_flux_none_long": "no option trade for over 10 min",
+        "sc_flux_hors_seance": " (outside cash session)",
         "sc_gamma_negatif": " · negative gamma",
         "sc_gamma_positif": " · positive gamma",
         "sc_toward_flip": " · price toward the Flip",

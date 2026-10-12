@@ -469,3 +469,17 @@ def test_bandeau_frein_active_par_la_couverture():
     # sans couverture à contre-sens : libellé habituel
     r["confirmations"] = ["absorption"]
     assert "FREIN ACTIVÉ" not in texte(A.scalp_edge_line(r, "fr"))
+
+
+def test_banner_flux_trop_faible_donne_lage_de_la_derniere_transaction(monkeypatch, flux):
+    app._PRICES_CACHE.clear()
+    from gex import capturebus
+    monkeypatch.setattr(capturebus, "remote_url", lambda: None)
+    monkeypatch.setattr(store, "load_prices", lambda s, d: _bars({8: 30000.0, 1: 30030.0}))
+    flux.append((time.time() - 400, 1e6, 0))       # hors de la fenêtre de 5 min
+    monkeypatch.setattr(flowtape.TAPE, "live_points",
+                        lambda s, w=300, now=None: [p for p in flux
+                                                    if p[0] >= (now or time.time()) - w])
+    div = app.scalp_banner("NQ", {"zg": None, "gamma": None}, 30040.0, "fr")
+    txt = str(div.to_plotly_json())
+    assert "aucun flux de couverture · dernière transaction d'options il y a 6 min" in txt
