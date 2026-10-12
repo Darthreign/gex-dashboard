@@ -116,6 +116,14 @@ def countdown(now_et: datetime) -> str:
     return f"−{h}h{rem // 60:02d}" if h else f"−{rem // 60:02d}:{rem % 60:02d}"
 
 
+def close_epoch_ms(now_et: datetime) -> int:
+    """Heure de la clôture du jour (epoch, ms) pour le chrono côté navigateur ;
+    0 le week-end (affiche « — »)."""
+    if now_et.weekday() >= 5:
+        return 0
+    return int(datetime.combine(now_et.date(), moc.CLOSE, ET).timestamp() * 1000)
+
+
 def banner(symbol: str, est: dict | None, lang: str, now_et: datetime) -> html.Div:
     if est is None:
         return html.Div(t(lang, "moc_waiting"), className="hint")
@@ -133,7 +141,11 @@ def banner(symbol: str, est: dict | None, lang: str, now_et: datetime) -> html.D
         html.Div([html.Div(title, className="sc-banner-title"),
                   html.Div(detail, className="sc-banner-detail"),
                   html.Div(phase, className="sc-lights")], className="sc-banner-main"),
-        html.Div([html.Div(countdown(now_et), className="moc-countdown"),
+        # le texte est réécrit chaque seconde DANS LE NAVIGATEUR (cf. `moc-clock`,
+        # register) à partir de `data-close` : le calcul serveur, toutes les
+        # 5 s et parfois plus lent, ne fait plus avancer le chrono
+        html.Div([html.Div(countdown(now_et), id="moc-countdown", className="moc-countdown",
+                           **{"data-close": close_epoch_ms(now_et)}),
                   html.Div(t(lang, "moc_to_close"), className="stat-sub")],
                  className="sc-banner-side moc-clock"),
     ], className=f"sc-banner sc-tone-{tone}")
@@ -282,6 +294,8 @@ def history_table(symbol: str, lang: str) -> html.Div:
 def layout() -> html.Div:
     return html.Div(id="pane-moc", children=[
         dcc.Interval(id="moc-tick", interval=REFRESH_MS, disabled=True),
+        dcc.Interval(id="moc-clock", interval=1000, disabled=True),
+        html.Div(id="moc-clock-sink", style={"display": "none"}),
         html.Div(id="moc-banner", className="sc-bannerbox moc-bannerbox"),
         html.Div(id="moc-cards", className="cards moc-cards"),
         html.Div([
@@ -294,9 +308,38 @@ def layout() -> html.Div:
 
 
 def register(app) -> None:
-    @app.callback(Output("moc-tick", "disabled"), Input("url", "pathname"))
+    @app.callback([Output("moc-tick", "disabled"), Output("moc-clock", "disabled")],
+                  Input("url", "pathname"))
     def moc_tick_on(path):
-        return not is_moc_path(path)
+        off = not is_moc_path(path)
+        return off, off
+
+    # Chrono : seconde par seconde dans le navigateur, sans aller-retour
+    # serveur (le bandeau, recalculé toutes les 5 s, pouvait le laisser figé).
+    # Réécrit le texte de #moc-countdown d'après son attribut data-close ;
+    # sortie factice, le chrono vit dans le bandeau reconstruit par le serveur.
+    app.clientside_callback(
+        """
+        function(n) {
+            var el = document.getElementById('moc-countdown');
+            if (!el) { return window.dash_clientside.no_update; }
+            var close = Number(el.getAttribute('data-close') || 0);
+            var s = Math.floor((close - Date.now()) / 1000);
+            var txt;
+            if (!close || s <= 0) { txt = '\u2014'; }
+            else {
+                var h = Math.floor(s / 3600), r = s % 3600;
+                var pad = function(v) { return (v < 10 ? '0' : '') + v; };
+                txt = h ? '\u2212' + h + 'h' + pad(Math.floor(r / 60))
+                        : '\u2212' + pad(Math.floor(r / 60)) + ':' + pad(r % 60);
+            }
+            if (el.textContent !== txt) { el.textContent = txt; }
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("moc-clock-sink", "children"),
+        Input("moc-clock", "n_intervals"),
+    )
 
     @app.callback(
         [Output("moc-banner", "children"), Output("moc-cards", "children"),

@@ -109,3 +109,23 @@ def test_nav_links_between_main_scalp_and_moc():
     assert "body.scalp-page .scalp-link" in css           # pas de lien vers soi-même
     assert "body.moc-page .moc-link" in css
     assert "body:not(.scalp-page):not(.moc-page) .full-link" in css
+
+
+def test_chrono_porte_lheure_de_cloture_pour_le_navigateur(est):
+    """Le chrono avance côté navigateur (callback clientside moc-clock) d'après
+    data-close : 16h00 ET du jour en ms, 0 le week-end."""
+    close = mocpage.close_epoch_ms(NOW)
+    assert close == int(datetime(2026, 10, 7, 16, 0, tzinfo=ET).timestamp() * 1000)
+    assert mocpage.close_epoch_ms(datetime(2026, 10, 10, 15, 0, tzinfo=ET)) == 0
+    side = mocpage.banner("NQ", est, "fr", NOW).children[1]
+    cd = side.children[0]
+    assert cd.id == "moc-countdown" and getattr(cd, "data-close") == close
+
+
+def test_chrono_enregistre_cote_navigateur():
+    import dash
+    app = dash.Dash(__name__)
+    app.layout = mocpage.layout()
+    mocpage.register(app)
+    assert any("moc-clock" in str(c.get("inputs")) and "moc-clock-sink" in str(c.get("output"))
+               for c in app._callback_list)
