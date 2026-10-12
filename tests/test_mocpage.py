@@ -42,7 +42,7 @@ def _text(c) -> str:
 def test_banner_shows_side_size_and_countdown(est):
     b = mocpage.banner("NQ", est, "fr", NOW)
     s = _text(b)
-    assert "MOC NQ" in s and "−30:00" in s
+    assert "MOC NQ" in s and "−15:00" in s and "avant le déchargement de 21h45" in s
     assert ("ACHAT" in s) == (est["total"] > 0)
     assert "sc-tone-" in b.className
 
@@ -64,9 +64,23 @@ def test_profile_in_contracts_around_futures_price(est):
 
 
 def test_countdown_after_close_and_weekend():
-    assert mocpage.countdown(NOW.replace(hour=16, minute=1)) == "—"
-    assert mocpage.countdown(datetime(2026, 10, 10, 15, 0, tzinfo=ET)) == "—"
-    assert mocpage.countdown(NOW.replace(hour=13, minute=0)) == "−3h00"
+    assert mocpage.countdown(NOW.replace(hour=16, minute=1))[0] == "—"
+    assert mocpage.countdown(datetime(2026, 10, 10, 15, 0, tzinfo=ET))[0] == "—"
+    assert mocpage.countdown(NOW.replace(hour=13, minute=0))[0] == "−2h45"
+
+
+def test_chrono_bascule_2145_2150_puis_cloture():
+    """Une seule cible à la fois, libellé en heure de Paris (UTC+2 en octobre)."""
+    assert mocpage.countdown(NOW.replace(hour=15, minute=44)) == (
+        "−01:00", "avant le déchargement de 21h45")
+    assert mocpage.countdown(NOW.replace(hour=15, minute=46, second=30)) == (
+        "−03:30", "avant le déchargement de 21h50")
+    assert mocpage.countdown(NOW.replace(hour=15, minute=55)) == (
+        "−05:00", "avant la clôture (22h00)")
+    # semaines où New York et Paris n'ont pas changé d'heure ensemble :
+    # 15h45 ET = 20h45 à Paris le 12/03/2026 (New York déjà en heure d'été)
+    assert mocpage.countdown(datetime(2026, 3, 12, 15, 40, tzinfo=ET))[1] == \
+        "avant le déchargement de 20h45"
 
 
 def test_trail_only_inside_window(est):
@@ -111,15 +125,20 @@ def test_nav_links_between_main_scalp_and_moc():
     assert "body:not(.scalp-page):not(.moc-page) .full-link" in css
 
 
-def test_chrono_porte_lheure_de_cloture_pour_le_navigateur(est):
+def test_chrono_porte_les_cibles_pour_le_navigateur(est):
     """Le chrono avance côté navigateur (callback clientside moc-clock) d'après
-    data-close : 16h00 ET du jour en ms, 0 le week-end."""
-    close = mocpage.close_epoch_ms(NOW)
-    assert close == int(datetime(2026, 10, 7, 16, 0, tzinfo=ET).timestamp() * 1000)
-    assert mocpage.close_epoch_ms(datetime(2026, 10, 10, 15, 0, tzinfo=ET)) == 0
+    data-targets : [(epoch ms, libellé)] du jour, vide le week-end."""
+    import json
+    tg = mocpage.clock_targets(NOW)
+    assert [ms for ms, _ in tg] == [
+        int(datetime(2026, 10, 7, h, m, tzinfo=ET).timestamp() * 1000)
+        for h, m in ((15, 45), (15, 50), (16, 0))]
+    assert mocpage.clock_targets(datetime(2026, 10, 10, 15, 0, tzinfo=ET)) == []
     side = mocpage.banner("NQ", est, "fr", NOW).children[1]
     cd = side.children[0]
-    assert cd.id == "moc-countdown" and getattr(cd, "data-close") == close
+    assert cd.id == "moc-countdown"
+    assert json.loads(getattr(cd, "data-targets")) == [list(x) for x in tg]
+    assert side.children[1].id == "moc-countdown-label"
 
 
 def test_chrono_enregistre_cote_navigateur():

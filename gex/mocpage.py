@@ -12,9 +12,11 @@ que sur /moc, et le calcul est partagé entre onglets (broadcast.shared).
 """
 from __future__ import annotations
 
+import json
 import threading
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -106,22 +108,45 @@ def _side(v: float | None, lang: str) -> str:
     return t(lang, "moc_buy") if v > 0 else t(lang, "moc_sell")
 
 
-def countdown(now_et: datetime) -> str:
-    close = datetime.combine(now_et.date(), moc.CLOSE, ET)
-    s = int((close - now_et).total_seconds())
-    if s <= 0 or now_et.weekday() >= 5:
-        return "—"
+# Cibles du chrono, dans l'ordre : les deux plus gros déchargements des
+# trades (15h45 et 15h50 ET, d'après l'utilisateur), puis la clôture. Un seul
+# chrono qui bascule sur la cible suivante une fois la précédente passée ;
+# libellé en heure de Paris (demande explicite, 2026-10-12).
+CLOCK_TARGETS = ((time(15, 45), "moc_to_unload"), (time(15, 50), "moc_to_unload"),
+                 (moc.CLOSE, "moc_to_close"))
+PARIS = ZoneInfo("Europe/Paris")
+
+
+def clock_targets(now_et: datetime, lang: str = "fr") -> list[tuple[int, str]]:
+    """[(epoch ms, libellé)] des cibles du jour ; vide le week-end. Le libellé
+    porte l'heure de Paris, calculée (les changements d'heure US et européens
+    ne tombent pas le même dimanche)."""
+    if now_et.weekday() >= 5:
+        return []
+    out = []
+    for when, key in CLOCK_TARGETS:
+        dt = datetime.combine(now_et.date(), when, ET)
+        paris = dt.astimezone(PARIS)
+        out.append((int(dt.timestamp() * 1000),
+                    t(lang, key, heure=f"{paris.hour}h{paris.minute:02d}")))
+    return out
+
+
+def _fmt_left(s: int) -> str:
     h, rem = divmod(s, 3600)
     # signe moins : un compte à rebours, pas une heure
     return f"−{h}h{rem // 60:02d}" if h else f"−{rem // 60:02d}:{rem % 60:02d}"
 
 
-def close_epoch_ms(now_et: datetime) -> int:
-    """Heure de la clôture du jour (epoch, ms) pour le chrono côté navigateur ;
-    0 le week-end (affiche « — »)."""
-    if now_et.weekday() >= 5:
-        return 0
-    return int(datetime.combine(now_et.date(), moc.CLOSE, ET).timestamp() * 1000)
+def countdown(now_et: datetime, lang: str = "fr") -> tuple[str, str]:
+    """(temps restant jusqu'à la prochaine cible, libellé) ; « — » une fois la
+    clôture passée ou le week-end. Même calcul que le chrono du navigateur
+    (callback clientside `moc-clock`)."""
+    now_ms = now_et.timestamp() * 1000
+    for ms, label in clock_targets(now_et, lang):
+        if ms > now_ms:
+            return _fmt_left(int((ms - now_ms) // 1000)), label
+    return "—", t(lang, "moc_to_close_done")
 
 
 def banner(symbol: str, est: dict | None, lang: str, now_et: datetime) -> html.Div:
@@ -137,16 +162,18 @@ def banner(symbol: str, est: dict | None, lang: str, now_et: datetime) -> html.D
                exp=_usd(est["expiring_total"]), charm=_usd(est["charm_total"]),
                letf=_usd(est["letf"]["total"]))
     phase = html.Span(t(lang, f"moc_phase_{est['phase']}"), className="moc-phase")
+    left, label = countdown(now_et, lang)
     return html.Div([
         html.Div([html.Div(title, className="sc-banner-title"),
                   html.Div(detail, className="sc-banner-detail"),
                   html.Div(phase, className="sc-lights")], className="sc-banner-main"),
         # le texte est réécrit chaque seconde DANS LE NAVIGATEUR (cf. `moc-clock`,
-        # register) à partir de `data-close` : le calcul serveur, toutes les
+        # register) à partir de `data-targets` : le calcul serveur, toutes les
         # 5 s et parfois plus lent, ne fait plus avancer le chrono
-        html.Div([html.Div(countdown(now_et), id="moc-countdown", className="moc-countdown",
-                           **{"data-close": close_epoch_ms(now_et)}),
-                  html.Div(t(lang, "moc_to_close"), className="stat-sub")],
+        html.Div([html.Div(left, id="moc-countdown", className="moc-countdown",
+                           **{"data-targets": json.dumps(clock_targets(now_et, lang)),
+                              "data-done": t(lang, "moc_to_close_done")}),
+                  html.Div(label, id="moc-countdown-label", className="stat-sub")],
                  className="sc-banner-side moc-clock"),
     ], className=f"sc-banner sc-tone-{tone}")
 
@@ -316,24 +343,31 @@ def register(app) -> None:
 
     # Chrono : seconde par seconde dans le navigateur, sans aller-retour
     # serveur (le bandeau, recalculé toutes les 5 s, pouvait le laisser figé).
-    # Réécrit le texte de #moc-countdown d'après son attribut data-close ;
+    # Réécrit #moc-countdown (et son libellé) d'après data-targets : la
+    # prochaine cible (21h45, 21h50 puis la clôture, heure de Paris) ;
     # sortie factice, le chrono vit dans le bandeau reconstruit par le serveur.
     app.clientside_callback(
         """
         function(n) {
             var el = document.getElementById('moc-countdown');
             if (!el) { return window.dash_clientside.no_update; }
-            var close = Number(el.getAttribute('data-close') || 0);
-            var s = Math.floor((close - Date.now()) / 1000);
-            var txt;
-            if (!close || s <= 0) { txt = '\u2014'; }
-            else {
-                var h = Math.floor(s / 3600), r = s % 3600;
-                var pad = function(v) { return (v < 10 ? '0' : '') + v; };
-                txt = h ? '\u2212' + h + 'h' + pad(Math.floor(r / 60))
-                        : '\u2212' + pad(Math.floor(r / 60)) + ':' + pad(r % 60);
+            var targets = [];
+            try { targets = JSON.parse(el.getAttribute('data-targets') || '[]'); } catch (e) {}
+            var now = Date.now(), txt = '\u2014', label = el.getAttribute('data-done') || '';
+            for (var i = 0; i < targets.length; i++) {
+                if (targets[i][0] > now) {
+                    var s = Math.floor((targets[i][0] - now) / 1000);
+                    var h = Math.floor(s / 3600), r = s % 3600;
+                    var pad = function(v) { return (v < 10 ? '0' : '') + v; };
+                    txt = h ? '\u2212' + h + 'h' + pad(Math.floor(r / 60))
+                            : '\u2212' + pad(Math.floor(r / 60)) + ':' + pad(r % 60);
+                    label = targets[i][1];
+                    break;
+                }
             }
             if (el.textContent !== txt) { el.textContent = txt; }
+            var lab = document.getElementById('moc-countdown-label');
+            if (lab && lab.textContent !== label) { lab.textContent = label; }
             return window.dash_clientside.no_update;
         }
         """,
