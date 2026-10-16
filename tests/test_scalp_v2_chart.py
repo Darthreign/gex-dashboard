@@ -51,6 +51,27 @@ def _only_today(bars: pd.DataFrame):
     return lambda symbol, day: bars if day == today_cal else pd.DataFrame()
 
 
+_VRAIE_DATETIME = datetime
+
+
+class _Avant18h(datetime):
+    """Horloge figée à 14h00 ET le jour même : la séance CME bascule à 18h ET
+    (bougies d'avant 18h retirées du graphique ensuite), ces tests de
+    construction de bougies ne doivent pas dépendre de l'heure où ils
+    tournent (ils échouaient chaque soir après 18h ET)."""
+    @classmethod
+    def now(cls, tz=None):
+        d = _VRAIE_DATETIME.now(ET).replace(hour=14, minute=0, second=0, microsecond=0)
+        return d if tz else d.replace(tzinfo=None)
+
+
+@pytest.fixture()
+def avant_18h(monkeypatch):
+    import sys
+    monkeypatch.setattr(app, "datetime", _Avant18h)
+    monkeypatch.setattr(sys.modules[__name__], "datetime", _Avant18h)
+
+
 _CTX = {"zg": 29900.0, "hvl": 29950.0, "keys": {"call_wall": 30200.0}, "walls": []}
 
 
@@ -79,7 +100,7 @@ def test_defaut_temps_sans_bougies_renvoie_des_niveaux_sans_candles(monkeypatch)
     assert len(out["levels"]) == 3  # zg, hvl, call_wall
 
 
-def test_defaut_temps_construit_des_bougies_1min(monkeypatch):
+def test_defaut_temps_construit_des_bougies_1min(monkeypatch, avant_18h):
     # day_ticks non vide seulement pour satisfaire le repli éventuel —
     # le chemin "t" ne les utilise pas pour les candles, seulement pour
     # order_flow (vide ici, pas testé).
@@ -103,10 +124,10 @@ def test_defaut_temps_construit_des_bougies_1min(monkeypatch):
     # cf. test_tf_temps_calcule_des_pivots_swing pour un vrai aller-retour).
     assert len(out["markers"]) == 1
     assert out["markers"][0]["kind"] == "L"
-    assert out["levels"] and set(out["levels"][0]) == {"name", "price", "color"}
+    assert out["levels"] and set(out["levels"][0]) == {"name", "price", "color", "kind"}
 
 
-def test_tf_temps_calcule_des_pivots_swing(monkeypatch):
+def test_tf_temps_calcule_des_pivots_swing(monkeypatch, avant_18h):
     """Demande explicite (2026-10-05) : les pivots swing (zigzag) ne sont
     plus réservés aux barres-volume — même moteur, mêmes seuils, appliqué
     aux bougies-temps aussi."""
@@ -140,7 +161,7 @@ def test_tf_volume_construit_des_bougies_depuis_des_ticks_recents(monkeypatch):
     assert len(out["candles"]) > 0
     c = out["candles"][0]
     assert set(c) == {"time", "open", "high", "low", "close"}
-    assert out["levels"] and set(out["levels"][0]) == {"name", "price", "color"}
+    assert out["levels"] and set(out["levels"][0]) == {"name", "price", "color", "kind"}
 
 
 def test_tf_volume_repli_sur_le_dernier_jour_dispo_si_la_seance_du_jour_est_vide(monkeypatch):
@@ -167,3 +188,95 @@ def test_tf_volume_pas_de_jour_de_repli_disponible_reste_vide(monkeypatch):
     monkeypatch.setattr(tickcapture, "_session_day", lambda ts: "2026-10-03")
     out = app.scalp_v2_chart_data("NQ", _CTX, 30040.0, tf="v60")
     assert out["candles"] == [] and out["markers"] == []
+
+
+def test_ticks_du_jour_relus_seulement_quand_le_fichier_change(tmp_path, monkeypatch):
+    from datetime import datetime
+    from gex import app as app_mod
+    from gex.config import SETTINGS
+    monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
+    app_mod._TICKS_CACHE.clear()
+    lectures = []
+    vraie = store.load_ticks
+    monkeypatch.setattr(store, "load_ticks", lambda s, d: lectures.append(d) or vraie(s, d))
+    store.append_ticks("NQ", [{"ts": 1.0, "price": 1.0, "volume": 1.0, "side": "BUY"}],
+                       datetime(2026, 10, 8))
+    a = app_mod._ticks_cached("NQ", "2026-10-08")
+    b = app_mod._ticks_cached("NQ", "2026-10-08")
+    assert a is b and len(lectures) == 1
+    store.append_ticks("NQ", [{"ts": 2.0, "price": 1.0, "volume": 1.0, "side": "SELL"}],
+                       datetime(2026, 10, 8))
+    assert len(app_mod._ticks_cached("NQ", "2026-10-08")) == 2 and len(lectures) == 2
+
+
+def test_volume_bars_vectorise_egal_a_la_boucle_de_reference():
+    import numpy as np
+    from gex import bars
+
+    def reference(ticks, bv):
+        df = bars._clean_ticks(ticks)
+        out, cur, acc = [], [], 0.0
+        for row in df.to_dict("records"):
+            cur.append(row)
+            acc += row["volume"]
+            if acc >= bv:
+                out.append(bars._finish_bar(cur))
+                cur, acc = [], 0.0
+        if cur:
+            out.append(bars._finish_bar(cur))
+        return pd.DataFrame(out)
+
+    rng = np.random.default_rng(1)
+    n = 5000
+    ticks = pd.DataFrame({"ts": np.sort(rng.uniform(0, 1e4, n)),
+                          "price": 100 + np.cumsum(rng.choice([-0.25, 0.25], n)),
+                          "volume": rng.integers(1, 30, n).astype(float),
+                          "side": rng.choice(["BUY", "SELL", "UNDEFINED"], n)})
+    for bv in (1.0, 7.0, 60.0, 10_000.0):
+        pd.testing.assert_frame_equal(bars.volume_bars(ticks, bv), reference(ticks, bv),
+                                      check_dtype=False)
+
+
+def _salve(t0, side="SELL", price=30000.0, n=12):
+    """Salve absorbée : 12 prints de 10 au même prix, taille affichée 5 -> ratio 24."""
+    size_col = "bid_size" if side == "SELL" else "ask_size"
+    prev_col = "prev_" + size_col
+    return [{"ts": t0 + i * 0.5, "price": price, "volume": 10.0, "side": side,
+             size_col: 5.0, prev_col: 5.0} for i in range(n)]
+
+
+def test_absorptions_rattachees_a_la_bougie_et_fusionnees_avec_le_live(monkeypatch):
+    from gex import app as app_mod
+    app_mod._ABSORPTIONS_CACHE.clear()
+    ticks = pd.DataFrame(_salve(1000.0) + _salve(2000.0, side="BUY", price=30010.0))
+    monkeypatch.setattr(app_mod, "_scalp_day_ticks", lambda s, sides_only=True: ticks)
+    live = {"ts": 2005.5, "price": 30010.0, "side": "BUY", "total": 120.0, "ratio": 24.0,
+            "n_prints": 12}
+    monkeypatch.setattr(app_mod, "scalp_absorption_recent", lambda s: [live])
+    marks = app_mod._absorption_marks("NQ", [900, 1900, 2500])
+    assert [(m["time"], m["side"]) for m in marks] == [(900, "SELL"), (1900, "BUY")]
+    assert marks[0]["ratio"] == 24.0 and marks[0]["total"] == 120.0
+    # avant la première bougie : écartée
+    assert app_mod._absorption_marks("NQ", [5000]) == []
+
+
+def test_donnees_du_graphique_portent_les_absorptions(monkeypatch):
+    from gex import app as app_mod
+    app_mod._ABSORPTIONS_CACHE.clear()
+    base = 1_760_000_000.0
+    rows = []
+    for i in range(400):        # séance de fond, sans absorption
+        rows.append({"ts": base + i * 3.0, "price": 30000.0 + (i % 7) * 0.25, "volume": 1.0,
+                     "side": "BUY" if i % 2 else "SELL", "bid_size": 50.0, "ask_size": 50.0,
+                     "prev_bid_size": 50.0, "prev_ask_size": 50.0})
+    rows += _salve(base + 1300.0)     # après le fond : rien ne coupe la salve
+    ticks = pd.DataFrame(rows).sort_values("ts")
+    monkeypatch.setattr(app_mod, "_scalp_day_ticks", lambda s, sides_only=True: ticks)
+    monkeypatch.setattr(app_mod, "scalp_absorption_recent", lambda s: [])
+    monkeypatch.setattr(app_mod, "_scalp_indicator_snapshot",
+                        lambda *a: {"levels": [], "confluence": [], "order_flow": [],
+                                    "gex_profile": [], "orderflow_profile": {}})
+    data = app_mod.scalp_v2_chart_data("NQ", {}, 30000.0, tf="v60")
+    assert len(data["absorptions"]) == 1
+    a = data["absorptions"][0]
+    assert a["side"] == "SELL" and a["time"] in {c["time"] for c in data["candles"]}

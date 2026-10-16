@@ -38,7 +38,8 @@ import requests
 
 from . import greeks, store
 from . import rates
-from .metrics import ET, YEAR_SECONDS, seconds_to_expiry
+from .metrics import (ET, YEAR_SECONDS, am_settled, calibrate_chain, seconds_to_expiry,
+                      t_var_years)
 from .rtquote import QUOTES, decode_compact_feed_data, feed_setup_message, quote_token
 
 log = logging.getLogger(__name__)
@@ -135,8 +136,21 @@ def fetch_chain_instruments(product_code: str, access_token: str) -> pd.DataFram
         "expiry": pd.Timestamp(i["expiration-date"]).date(),
         "streamer_symbol": i["streamer-symbol"],
         "underlying_symbol": i.get("underlying-symbol"),
+        "settle_am": _settles_am(i),
     } for i in items if i.get("streamer-symbol")]
     return pd.DataFrame(rows)
+
+
+def _settles_am(item: dict) -> bool:
+    """Les options trimestrielles CME se règlent sur la cotation d'ouverture ;
+    l'API le dit via `settlement-type` ou l'heure de `expires-at`."""
+    st = str(item.get("settlement-type") or "").upper()
+    if st in ("AM", "PM"):
+        return st == "AM"
+    exp_at = item.get("expires-at")
+    if exp_at:
+        return pd.Timestamp(exp_at).tz_convert(ET).hour < 12
+    return False
 
 
 def _trading_day_horizon(n_days: int, now_et: datetime | None = None) -> date:
@@ -400,25 +414,43 @@ def enrich_native(chain: pd.DataFrame, raw: dict[str, dict], spot: float,
     df["bid"] = df["bid"].fillna(0.0)
     df["ask"] = df["ask"].fillna(0.0)
 
-    secs = seconds_to_expiry(pd.Series(df["expiry"]), now_et)
+    secs = seconds_to_expiry(pd.Series(df["expiry"]), now_et, am_settled(df))
     df = df[secs > 0].reset_index(drop=True)
     secs = secs[secs > 0]
     t = np.maximum(secs, 300.0) / YEAR_SECONDS
     df["t_years"] = t
+    df["t_var"] = t_var_years(now_et, df["expiry"], am_settled(df))
+    r = rates.current_rate()
+    # Forward par parité et IV inversée du mid, comme metrics.enrich. Pour une
+    # option sur future, le forward est le future de livraison : q ≈ r, soit
+    # du Black-76 — que l'ancien BS à q=0 ignorait.
+    df = calibrate_chain(df, spot, r)
 
+    df["multiplier"] = float(multiplier)
+    return apply_greeks(df, spot, r)
+
+
+def apply_greeks(df: pd.DataFrame, spot: float, r: float) -> pd.DataFrame:
+    """Gamma/delta Black-Scholes, GEX et DEX de chaque contrat au `spot` donné
+    (sur place, renvoie `df`). L'IV, le portage `carry_q`, `t_years` et le
+    multiplicateur sont lus dans `df` : c'est ce qui permet de réévaluer une
+    chaîne déjà calibrée à un autre spot (cf. `reprice_native`)."""
+    multiplier = df["multiplier"].to_numpy(dtype=float)
+    t = df["t_years"].to_numpy(dtype=float)
     valid = df["iv"].to_numpy() > 1e-4
     iv = np.where(valid, df["iv"].to_numpy(), 1.0)
+    q = df["carry_q"].to_numpy()
     is_call = (df["type"] == "C").to_numpy()
-    r = rates.current_rate()
-    g = np.where(valid, greeks.gamma(spot, df["strike"].to_numpy(), t, r, iv), 0.0)
-    dcall = greeks.call_delta(spot, df["strike"].to_numpy(), t, r, iv)
-    d = np.where(valid, np.where(is_call, dcall, dcall - 1.0), 0.0)
+    k = df["strike"].to_numpy()
+    g = np.where(valid, greeks.gamma(spot, k, t, r, iv, q), 0.0)
+    d = np.where(valid, np.where(is_call, greeks.call_delta(spot, k, t, r, iv, q),
+                                 greeks.put_delta(spot, k, t, r, iv, q)), 0.0)
 
     df["gamma_bs"] = g
     df["delta_bs"] = d
     sign = np.where(is_call, 1.0, -1.0)
     oi = df["open_interest"].to_numpy()
-    df["gex"] = sign * g * oi * multiplier * spot ** 2 * 0.01
+    df["gex"] = greeks.gex_dollars(sign, g, oi, multiplier, spot)
     # cf. metrics.enrich pour la justification complète (revue le 2026-07-28,
     # après un premier correctif erroné le 2026-07-27) : le DEX suit une
     # convention DIFFÉRENTE du GEX — dealers courts calls ET courts puts, donc
@@ -429,6 +461,33 @@ def enrich_native(chain: pd.DataFrame, raw: dict[str, dict], spot: float,
     df["dex"] = -1.0 * d * oi * multiplier * spot
     df["spot"] = float(spot)
     return df
+
+
+def reprice_native(df: pd.DataFrame, spot: float, now_et: datetime | None = None,
+                   volume: dict[str, float] | None = None) -> pd.DataFrame:
+    """Chaîne native réévaluée au spot temps réel, entre deux salves dxFeed.
+
+    Seul ce qui dépend du spot et de l'horloge est recalculé : temps restant,
+    gamma, delta, GEX, DEX. L'open interest (fixe en séance) et l'IV
+    (« sticky strike ») restent ceux de la dernière salve, recalée toutes les
+    quelques minutes. `volume` (streamer -> contrats échangés depuis le début
+    de la séance, compté sur les prints OPRA) complète le volume de la salve :
+    on garde le plus grand des deux, le flux ne couvrant qu'une fenêtre autour
+    du spot et pouvant avoir démarré en cours de séance."""
+    now_et = now_et or datetime.now(ET)
+    out = df.copy()
+    secs = np.asarray(seconds_to_expiry(pd.Series(out["expiry"]), now_et, am_settled(out)),
+                      dtype=float)
+    keep = secs > 0
+    if not keep.all():
+        out = out[keep].reset_index(drop=True)
+        secs = secs[keep]
+    out["t_years"] = np.maximum(secs, 300.0) / YEAR_SECONDS
+    out["t_var"] = t_var_years(now_et, out["expiry"], am_settled(out))
+    if volume and "streamer_symbol" in out.columns:
+        live = out["streamer_symbol"].map(volume).fillna(0.0).to_numpy(dtype=float)
+        out["volume"] = np.maximum(out["volume"].to_numpy(dtype=float), live)
+    return apply_greeks(out, spot, rates.current_rate())
 
 
 def _reference_spot(product_code: str, access_token: str) -> float | None:
@@ -490,6 +549,38 @@ def build_native_chain(product_code: str, window: float = DEFAULT_WINDOW,
     df = enrich_native(chain, raw, spot, multiplier)
     log.info("%s : chaîne native — %d contrats, spot %.2f, multiplicateur %.0f",
              product_code, len(df), spot, multiplier)
+    return df
+
+
+def oi_frame(chain: pd.DataFrame, raw: dict[str, dict], ts: datetime) -> pd.DataFrame:
+    """Référentiel + open interest reçu. `open_interest` reste NaN pour un
+    contrat dont dxFeed n'a envoyé aucun Summary (sans position ouverte, il
+    n'émet rien) : 0 serait une affirmation que la donnée ne porte pas."""
+    df = chain.copy()
+    df["open_interest"] = df["streamer_symbol"].map(
+        lambda s: raw.get(s, {}).get("oi", np.nan)).astype(float)
+    df["collected_at"] = pd.Timestamp(ts)
+    return df
+
+
+def collect_open_interest(product_code: str) -> pd.DataFrame | None:
+    """Open interest de la chaîne COMPLÈTE (toutes échéances, tous strikes),
+    pour l'archive quotidienne — les snapshots, eux, ne gardent que la fenêtre
+    filtrée (`filter_chain`). Seul l'événement Summary est souscrit : une
+    salve par connexion porte alors `MAX_BURST` contrats, soit ~2 connexions
+    pour les ~7 000 contrats NQ. Pas de condition d'arrêt possible sur l'OI
+    (un contrat sans position n'émet rien) : chaque connexion va au silence
+    ou au plafond `MAX_DURATION_S`."""
+    _, _, access = quote_token()
+    chain = fetch_chain_instruments(product_code, access)
+    if chain.empty:
+        log.warning("%s : référentiel vide, OI non archivé", product_code)
+        return None
+    raw = asyncio.run(_collect(chain["streamer_symbol"].tolist(), events=("Summary",)))
+    df = oi_frame(chain, raw, datetime.now(ET))
+    log.info("%s : OI de la chaîne complète — %d contrats, %d avec OI, total %.0f",
+             product_code, len(df), int(df["open_interest"].notna().sum()),
+             df["open_interest"].sum())
     return df
 
 

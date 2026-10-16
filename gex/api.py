@@ -24,7 +24,7 @@ from datetime import time as dt_time
 import pandas as pd
 from flask import Flask, jsonify, request
 
-from . import metrics
+from . import broadcast, metrics
 from .metrics import ET, EXPIRY_BUCKETS
 from .scheduler import STATE
 
@@ -44,14 +44,42 @@ def _futures_last_price(symbol: str) -> float | None:
     from .rtquote import QUOTES, credentials_present
 
     px = None
-    if remote_url():
-        px = flowtape.TAPE.last_price(symbol)
+    # en mode séparé, TAPE est un RemoteTape (cf. gex/run.py) ; sinon, ou
+    # tant qu'il n'est pas installé, la capture locale fait foi
+    remote_last = getattr(flowtape.TAPE, "last_price", None)
+    if remote_url() and remote_last is not None:
+        px = remote_last(symbol)
     else:
         from .tickcapture import CAPTURE
         px = CAPTURE.last_price(symbol)
     if px is None and credentials_present():
         px = QUOTES.last(symbol)
     return px
+
+
+def price_channel(symbol: str) -> broadcast.Channel:
+    """Canal du flux /stream (dernier prix NQ/ES), partagé par les serveurs
+    WSGI et asynchrone (cf. gex/asgi.py)."""
+    from . import scalp
+    # UN producteur par symbole (canal partagé, cf. gex/broadcast.py) : le
+    # prix est lu ~10 fois/s une seule fois, quel que soit le nombre
+    # d'onglets, et poussé à chaque changement. Le keepalive (15 s) garde
+    # la détection rapide des connexions mortes.
+    def factory():
+        last = {"v": None}
+
+        def produce():
+            px = _futures_last_price(symbol)
+            if px is None:
+                return None
+            rounded = scalp.round_to_tick(symbol, float(px))
+            if rounded == last["v"]:
+                return None
+            last["v"] = rounded
+            return f"data: {rounded}\n\n"
+        return produce
+
+    return broadcast.channel(("price", symbol), factory, 0.1)
 
 
 def _summary_dict(symbol: str, s) -> dict:
@@ -293,15 +321,25 @@ def register_api(app) -> None:
         res = metrics.compute_levels(df, structural, live, bucket=bucket)
         levels, keys = res["levels"], res["keys"]
         hvl = metrics.zero_gamma(df, s.spot, weight_col="volume")
+        zg_info = metrics.zero_gamma_info(df, s.spot)
 
         # Transposition d'échelle optionnelle : ?scale=NQ exprime les niveaux
         # NDX en prix NQ (cf. app._transform_for / le sélecteur d'unité). Utile
         # quand on trade le future mais que les niveaux viennent de l'indice.
         scale = request.args.get("scale")
         xf = (lambda v: v)
+        scale_warning = None
         if scale and scale.upper() != symbol:
+            from . import scales
             from .app import _transform_for
-            xf, _, _ = _transform_for(symbol, scale.upper())
+            xf, ratio, mode = _transform_for(symbol, scale.upper())
+            target = scales.scale_by_key(scale.upper())
+            # même mise en garde que le dashboard (app._scale_note) : un
+            # ratio SP <-> ND dérive, ces niveaux ne sont qu'un repère instantané
+            if mode == "ratio" and target is not None and target.cross_family(symbol):
+                scale_warning = (f"transposition croisée {symbol} -> {target.label} "
+                                 f"(ratio ×{ratio:.4f}) : repère instantané, "
+                                 "le ratio dérive dans le temps")
 
         def _t(v):
             return float(xf(v)) if isinstance(v, (int, float)) else v
@@ -309,15 +347,44 @@ def register_api(app) -> None:
         return jsonify({
             "symbol": symbol,
             "scale": (scale.upper() if scale else symbol),
+            "scale_warning": scale_warning,
             "spot": _t(s.spot),
             "zero_gamma": _t(s.zero_gamma),
+            # "ok" | "no_flip" (régime franc jusqu'à ±25 %) | "no_data"
+            "zero_gamma_status": zg_info["status"],
+            # $ de GEX net par point d'indice au flip (non transposé)
+            "zero_gamma_slope": zg_info["slope"],
+            # même flip si le smile suit le spot (sticky moneyness) : l'écart
+            # avec zero_gamma borne l'incertitude due à la dynamique de vol
+            "zero_gamma_moneyness": _t(metrics.zero_gamma_info(
+                df, s.spot, sticky="moneyness")["level"]),
             "hvl": _t(hvl),
             "key_levels": {k: _t(v) for k, v in keys.items()},
+            # GEX1-5 : classés par |GEX net| (`gex`, inchangé) ; décomposition en
+            # $ par 1 % (non transposée) : calls (≥ 0), puts (≤ 0), brut
             "gex_walls": [
-                {"strike": _t(float(r.strike)), "gex": float(r.gex), "expiry": str(r.expiry)}
+                {"strike": _t(float(r.strike)), "gex": float(r.gex), "expiry": str(r.expiry),
+                 "gex_calls": float(r.gex_calls), "gex_puts": float(r.gex_puts),
+                 "gex_gross": float(r.gex_gross)}
                 for r in levels.itertuples()
             ],
         })
+
+    @server.route("/api/v1/<symbol>/book")
+    def _book(symbol):
+        """GEX/DEX sur book dealer estimé (OI + flux signé du jour, cf.
+        gex/positioning.py), à côté des valeurs naïves, avec la lecture de
+        régime correspondante : une seule hypothèse pour GEX et DEX."""
+        from . import positioning
+        symbol = symbol.upper()
+        s, df = _current_summary(symbol)
+        if s is None or df is None:
+            return jsonify({"error": "indisponible (pas encore de premier pull)"}), 404
+        flow = positioning.daily_taker_flow(symbol, datetime.now(ET).date())
+        b = positioning.book_summary(df, flow, s.spot)
+        r = metrics.regime_read(b["net_gex_book"], b["net_dex_book"])
+        return jsonify({"symbol": symbol, "spot": s.spot, **b,
+                        "regime_book": {k: r[k] for k in ("gex_frein", "dex_sign", "severity")}})
 
     @server.route("/api/v1/<symbol>/regime")
     def _regime(symbol):
@@ -343,7 +410,7 @@ def register_api(app) -> None:
             return jsonify({"error": "indisponible (pas encore de premier pull)"}), 404
         if bucket in EXPIRY_BUCKETS:
             today = datetime.now(ET).date()
-            df = df[metrics.bucket_mask(df, bucket, today)]
+            df = metrics.select_bucket(df, bucket, today)
         cols = ["strike", "type", "expiry", "open_interest", "gex", "dex"]
         rows = df[cols].copy()
         rows["expiry"] = rows["expiry"].astype(str)
@@ -456,38 +523,8 @@ def register_api(app) -> None:
         if symbol not in ("NQ", "ES"):
             return jsonify({"error": "symbole non couvert (NQ/ES seulement)"}), 404
 
-        def gen():
-            last_sent = None
-            last_heartbeat = time.monotonic()
-            # ~10 vérifications/s : la boucle est en mémoire (aucun réseau), le
-            # coût est négligeable ; on n'ÉMET vers le navigateur que sur
-            # changement, jamais à un rythme fixe (c'est ça, le "poussé").
-            #
-            # Heartbeat (2026-10-05) : sans lui, un symbole dont le prix ne
-            # bouge pas (marché fermé, séance calme) n'écrit RIEN sur la
-            # connexion pendant des heures — une connexion morte (onglet
-            # fermé sans fermeture TCP propre, wifi coupé côté client) ne se
-            # détecte alors JAMAIS (aucune écriture ne peut échouer si on
-            # n'écrit rien), et le thread waitress qui la sert reste occupé
-            # indéfiniment. Un commentaire SSE toutes les ~15s force une
-            # écriture régulière : une connexion morte échoue vite (le
-            # générateur s'arrête, le thread se libère), une connexion vivante
-            # ignore silencieusement la ligne (convention SSE standard).
-            while True:
-                px = _futures_last_price(symbol)
-                if px is not None:
-                    rounded = scalp.round_to_tick(symbol, float(px))
-                    if rounded != last_sent:
-                        last_sent = rounded
-                        yield f"data: {rounded}\n\n"
-                        last_heartbeat = time.monotonic()
-                now = time.monotonic()
-                if now - last_heartbeat >= 15.0:
-                    yield ": keepalive\n\n"
-                    last_heartbeat = now
-                time.sleep(0.1)
-
-        return Response(gen(), mimetype="text/event-stream",
+        ch = price_channel(symbol)
+        return Response(broadcast.sse_events(ch), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache",
                                  "X-Accel-Buffering": "no"})
 

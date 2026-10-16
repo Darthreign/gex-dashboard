@@ -24,8 +24,11 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from gex.config import DATA_DIR  # noqa: E402
+
 ET = ZoneInfo("America/New_York")
-DIR = Path(r"D:/Gex/data/import/ticks_full/NQ")
+DIR = DATA_DIR / "import" / "ticks_full" / "NQ"
 TMP = DIR.parent / "NQ__resplit_tmp"
 BAK = DIR.parent / "NQ__backup_avant_ET"
 

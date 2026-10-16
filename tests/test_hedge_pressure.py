@@ -14,7 +14,9 @@ def make_chain(spot: float, rows: list[dict]) -> ChainSnapshot:
     pas de tests/__init__.py dans ce repo, un import inter-fichiers de tests
     serait fragile (dépendrait de la résolution de `tests` comme package)."""
     defaults = {
-        "bid": 1.0, "ask": 1.2, "iv": 0.20, "open_interest": 100.0,
+        # pas de cotation par défaut : l'IV vient alors du champ "iv" (repli
+        # de calibrate_chain) ; un test qui veut des prix les fixe lui-même
+        "bid": 0.0, "ask": 0.0, "iv": 0.20, "open_interest": 100.0,
         "volume": 0.0, "delta_cboe": 0.0, "gamma_cboe": 0.0,
         "last_trade_price": 0.0,
     }

@@ -39,6 +39,10 @@ dependencies = [
     "mcp>=1.0,<2.0",
     "websockets>=13.0",
     "waitress>=3.0",
+    # serveur ASGI par défaut (gex/asgi.py) : SSE asynchrones, Dash via a2wsgi
+    "uvicorn>=0.30",
+    "starlette>=0.38",
+    "a2wsgi>=1.10",
 ]
 
 [project.optional-dependencies]

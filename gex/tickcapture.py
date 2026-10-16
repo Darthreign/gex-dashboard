@@ -142,6 +142,9 @@ class TickCapture:
         # contrairement à rtquote.QUOTES qui est CONFLATÉ côté dxFeed). Exposé au
         # dashboard via capturebus pour le ticker de prix de la page /scalp.
         self._last: dict[str, float] = {}
+        # second test d'un excès, détecté en direct (cf. gex/secondtest.py) —
+        # NQ seulement, comme l'étude ; remis à zéro au changement de séance
+        self._second: dict[str, tuple[str, object]] = {}
         # Fenêtre glissante par sous-jacent (ICEBERG_WINDOW_S), pour la détection
         # d'absorption en direct — mêmes colonnes que les lignes écrites sur
         # disque (cf. record), directement consommables par gex.iceberg.
@@ -191,8 +194,9 @@ class TickCapture:
             import pandas as pd
 
             from . import iceberg as ib
-            sw = ib.build_sweeps(pd.DataFrame(rows))
-            flags = sorted(ib.flag_absorption(sw, symbol), key=lambda f: f.end_ts)
+            # vectorisé (gex.iceberg.detect_absorptions) : quelques ms sur la
+            # fenêtre, au lieu d'une boucle Python par tick toutes les 2 s
+            flags = list(ib.detect_absorptions(pd.DataFrame(rows), symbol).itertuples())
         with self._lock:
             self._absorb_cache[symbol] = (now, flags)
         return flags
@@ -216,6 +220,13 @@ class TickCapture:
         if not fraiches:
             return None
         return self._sweep_dict(max(fraiches, key=lambda s: s.ratio or 0.0), symbol)
+
+    def second_test(self, symbol: str, now: float | None = None) -> dict | None:
+        """Dernier second test d'excès de la séance, s'il est frais (cf.
+        gex/secondtest.py), ou None."""
+        with self._lock:
+            st = self._second.get(symbol)
+            return st[1].current(now if now is not None else time.time()) if st else None
 
     def absorption_recent(self, symbol: str, limit: int = 3,
                           now: float | None = None) -> list[dict]:
@@ -368,6 +379,13 @@ class TickCapture:
             if row["side"] not in ("BUY", "SELL"):
                 return
             self._last[symbol] = float(price)
+            if symbol == "NQ":
+                from .secondtest import SecondTestTracker
+                st = self._second.get(symbol)
+                if st is None or st[0] != session:
+                    st = (session, SecondTestTracker())
+                    self._second[symbol] = st
+                st[1].feed(row["ts"], float(price))
             # bougie 1 min depuis les vraies transactions (cf. PriceBar)
             minute = int(row["ts"] // 60) * 60
             cur = self._price_bar.get(symbol)
