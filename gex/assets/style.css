@@ -959,3 +959,10 @@ body.sc-keywords-only .sc-edge-status { display: none; }
 .sc-second.sc-risk-moyen { border-left-color: #e0a030; background: rgba(224, 160, 48, 0.14); }
 .sc-second.sc-risk-faible { border-left-color: #199e70; background: rgba(25, 158, 112, 0.14); }
 .sc-second .sc-st-risk { font-weight: 600; }
+
+/* replay de la heatmap (gex-replay.js) */
+.heat-replay { align-items: center; gap: 8px; }
+.heat-replay-speed { background: transparent; color: var(--ink); border: 1px solid #383835;
+                     border-radius: 4px; font-size: 12px; padding: 1px 4px; }
+.heat-replay-speed option { background: #1c1c1a; }
+.heat-replay-pos { width: 280px; max-width: 45vw; }

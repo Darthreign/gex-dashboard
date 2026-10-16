@@ -16,6 +16,9 @@
   "use strict";
   const charts = {};
   const streams = {};
+  // graphiques « tenus » par le replay (gex-replay.js) : les mises à jour du
+  // direct sont ignorées tant que le replay les affiche
+  const holds = {};
 
   function lw() { return window.LightweightCharts; }
 
@@ -95,6 +98,7 @@
   function render(id, spec) {
     const container = document.getElementById(id);
     if (!container || !spec || !lw()) return;
+    if (holds[id] && !spec._replay) return;
     let st = charts[id];
     if (!st || st.container !== container || !container.contains(st.box)) {
       st = charts[id] = create(container, spec);
@@ -322,5 +326,12 @@
   }
 
   // `_charts` : lecture seule, pour le diagnostic (tests navigateur)
-  window.GexLW = { render, stream, streams: streamAll, _charts: charts };
+  // hold(id, true) : le replay prend la main ; hold(id, false) : retour au
+  // direct, recadrage au prochain message
+  function hold(id, on) {
+    holds[id] = !!on;
+    if (!on && charts[id]) charts[id].fitted = false;
+  }
+
+  window.GexLW = { render, stream, streams: streamAll, hold, _charts: charts };
 })();

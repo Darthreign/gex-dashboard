@@ -424,6 +424,62 @@ def _apply_user_zoom(lay: dict, relayout: dict | None) -> None:
             lay[axe]["autorange"] = False
 
 
+def heatmap_levels(symbol: str, df: pd.DataFrame, spot: float,
+                   window: float = 0.04, shown: list[str] | None = None) -> dict | None:
+    """Profil de gamma par strike et niveaux de la heatmap, en prix NATIFS du
+    sous-jacent (aucune transposition) : un seul calcul pour l'affichage en
+    direct (`_heatmap_inputs`) et pour le replay de la séance (gex/replay.py,
+    qui enregistre ce dictionnaire chaque minute). None si aucun strike dans
+    la fenêtre. `shown` (checklist de l'onglet) évite de calculer les niveaux
+    non affichés ; None = tous (replay)."""
+    want = (lambda k: True) if shown is None else (lambda k: k in shown)
+    lo, hi = spot * (1 - window), spot * (1 + window)
+    sel = df[df["strike"].between(lo, hi)]
+    if sel.empty:
+        return None
+    oi = metrics.gex_by_strike_weighted(sel, spot, "open_interest") / 1e9
+    vol = metrics.gex_by_strike_weighted(sel, spot, "volume") / 1e9
+    # Murs classés au spot structurel (clôture veille), comme partout ailleurs.
+    _ref = ref_spot(symbol, spot)
+    keys = metrics.key_levels(sel, spot, ref_spot=_ref, all_expiries=True)
+    walls = (metrics.top_gex_levels(sel, ref_spot=_ref, all_expiries=True)
+             if want("gex_walls") else pd.DataFrame())
+    labels = wall_labels(walls) if not walls.empty else {}
+    strikes = sorted(set(oi.index) | set(vol.index))
+    return {"spot": float(spot), "lo": float(lo), "hi": float(hi),
+            "profile": [(float(k), float(oi.get(k, 0.0)), float(vol.get(k, 0.0)))
+                        for k in strikes],
+            "zero_gamma": metrics.zero_gamma(df, spot) if want("zero_gamma") else None,
+            "hvl": (metrics.zero_gamma(df, spot, weight_col="volume")
+                    if want("hvl") else None),
+            **{k: keys.get(k) for k in ("call_wall", "put_support", "d1_min", "d1_max")},
+            "walls": [(float(lv.strike), labels.get(lv.strike, "GEX"))
+                      for lv in walls.itertuples()] if not walls.empty else []}
+
+
+def heatmap_items(lv: dict, levels_shown: list[str], xf, lang: str) -> list[dict]:
+    """Repères horizontaux de la heatmap d'après `heatmap_levels`, choisis par
+    la checklist de l'onglet — seul le spot reste toujours affiché, comme
+    référence de lecture systématique."""
+    items = [dict(y=xf(lv["spot"]), label=t(lang, "legend_spot"), color=C["spot"], dash="dot")]
+    if "zero_gamma" in levels_shown and lv.get("zero_gamma") is not None:
+        items.append(dict(y=xf(lv["zero_gamma"]), label="Gamma Flip", color=C["zg"], dash="dash"))
+    if "hvl" in levels_shown and lv.get("hvl") is not None:
+        items.append(dict(y=xf(lv["hvl"]), label="HVL", color=C["hvl"], dash="dash"))
+    for opt_key, key, color, label in (
+        ("call_wall", "call_wall", C["cw"], "Call Wall"),
+        ("put_support", "put_support", C["ps"], "Put Support"),
+        ("d1", "d1_min", C["d1"], "1D Min"),
+        ("d1", "d1_max", C["d1"], "1D Max"),
+    ):
+        if opt_key in levels_shown and lv.get(key) is not None:
+            items.append(dict(y=xf(lv[key]), label=label, color=color, dash="dash"))
+    if "gex_walls" in levels_shown:
+        for strike, label in lv.get("walls") or ():
+            items.append(dict(y=xf(strike), label=label, color=C["lvl"], dash="dot"))
+    return items
+
+
 def _heatmap_inputs(symbol: str, lang: str, day: str | None, window: float, xf,
                     unit: str | None, levels_shown: list[str] | None) -> dict:
     """Données de la heatmap (profil de gamma + parcours du prix + niveaux),
@@ -457,45 +513,13 @@ def _heatmap_inputs(symbol: str, lang: str, day: str | None, window: float, xf,
     if path is None:
         path = _price_overlay(symbol, day)
 
-    lo, hi = spot * (1 - window), spot * (1 + window)
-    sel = df[df["strike"].between(lo, hi)]
-    if sel.empty:
+    lv = heatmap_levels(symbol, df, spot, window, levels_shown)
+    if lv is None:
         return {"title": title, "error": t(lang, "no_data_window")}
-
-    oi = metrics.gex_by_strike_weighted(sel, spot, "open_interest") / 1e9
-    vol = metrics.gex_by_strike_weighted(sel, spot, "volume") / 1e9
-
-    # repères horizontaux, choisis par la checklist de l'onglet — seul le
-    # spot reste toujours affiché, comme référence de lecture systématique.
-    # Murs classés au spot structurel (clôture veille), comme partout ailleurs.
-    _ref = ref_spot(symbol, spot)
-    keys = metrics.key_levels(sel, spot, ref_spot=_ref, all_expiries=True)
-    items = [dict(y=xf(spot), label=t(lang, "legend_spot"), color=C["spot"], dash="dot")]
-    if "zero_gamma" in levels_shown:
-        zg = metrics.zero_gamma(df, spot)
-        if zg is not None:
-            items.append(dict(y=xf(zg), label="Gamma Flip", color=C["zg"], dash="dash"))
-    if "hvl" in levels_shown:
-        hvl = metrics.zero_gamma(df, spot, weight_col="volume")
-        if hvl is not None:
-            items.append(dict(y=xf(hvl), label="HVL", color=C["hvl"], dash="dash"))
-    for opt_key, key, color, label in (
-        ("call_wall", "call_wall", C["cw"], "Call Wall"),
-        ("put_support", "put_support", C["ps"], "Put Support"),
-        ("d1", "d1_min", C["d1"], "1D Min"),
-        ("d1", "d1_max", C["d1"], "1D Max"),
-    ):
-        if opt_key not in levels_shown:
-            continue
-        v = keys.get(key)
-        if v is not None:
-            items.append(dict(y=xf(v), label=label, color=color, dash="dash"))
-    if "gex_walls" in levels_shown:
-        walls = metrics.top_gex_levels(sel, ref_spot=_ref, all_expiries=True)
-        labels = wall_labels(walls) if not walls.empty else {}
-        for lv in walls.itertuples():
-            items.append(dict(y=xf(lv.strike), label=labels.get(lv.strike, "GEX"),
-                              color=C["lvl"], dash="dot"))
+    items = heatmap_items(lv, levels_shown, xf, lang)
+    lo, hi = lv["lo"], lv["hi"]
+    oi = pd.Series({k: o for k, o, _ in lv["profile"]}, dtype=float)
+    vol = pd.Series({k: v for k, _, v in lv["profile"]}, dtype=float)
     # fenêtre de temps : la séance cash pour un indice ; toute la séance
     # Globex chargée pour un future (sinon la nuit serait hors champ)
     if globex:
@@ -685,6 +709,37 @@ def heatmap_spec(symbol: str, lang: str, day: str | None = None, window: float =
     if np.isfinite(r).all():
         spec["range"] = [float(r[0]), float(r[1])]
     return spec
+
+
+def heatmap_replay(symbol: str, lang: str, window: float = 0.04, unit: str | None = None,
+                   levels_shown: list[str] | None = None, now: float | None = None) -> dict:
+    """Replay de la séance du jour (séance CME, depuis l'ouverture Globex) :
+    la heatmap complète actuelle (`base`, bougies comprises) et les images
+    enregistrées chaque minute par gex/replay.py (`frames`), déjà mises à
+    l'échelle affichée et filtrées par la checklist des niveaux — le
+    navigateur n'a plus qu'à les rejouer. Transposition (`unit`) au ratio
+    ACTUEL, comme la heatmap en direct."""
+    from . import replay
+    levels_shown = (levels_shown if levels_shown is not None
+                    else ["zero_gamma", "call_wall", "put_support"])
+    base = heatmap_spec(symbol, lang, None, window, unit, levels_shown)
+    sym = symbol if symbol in replay.SYMBOLS else None
+    session = replay._session_day(time.time() if now is None else now)
+    raw = replay.load(sym, session) if sym else []
+    xf, _, _ = _transform_for(symbol, unit)
+    conv = lambda v: float(xf(np.array([v]))[0])  # noqa: E731
+    frames = []
+    for f in raw:
+        lv = {**f, "walls": [tuple(w) for w in f.get("walls") or ()]}
+        items = heatmap_items(lv, levels_shown, conv, lang)
+        frames.append({
+            "t": f["t"],
+            "lines": [{"series": 0, "price": float(it["y"]), "color": it["color"],
+                       "title": it["label"], "style": _LW_DASH.get(it.get("dash"), 2),
+                       "axisLabel": True} for it in items],
+            "profile": [{"price": conv(k), "oi": o, "vol": v} for k, o, v in f["profile"]]})
+    return {"symbol": symbol, "session": session, "base": base, "frames": frames,
+            "message": None if frames else t(lang, "replay_empty")}
 
 
 def _session_range(day: str) -> list:
@@ -2874,6 +2929,14 @@ def start_scalp_indicator_scheduler() -> None:
     sched.add_job(_refresh_scalp_indicators, "interval", seconds=SCALP_INDICATORS_EVERY_S,
                  max_instances=1, coalesce=True,
                  next_run_time=datetime.now(ET) + timedelta(seconds=20))
+    # Replay de la heatmap (gex/replay.py) : une image par minute de ce que
+    # la heatmap affiche, pour NQ/ES/SPX/NDX — dans CE processus, celui qui
+    # tient les chaînes (moteur, sinon dashboard). Décalé de 35 s pour ne pas
+    # tomber avec les jobs à la minute.
+    from . import replay
+    sched.add_job(replay.record_all, "interval", seconds=replay.FRAME_EVERY_S,
+                  max_instances=1, coalesce=True,
+                  next_run_time=datetime.now(ET) + timedelta(seconds=35))
     sched.start()
     _SCALP_INDICATOR_SCHED = sched
 
@@ -4187,6 +4250,21 @@ def create_app() -> Dash:
                     dcc.Checklist(id="heat-levels", className="check", inline=True,
                                  value=["zero_gamma", "call_wall", "put_support"]),
                 ], className="ctl", style={"flexWrap": "wrap"}),
+                # Replay de la séance du jour (gex/replay.py + assets/gex-replay.js) :
+                # commandes lues directement par le script, pas de callback Dash
+                html.Div([
+                    html.Button("▶ Replay", id="heat-replay-play", className="lw-btn",
+                                title="Rejouer la séance du jour (depuis l'ouverture Globex)"),
+                    html.Select(id="heat-replay-speed", className="heat-replay-speed",
+                                title="Vitesse (×60 : une minute de séance par seconde)",
+                                children=[html.Option(f"×{v}", value=str(v), selected=v == 60)
+                                          for v in (1, 10, 30, 60, 120, 300)]),
+                    dcc.Input(id="heat-replay-pos", type="range", min=0, max=1000, step=1,
+                              value=0, className="heat-replay-pos", debounce=False),
+                    html.Span(id="heat-replay-time", className="ctl-label"),
+                    html.Button("● Direct", id="heat-replay-live", className="lw-btn",
+                                title="Revenir au direct"),
+                ], className="ctl heat-replay"),
                 html.Div(id="heatmap", className="lw-chart"),
             ]),
 
@@ -4394,6 +4472,10 @@ def create_app() -> Dash:
             add('heatmap', 'heatmap', tab === 'heat', {
                 day: heatDay || '', window: String(win || 0.04), unit: unit || '',
                 levels: (heatLevels || []).join(',')});
+            // réglages transmis au replay de la heatmap (gex-replay.js)
+            if (window.GexReplay) window.GexReplay.context({
+                symbol: symbol || '', lang: lang || 'fr', window: String(win || 0.04),
+                unit: unit || '', levels: (heatLevels || []).join(',')});
             add('hedge-graph', 'hedge', tab === 'tape',
                 {window: String(hedgeWin == null ? 15 : hedgeWin)});
             // version de la chaîne -> dcc.Store « chain-ver » : relance les
@@ -6140,6 +6222,17 @@ def create_app() -> Dash:
         return Response(broadcast.sse_events(lw_channel(name, params)),
                         mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    @app.server.route("/api/v1/heatmap-replay")
+    def _heatmap_replay():
+        from flask import jsonify, request
+        a = request.args
+        symbol = a.get("symbol")
+        if symbol not in UNDERLYINGS:
+            return jsonify({"error": "symbole inconnu"}), 404
+        return jsonify(heatmap_replay(symbol, a.get("lang") or "fr",
+                                      float(a.get("window") or 0.04), a.get("unit") or None,
+                                      _lw_list(a.get("levels")) if "levels" in a else None))
 
     @app.server.route("/api/v1/lw-multi")
     def _lw_multi_stream():
