@@ -126,7 +126,8 @@ def flag_absorption(sweeps: list[Sweep], symbol: str, min_ratio: float = MIN_RAT
 
 def detect_absorptions(ticks: pd.DataFrame, symbol: str, max_gap_s: float = MAX_GAP_S,
                        min_ratio: float = MIN_RATIO,
-                       min_refill_fraction: float = MIN_REFILL_FRACTION) -> pd.DataFrame:
+                       min_refill_fraction: float = MIN_REFILL_FRACTION,
+                       min_total: float | None = None) -> pd.DataFrame:
     """`build_sweeps` + `flag_absorption` VECTORISÉS : mêmes salves (même prix,
     même sens, écart <= `max_gap_s`, un côté indéterminé coupe la salve), mêmes
     seuils, en numpy au lieu d'une boucle Python par tick — utilisable sur la
@@ -175,7 +176,8 @@ def detect_absorptions(ticks: pd.DataFrame, symbol: str, max_gap_s: float = MAX_
     b, a = before[starts], after[ends]
     with np.errstate(divide="ignore", invalid="ignore"):
         ratio = np.where(b > 0, total / b, np.nan)
-    keep = ((total >= _min_total(symbol)) & (b > 0) & (ratio >= min_ratio)
+    floor = _min_total(symbol) if min_total is None else min_total
+    keep = ((total >= floor) & (b > 0) & (ratio >= min_ratio)
             & np.isfinite(a) & (a >= min_refill_fraction * b))
     starts, ends, total, b, a, ratio = (x[keep] for x in (starts, ends, total, b, a, ratio))
     return pd.DataFrame({

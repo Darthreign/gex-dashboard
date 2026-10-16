@@ -1368,6 +1368,17 @@ def scalp_context(symbol: str) -> dict | None:
     if not levels.empty:
         labels = wall_labels(levels)
         walls = [(labels[lv.strike], lv.strike, lv.gex) for lv in levels.itertuples()]
+    # mêmes niveaux limités au 0DTE (réglage « Échéances » du graphique /scalp,
+    # 2026-10-16) ; le bandeau et l'échelle restent sur toutes les échéances
+    keys0, walls0 = {}, []
+    try:
+        r0 = metrics.compute_levels(df, ref, side_spot, bucket="0DTE")
+        keys0 = r0["keys"]
+        if not r0["levels"].empty:
+            lab0 = wall_labels(r0["levels"])
+            walls0 = [(lab0[lv.strike], lv.strike, lv.gex) for lv in r0["levels"].itertuples()]
+    except Exception:  # noqa: BLE001 — pas de 0DTE (week-end, chaîne partielle)
+        keys0, walls0 = {}, []
     hist = store.load_history(symbol)
     rd = None
     if summary is not None:
@@ -1388,7 +1399,8 @@ def scalp_context(symbol: str) -> dict | None:
     ctx = {"snap_spot": snap.spot,
            "zg": summary.zero_gamma if summary else None,
            "hvl": metrics.zero_gamma(df, snap.spot, weight_col="volume"),
-           "keys": res["keys"], "walls": walls, "gamma": rd["gamma"] if rd else None,
+           "keys": res["keys"], "walls": walls, "keys_0dte": keys0, "walls_0dte": walls0,
+           "gamma": rd["gamma"] if rd else None,
            "open": open_, "vix": digest._current_vix(),
            "gex0": summary.net_gex_0dte if summary else None,
            "em": _expected_move_pts(symbol, res["keys"])}
@@ -1455,10 +1467,16 @@ def _edge_params(symbol: str):
     return p, validated, days
 
 
-def _absorption_events(symbol: str) -> list[dict]:
-    """Absorptions de la séance (calcul planifié) + fenêtre live, sans doublon."""
+def _absorption_events(symbol: str, relaxed: bool = False) -> list[dict]:
+    """Absorptions de la séance (calcul planifié) + fenêtre live, sans doublon.
+    Aux seuils par défaut (iceberg.MIN_TOTAL / MIN_RATIO), sauf `relaxed` :
+    détection élargie pour le graphique, filtrée par les réglages /scalp."""
+    from . import iceberg as ib
     try:
         events = scalp_absorptions(symbol, _scalp_day_ticks(symbol, sides_only=False))
+        if not relaxed:
+            events = [e for e in events if e["total"] >= ib._min_total(symbol)
+                      and (e.get("ratio") or 0) >= ib.MIN_RATIO]
     except Exception:  # noqa: BLE001 — un indicateur raté ne casse rien
         log.exception("Absorptions de séance indisponibles (%s)", symbol)
         events = []
@@ -2122,6 +2140,10 @@ def scalp_confluence_zones(symbol: str) -> list[dict]:
     return out
 
 
+HVL_VOL_RATIO_FLOOR = 1.5        # contre iceberg.HVL_MIN_VOL_RATIO = 3
+HVL_DELTA_FLOOR = 0.15           # contre iceberg.HVL_MIN_DELTA_FRACTION = 0.35
+
+
 def scalp_order_flow_zones(symbol: str, day_ticks: pd.DataFrame) -> list[dict]:
     """Zones HVL (volume élevé + delta net marqué) de la séance — footprint
     simplifié, cf. gex/iceberg.py::hvl_levels pour la définition exacte et
@@ -2167,13 +2189,24 @@ def scalp_order_flow_zones(symbol: str, day_ticks: pd.DataFrame) -> list[dict]:
     levels = {float(price): {"vol": float(row["vol"]), "ask_vol": float(row["ask_vol"]),
                              "bid_vol": float(row["bid_vol"])}
              for price, row in g.iterrows()}
-    out = [{"price": h["price"], "vol": h["vol"], "side": h["side"]}
-          for h in ib.hvl_levels(levels)]
+    # Seuils ÉLARGIS (2026-10-16) : le graphique filtre selon les réglages
+    # /scalp (défaut = iceberg.HVL_MIN_VOL_RATIO / HVL_MIN_DELTA_FRACTION) ;
+    # chaque zone porte son multiple de la médiane et sa part de delta.
+    actifs = sorted(v["vol"] for v in levels.values() if v["vol"] > 0)
+    med = actifs[len(actifs) // 2] if actifs else 0.0
+    out = [{"price": h["price"], "vol": h["vol"], "side": h["side"],
+            "vol_ratio": round(h["vol"] / med, 2) if med else None,
+            "delta_frac": round(abs(h["delta"]) / h["vol"], 3) if h["vol"] else None}
+          for h in ib.hvl_levels(levels, min_vol_ratio=HVL_VOL_RATIO_FLOOR,
+                                 min_delta_fraction=HVL_DELTA_FLOOR)]
     _ORDER_FLOW_CACHE[symbol] = (now, out)
     return out
 
 
 _ABSORPTIONS_CACHE: dict[str, tuple[float, list[dict]]] = {}
+# planchers de la détection élargie (cf. scalp_absorptions)
+ABSORB_RATIO_FLOOR = 2.0          # contre iceberg.MIN_RATIO = 4
+ABSORB_TOTAL_FLOOR = 0.5          # × iceberg.MIN_TOTAL (40 NQ / 100 ES)
 
 
 def scalp_absorptions(symbol: str, raw_ticks: pd.DataFrame) -> list[dict]:
@@ -2189,7 +2222,11 @@ def scalp_absorptions(symbol: str, raw_ticks: pd.DataFrame) -> list[dict]:
     if hit and now - hit[0] < SCALP_HEAVY_CACHE_S:
         return hit[1]
     from . import iceberg as ib
-    flags = ib.detect_absorptions(raw_ticks, symbol)
+    # Détection ÉLARGIE (moitié des seuils de volume et de ratio) : le
+    # graphique filtre ensuite selon les réglages /scalp (2026-10-16) ; la
+    # lecture du bandeau (_absorption_events) refiltre aux seuils par défaut.
+    flags = ib.detect_absorptions(raw_ticks, symbol, min_ratio=ABSORB_RATIO_FLOOR,
+                                  min_total=ib._min_total(symbol) * ABSORB_TOTAL_FLOOR)
     out = [{"ts": float(r.end_ts), "price": float(r.price), "side": r.side,
             "total": float(r.total_size), "ratio": round(float(r.ratio), 1),
             "n_prints": int(r.n_prints)} for r in flags.itertuples()]
@@ -2203,7 +2240,7 @@ def _absorption_marks(symbol: str, candle_times: list[int]) -> list[dict]:
     Lightweight Charts ne place un marqueur que sur le temps d'une bougie."""
     if not candle_times:
         return []
-    merged = _absorption_events(symbol)
+    merged = _absorption_events(symbol, relaxed=True)
     times = np.asarray(sorted(candle_times))
     out = []
     for e in merged:
@@ -3040,9 +3077,12 @@ def _scalp_indicator_snapshot(symbol: str, ctx: dict, spot: float,
     (pas recalculé ici) : les deux appelants en ont de toute façon besoin
     pour autre chose (bougies volume, boucle SSE), pas la peine de lire
     `store.load_ticks` deux fois pour le même instant."""
-    levels = [{"name": r.name, "price": r.price, "color": C[_SC_KIND_COLOR[r.kind]],
-               "kind": r.kind}
-             for r in scalp.build_ladder(symbol, spot, ctx["zg"], ctx["hvl"], ctx["keys"], ctx["walls"])]
+    def ladder(keys, walls):
+        return [{"name": r.name, "price": r.price, "color": C[_SC_KIND_COLOR[r.kind]],
+                 "kind": r.kind}
+                for r in scalp.build_ladder(symbol, spot, ctx["zg"], ctx["hvl"], keys, walls)]
+    levels = ladder(ctx["keys"], ctx["walls"])
+    levels_0dte = ladder(ctx.get("keys_0dte") or {}, ctx.get("walls_0dte") or [])
     confluence = scalp_confluence_zones(symbol)
     try:
         gex_profile = scalp_gex_profile(symbol, spot)
@@ -3055,8 +3095,9 @@ def _scalp_indicator_snapshot(symbol: str, ctx: dict, spot: float,
     except Exception:  # noqa: BLE001 — un profil raté ne doit jamais casser le graphique
         log.exception("Profil order-flow par jambe /scalp v2 indisponible (%s)", symbol)
         orderflow_profile = {"legs": [], "untested": []}
-    return {"levels": levels, "confluence": confluence, "order_flow": order_flow,
-           "gex_profile": gex_profile, "orderflow_profile": orderflow_profile}
+    return {"levels": levels, "levels_0dte": levels_0dte, "confluence": confluence,
+            "order_flow": order_flow, "gex_profile": gex_profile,
+            "orderflow_profile": orderflow_profile}
 
 
 def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
@@ -3078,9 +3119,11 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
     day_ticks = _scalp_day_ticks(symbol)
     snap = _scalp_indicator_snapshot(symbol, ctx, spot, day_ticks)
     levels, confluence = snap["levels"], snap["confluence"]
+    levels_0dte = snap.get("levels_0dte") or []
     order_flow, gex_profile = snap["order_flow"], snap["gex_profile"]
     orderflow_profile = snap["orderflow_profile"]
-    empty = {"candles": [], "markers": [], "absorptions": [], "levels": levels, "confluence": confluence,
+    empty = {"candles": [], "markers": [], "absorptions": [], "levels": levels,
+            "levels_0dte": levels_0dte, "confluence": confluence,
             "order_flow": order_flow, "gex_profile": gex_profile,
             "orderflow_profile": orderflow_profile, "symbol": symbol}
 
@@ -3152,7 +3195,7 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
                       for r in confirmed.itertuples()]
         return {"candles": candles, "markers": markers,
                 "absorptions": _absorption_marks(symbol, [c["time"] for c in candles]),
-                "levels": levels,
+                "levels": levels, "levels_0dte": levels_0dte,
                 "confluence": confluence, "order_flow": order_flow,
                 "gex_profile": gex_profile, "orderflow_profile": orderflow_profile,
                 "symbol": symbol}
@@ -3191,7 +3234,7 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
                    for r in confirmed.itertuples()]
     return {"candles": candles, "markers": markers,
             "absorptions": _absorption_marks(symbol, [c["time"] for c in candles]),
-            "levels": levels, "confluence": confluence,
+            "levels": levels, "levels_0dte": levels_0dte, "confluence": confluence,
             "order_flow": order_flow, "gex_profile": gex_profile,
             "orderflow_profile": orderflow_profile, "symbol": symbol}
 
@@ -4228,6 +4271,42 @@ def create_app() -> Dash:
                                                        {"label": "Put Support", "value": "ps"},
                                                        {"label": "1D Min/Max", "value": "d1"},
                                                        {"label": "Murs GEX", "value": "gex"}]),
+                                html.Span("Échéances :", className="sc-set-lbl"),
+                                dcc.RadioItems(id="scalp-set-expiry", inline=True, className="check",
+                                               persistence=True, persistence_type="local",
+                                               value="all",
+                                               options=[{"label": "Toutes", "value": "all"},
+                                                        {"label": "0DTE", "value": "0dte"}]),
+                                html.Label(["Absorptions : volume min ",
+                                            dcc.Input(id="scalp-set-abs-total", type="number", min=0,
+                                                      step=5, debounce=True,
+                                                      placeholder="40 NQ / 100 ES",
+                                                      persistence=True, persistence_type="local",
+                                                      className="sc-set-num")],
+                                           title="Volume minimum de la salve (contrats). Sous la "
+                                                 "moitié du défaut, rien n'est détecté."),
+                                html.Label(["ratio min ",
+                                            dcc.Input(id="scalp-set-abs-ratio", type="number", min=2,
+                                                      step=0.5, value=4, debounce=True,
+                                                      persistence=True, persistence_type="local",
+                                                      className="sc-set-num")],
+                                           title="Salve ≥ N × la taille affichée avant elle "
+                                                 "(défaut 4, minimum 2)"),
+                                html.Label(["Order flow HVL : × médiane ",
+                                            dcc.Input(id="scalp-set-hvl-ratio", type="number",
+                                                      min=1.5, step=0.5, value=3, debounce=True,
+                                                      persistence=True, persistence_type="local",
+                                                      className="sc-set-num")],
+                                           title="Volume du palier ≥ N × la médiane des paliers "
+                                                 "actifs (défaut 3, minimum 1,5)"),
+                                html.Label(["delta min (%) ",
+                                            dcc.Input(id="scalp-set-hvl-delta", type="number",
+                                                      min=15, max=100, step=5, value=35,
+                                                      debounce=True, persistence=True,
+                                                      persistence_type="local",
+                                                      className="sc-set-num")],
+                                           title="Delta net ≥ N % du volume du palier "
+                                                 "(défaut 35, minimum 15)"),
                                 html.Span(id="scalp-settings-sink", style={"display": "none"}),
                             ], id="scalp-settings-panel", className="sc-settings",
                                style={"display": "none"}),
@@ -4922,7 +5001,8 @@ def create_app() -> Dash:
                     // réglages fins (panneau ⚙) : catégories de niveaux GEX affichées
                     const gs = window._gexSettings || {};
                     const kinds = gs.levelKinds;
-                    const simpleLines = ind.levels ? (d.levels || []).filter(function(lv) {
+                    const levelSrc = (gs.expiry === '0dte' && d.levels_0dte) ? d.levels_0dte : d.levels;
+                    const simpleLines = ind.levels ? (levelSrc || []).filter(function(lv) {
                         return !kinds || !lv.kind || kinds.includes(lv.kind);
                     }).map(function(lv) {
                         return st.series.createPriceLine({
@@ -4953,7 +5033,14 @@ def create_app() -> Dash:
                     // scalp_order_flow_zones) : ligne pointillée cyan,
                     // étiquette volume+côté — distincte des niveaux GEX/HVL
                     // simples (tirets) et de la confluence (pleine dorée).
-                    const flowLines = ind.order_flow ? (d.order_flow || []).map(function(h) {
+                    // seuils réglables (panneau ⚙) : le serveur envoie une
+                    // détection élargie, filtrée ici (défauts = seuils d'origine)
+                    const hvlR = (gs.hvlRatio === undefined) ? 3 : gs.hvlRatio;
+                    const hvlD = (gs.hvlDelta === undefined) ? 0.35 : gs.hvlDelta;
+                    const flowLines = ind.order_flow ? (d.order_flow || []).filter(function(h) {
+                        return (h.vol_ratio == null || h.vol_ratio >= hvlR)
+                            && (h.delta_frac == null || h.delta_frac >= hvlD);
+                    }).map(function(h) {
                         return st.series.createPriceLine({
                             price: h.price, color: '#3987e5', lineWidth: 1,
                             lineStyle: LightweightCharts.LineStyle.Dotted,
@@ -4983,7 +5070,12 @@ def create_app() -> Dash:
                     // rond sous la bougie ; acheteurs absorbés à l'ask =
                     // résistance, rond au-dessus. Texte : prix, volume
                     // absorbé et multiple de la taille affichée.
-                    const absorbMarks = ind.absorptions ? (d.absorptions || []).map(function(a) {
+                    const absDefault = d.symbol === 'ES' ? 100 : 40;
+                    const absT = (gs.absTotal == null) ? absDefault : gs.absTotal;
+                    const absR = (gs.absRatio === undefined) ? 4 : gs.absRatio;
+                    const absorbMarks = ind.absorptions ? (d.absorptions || []).filter(function(a) {
+                        return a.total >= absT && (a.ratio == null || a.ratio >= absR);
+                    }).map(function(a) {
                         const support = a.side === 'SELL';
                         return {
                             time: a.time, position: support ? 'belowBar' : 'aboveBar',
@@ -5141,10 +5233,19 @@ def create_app() -> Dash:
     )
     app.clientside_callback(
         """
-        function(merge, levels) {
+        function(merge, levels, expiry, absTotal, absRatio, hvlRatio, hvlDelta) {
+            const num = function(v, dflt) {
+                return (v === null || v === undefined || v === '' || isNaN(Number(v)))
+                    ? dflt : Number(v);
+            };
             window._gexSettings = {
-                mergePts: (merge === null || merge === undefined || merge === '') ? 2 : Number(merge),
+                mergePts: num(merge, 2),
                 levelKinds: levels || ['zg', 'hvl', 'cw', 'ps', 'd1', 'gex'],
+                expiry: expiry || 'all',
+                absTotal: num(absTotal, null),          // null : défaut du symbole
+                absRatio: num(absRatio, 4),
+                hvlRatio: num(hvlRatio, 3),
+                hvlDelta: num(hvlDelta, 35) / 100,
             };
             const st = window._gexLwChart;
             if (st && st.applyIndicators) st.applyIndicators();
@@ -5154,6 +5255,11 @@ def create_app() -> Dash:
         Output("scalp-settings-sink", "children"),
         Input("scalp-set-merge", "value"),
         Input("scalp-set-levels", "value"),
+        Input("scalp-set-expiry", "value"),
+        Input("scalp-set-abs-total", "value"),
+        Input("scalp-set-abs-ratio", "value"),
+        Input("scalp-set-hvl-ratio", "value"),
+        Input("scalp-set-hvl-delta", "value"),
     )
 
     # Bascule V1/V2 du bandeau (cf. commentaire sur scalp-banner-version dans

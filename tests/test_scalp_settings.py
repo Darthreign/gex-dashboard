@@ -92,3 +92,62 @@ def test_fusion_hvn_lvn_en_zones():
     assert [(z["low"], z["high"]) for z in lvn] == [(31041, 31043)]   # jamais mêlé aux HVN
     assert len(brut) == 6                                   # 0 : aucune fusion
     assert [z["price"] for z in limite] == [31050, 31041]   # les plus récentes d'abord
+
+
+# --- seuils réglables : détection élargie côté serveur, lecture inchangée ---
+
+def _salve(total, before, ts0=1000.0, price=30000.0, side="SELL"):
+    """Une salve de `total` contrats en 5 prints au même prix, taille affichée
+    `before` avant et après (le niveau tient)."""
+    return [{"ts": ts0 + i * 0.2, "price": price, "volume": total / 5, "side": side,
+             "bid_size": before, "ask_size": before, "prev_bid_size": before,
+             "prev_ask_size": before} for i in range(5)]
+
+
+def test_detect_absorptions_plancher_de_volume_reglable():
+    from gex import iceberg as ib
+    df = pd.DataFrame(_salve(30, 5))                 # 30 contrats, ratio 6
+    assert ib.detect_absorptions(df, "NQ").empty     # sous les 40 par défaut
+    assert len(ib.detect_absorptions(df, "NQ", min_total=20)) == 1
+
+
+def test_absorptions_graphique_elargies_bandeau_aux_seuils_par_defaut(monkeypatch):
+    app._ABSORPTIONS_CACHE.clear()
+    rows = (_salve(30, 5, ts0=1000) + _salve(60, 20, ts0=2000, price=30010)   # 60 : ratio 3
+            + _salve(80, 10, ts0=3000, price=30020))                           # 80 : ratio 8
+    monkeypatch.setattr(app, "_scalp_day_ticks", lambda s, sides_only=True: pd.DataFrame(rows))
+    monkeypatch.setattr(app, "scalp_absorption_recent", lambda s: [])
+    graphique = app._absorption_events("NQ", relaxed=True)
+    bandeau = app._absorption_events("NQ")
+    assert sorted(e["price"] for e in graphique) == [30000.0, 30010.0, 30020.0]
+    assert [e["price"] for e in bandeau] == [30020.0]          # 40 contrats et ratio 4
+    app._ABSORPTIONS_CACHE.clear()
+
+
+def test_zones_order_flow_portent_leurs_mesures():
+    app._ORDER_FLOW_CACHE.clear()
+    rng = __import__("numpy").random.default_rng(0)
+    prices = list(rng.choice([29990.0, 30000.0, 30010.0, 30020.0, 30030.0], 400))
+    prices += [30050.0] * 300                          # palier très traité, acheteur
+    sides = ["BUY" if i % 2 else "SELL" for i in range(400)] + ["BUY"] * 240 + ["SELL"] * 60
+    ticks = pd.DataFrame({"price": prices, "volume": 1.0, "side": sides})
+    out = app.scalp_order_flow_zones("NQ", ticks)
+    z = next(z for z in out if z["price"] == 30050.0)
+    assert z["side"] == "BUY" and z["vol_ratio"] >= 3 and z["delta_frac"] == 0.6
+    app._ORDER_FLOW_CACHE.clear()
+
+
+def test_niveaux_0dte_fournis_a_cote_de_toutes_echeances(monkeypatch):
+    monkeypatch.setattr(app, "scalp_confluence_zones", lambda s: [])
+    monkeypatch.setattr(app, "scalp_gex_profile", lambda s, spot: [])
+    monkeypatch.setattr(app, "scalp_order_flow_zones", lambda s, t: [])
+    monkeypatch.setattr(app, "scalp_orderflow_profile", lambda s, t: {"legs": [], "untested": []})
+    ctx = {"zg": 29900.0, "hvl": None, "keys": {"call_wall": 30500.0},
+           "walls": [("GEX1", 30500.0, 1e9)], "keys_0dte": {"call_wall": 30200.0},
+           "walls_0dte": []}
+    snap = app._scalp_indicator_snapshot("NQ", ctx, 30000.0, pd.DataFrame())
+    tout = {lv["name"]: lv["price"] for lv in snap["levels"]}
+    zero = {lv["name"]: lv["price"] for lv in snap["levels_0dte"]}
+    assert tout["Call Wall"] == 30500.0 and zero["Call Wall"] == 30200.0
+    assert "GEX1" in tout and "GEX1" not in zero
+    assert all("kind" in lv for lv in snap["levels"])
