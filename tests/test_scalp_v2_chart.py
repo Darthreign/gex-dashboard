@@ -124,7 +124,7 @@ def test_defaut_temps_construit_des_bougies_1min(monkeypatch, avant_18h):
     # cf. test_tf_temps_calcule_des_pivots_swing pour un vrai aller-retour).
     assert len(out["markers"]) == 1
     assert out["markers"][0]["kind"] == "L"
-    assert out["levels"] and set(out["levels"][0]) == {"name", "price", "color"}
+    assert out["levels"] and set(out["levels"][0]) == {"name", "price", "color", "kind"}
 
 
 def test_tf_temps_calcule_des_pivots_swing(monkeypatch, avant_18h):
@@ -161,7 +161,7 @@ def test_tf_volume_construit_des_bougies_depuis_des_ticks_recents(monkeypatch):
     assert len(out["candles"]) > 0
     c = out["candles"][0]
     assert set(c) == {"time", "open", "high", "low", "close"}
-    assert out["levels"] and set(out["levels"][0]) == {"name", "price", "color"}
+    assert out["levels"] and set(out["levels"][0]) == {"name", "price", "color", "kind"}
 
 
 def test_tf_volume_repli_sur_le_dernier_jour_dispo_si_la_seance_du_jour_est_vide(monkeypatch):

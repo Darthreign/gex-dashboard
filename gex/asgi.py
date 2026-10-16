@@ -55,12 +55,12 @@ async def scalp_indicators_stream(request):
 
 
 async def scalp_chart_stream(request):
-    from .app import CHART_TF_DEFAULT, SCALP_SCHED_SYMBOLS, scalp_chart_channel
+    from .app import CHART_TF_DEFAULT, SCALP_SCHED_SYMBOLS, scalp_chart_channel, swing_param
     symbol = request.path_params["symbol"].upper()
     if symbol not in SCALP_SCHED_SYMBOLS:
         return JSONResponse({"error": "symbole non couvert (NQ/ES seulement)"}, 404)
     tf = request.query_params.get("tf") or CHART_TF_DEFAULT
-    return _sse(scalp_chart_channel(symbol, tf))
+    return _sse(scalp_chart_channel(symbol, tf, swing_param(request.query_params.get("swing"))))
 
 
 async def scalp_panels_stream(request):

@@ -966,3 +966,11 @@ body.sc-keywords-only .sc-edge-status { display: none; }
                      border-radius: 4px; font-size: 12px; padding: 1px 4px; }
 .heat-replay-speed option { background: #1c1c1a; }
 .heat-replay-pos { width: 280px; max-width: 45vw; }
+
+/* réglages fins du graphique /scalp (panneau ⚙) */
+.sc-settings { flex-wrap: wrap; align-items: center; gap: 12px; padding: 6px 8px;
+               font-size: 12px; border-bottom: 1px solid #2c2c2a; }
+.sc-settings label { display: inline-flex; align-items: center; gap: 4px; }
+.sc-set-num { width: 70px; background: transparent; color: var(--ink);
+              border: 1px solid #383835; border-radius: 4px; padding: 1px 4px; }
+.sc-set-lbl { color: var(--muted); }

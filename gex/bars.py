@@ -125,7 +125,8 @@ def range_bars(ticks: pd.DataFrame, bar_range: float) -> pd.DataFrame:
 
 
 def zigzag(bars: pd.DataFrame, min_move: float,
-          price_col: str = "close", ts_col: str = "ts_close") -> pd.DataFrame:
+          price_col: str = "close", ts_col: str = "ts_close", *,
+          wicks: bool = False) -> pd.DataFrame:
     """Swing high/low confirmés : un extremum n'est retenu que lorsque le prix
     s'en est ensuite écarté d'au moins `min_move` dans l'autre sens — la même
     logique que l'indicateur ZigZag classique, appliquée ici à une série de
@@ -133,14 +134,27 @@ def zigzag(bars: pd.DataFrame, min_move: float,
 
     Renvoie un DataFrame (`ts`, `price`, `kind` ∈ {"H", "L"}), dans l'ordre
     chronologique. Le DERNIER point est provisoire (pas encore confirmé par un
-    retracement) — à l'appelant de décider s'il veut le garder."""
+    retracement) — à l'appelant de décider s'il veut le garder.
+
+    `wicks=True` : sommets sur les PLUS HAUTS et creux sur les PLUS BAS des
+    barres (colonnes `high`/`low`), retracements mesurés de mèche à mèche —
+    un swing marqué au corps de bougie tombait à côté du vrai extrême
+    (signalé par l'utilisateur, 2026-10-16). Un extrême n'est confirmé que
+    par une barre POSTÉRIEURE (une seule barre ne fait pas sommet et
+    retournement : l'ordre haut/bas à l'intérieur n'est pas connu).
+    `wicks=False` (défaut) : clôtures seules, comportement historique —
+    celui du bandeau (`swing_move`), mesure validée, inchangée."""
     if min_move <= 0:
         raise ValueError("min_move doit être > 0")
     if bars.empty:
         return pd.DataFrame(columns=["ts", "price", "kind"])
 
-    prices = bars[price_col].to_numpy()
     tss = bars[ts_col].to_numpy()
+    if wicks:
+        highs = bars["high"].to_numpy(dtype=float)
+        lows = bars["low"].to_numpy(dtype=float)
+    else:
+        highs = lows = bars[price_col].to_numpy()
 
     # direction : 0 = pas encore de pivot confirmé, 1 = on cherche le prochain
     # sommet (dernier pivot confirmé = un creux), -1 = on cherche le prochain
@@ -151,18 +165,20 @@ def zigzag(bars: pd.DataFrame, min_move: float,
     hi_i = lo_i = 0
     swings: list[dict] = []
 
-    for i in range(1, len(prices)):
-        if prices[i] > prices[hi_i]:
+    # en mode clôtures, highs is lows : les conditions `lo_i < i`/`hi_i < i`
+    # sont alors toujours vraies quand l'écart est atteint (écart nul sinon)
+    for i in range(1, len(highs)):
+        if highs[i] > highs[hi_i]:
             hi_i = i
-        if prices[i] < prices[lo_i]:
+        if lows[i] < lows[lo_i]:
             lo_i = i
 
-        if direction != 1 and prices[i] - prices[lo_i] >= min_move:
-            swings.append({"ts": tss[lo_i], "price": prices[lo_i], "kind": "L"})
+        if direction != 1 and lo_i < i and highs[i] - lows[lo_i] >= min_move:
+            swings.append({"ts": tss[lo_i], "price": lows[lo_i], "kind": "L"})
             direction = 1
             hi_i = lo_i = i
-        elif direction != -1 and prices[hi_i] - prices[i] >= min_move:
-            swings.append({"ts": tss[hi_i], "price": prices[hi_i], "kind": "H"})
+        elif direction != -1 and hi_i < i and highs[hi_i] - lows[i] >= min_move:
+            swings.append({"ts": tss[hi_i], "price": highs[hi_i], "kind": "H"})
             direction = -1
             hi_i = lo_i = i
 
@@ -171,7 +187,8 @@ def zigzag(bars: pd.DataFrame, min_move: float,
     prov_i = hi_i if direction >= 0 else lo_i
     if not swings or swings[-1]["ts"] != tss[prov_i]:
         kind = "H?" if direction >= 0 else "L?"
-        swings.append({"ts": tss[prov_i], "price": prices[prov_i], "kind": kind})
+        price = highs[prov_i] if direction >= 0 else lows[prov_i]
+        swings.append({"ts": tss[prov_i], "price": price, "kind": kind})
 
     return pd.DataFrame(swings)
 

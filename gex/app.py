@@ -2343,7 +2343,7 @@ def _scalp_swing_legs(day_ticks: pd.DataFrame, symbol: str) -> pd.DataFrame:
     bars = volume_bars(day_ticks, bar_volume=60.0)
     if len(bars) < 5:
         return pd.DataFrame(columns=["ts", "price", "kind"])
-    swings = zigzag(bars, min_move=scalp.move_threshold(symbol) * 0.6)
+    swings = zigzag(bars, min_move=scalp.move_threshold(symbol) * 0.6, wicks=True)
     return swings[~swings["kind"].str.endswith("?")].reset_index(drop=True)
 
 
@@ -2409,6 +2409,7 @@ def scalp_orderflow_profile(symbol: str, day_ticks: pd.DataFrame) -> dict:
 _ORDERFLOW_UNTESTED_CACHE: dict[str, tuple[float, list[dict]]] = {}
 SCALP_FULLSCAN_CACHE_S = 60.0  # bien plus large que SCALP_HEAVY_CACHE_S (10s)
 SCALP_UNTESTED_MAX = 20  # zones HVN/LVN affichées, les plus récentes (cf. docstring)
+SCALP_UNTESTED_RAW_MAX = 60  # nœuds bruts envoyés, fusionnés en zones à l'affichage
 
 
 def scalp_orderflow_untested(symbol: str, day_ticks: pd.DataFrame) -> list[dict]:
@@ -2477,32 +2478,24 @@ def scalp_orderflow_untested(symbol: str, day_ticks: pd.DataFrame) -> list[dict]
     # garde la plus RÉCENTE (construit en ordre chronologique, dédupliqué
     # en sens inverse).
     #
-    # Espacement minimum (2 paliers) entre deux zones gardées : des jambes
-    # courtes/serrées (consolidation) produisent des extrêmes sur des
-    # paliers ADJACENTS d'une jambe à l'autre — sans ce filtre, l'affichage
-    # devient un escalier dense (ex. 31040/31035/31030 à la suite) plutôt
-    # que quelques niveaux significatifs.
-    #
-    # Plafonné à SCALP_UNTESTED_MAX (20) : le scan lui-même porte sur la
-    # séance complète (pas de limite de jambes), mais 150+ lignes de prix
-    # rendraient le graphique illisible — seules les plus récentes (donc
-    # les plus proches de la structure actuelle) ont une vraie valeur de
-    # lecture pour un scalpeur. Demande explicite de l'utilisateur : scan
-    # complet en arrière-plan, affichage limité.
-    min_gap = _orderflow_vp_bucket(symbol) * 2
+    # (Jusqu'au 2026-10-16 : espacement minimum de 2 paliers entre deux nœuds
+    # gardés, contre l'« escalier » de paliers adjacents en consolidation, et
+    # plafond à SCALP_UNTESTED_MAX — ces deux règles s'appliquent maintenant
+    # APRÈS fusion, côté affichage.)
+    # (2026-10-16) Plus de filtre d'espacement minimum ici : les nœuds proches
+    # sont désormais FUSIONNÉS en zones à l'affichage (réglage « fusion
+    # HVN/LVN » de /scalp, cf. mergeUntested dans le script du graphique) au
+    # lieu de ne garder que le plus récent. Plafond relevé d'autant
+    # (SCALP_UNTESTED_RAW_MAX nœuds bruts, les plus récents).
     seen_price: set[float] = set()
-    kept_prices: list[float] = []
     out = []
     for u in reversed(untested):
         price = u["price"]
         if price in seen_price:
             continue
-        if any(abs(price - p) < min_gap for p in kept_prices):
-            continue
         seen_price.add(price)
-        kept_prices.append(price)
         out.append(u)
-        if len(out) >= SCALP_UNTESTED_MAX:
+        if len(out) >= SCALP_UNTESTED_RAW_MAX:
             break
     _ORDERFLOW_UNTESTED_CACHE[symbol] = (now, out)
     return out
@@ -2645,8 +2638,21 @@ def scalp_indicators_channel(symbol: str, lang: str, swing: bool) -> broadcast.C
     return broadcast.channel(("scalp-ind", symbol, lang, swing), factory, 1.0)
 
 
-def scalp_chart_channel(symbol: str, tf: str) -> broadcast.Channel:
-    """Canal du flux /chart-stream (cf. scalp_indicators_channel)."""
+def swing_param(raw) -> float | None:
+    """Seuil du swing H/L choisi dans les réglages /scalp (points), borné et
+    arrondi au quart de point ; None = défaut du bandeau."""
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not v > 0:
+        return None
+    return round(min(max(v, 0.25), 1000.0) * 4) / 4
+
+
+def scalp_chart_channel(symbol: str, tf: str, swing: float | None = None) -> broadcast.Channel:
+    """Canal du flux /chart-stream (cf. scalp_indicators_channel) ; un canal
+    par (symbole, tf, seuil de swing)."""
     # Canal partagé par (symbole, tf). Pré-filtre conservé : les bougies et
     # niveaux ne changent pas sans que le spot bouge, sinon revérification
     # toutes les 5 s ; poussé seulement si la signature change.
@@ -2662,7 +2668,7 @@ def scalp_chart_channel(symbol: str, tf: str) -> broadcast.Channel:
             if spot == last["spot"] and now_mono - last["check"] < 5.0:
                 return None
             last["spot"], last["check"] = spot, now_mono
-            data = scalp_v2_chart_data(symbol, ctx, spot, tf=tf)
+            data = scalp_v2_chart_data(symbol, ctx, spot, tf=tf, swing_pts=swing)
             candles = data.get("candles") or []
             markers = data.get("markers") or []
             tail = candles[-1] if candles else None
@@ -2674,7 +2680,7 @@ def scalp_chart_channel(symbol: str, tf: str) -> broadcast.Channel:
             return f"data: {json.dumps(data)}\n\n"
         return produce
 
-    return broadcast.channel(("scalp-chart", symbol, tf), factory, 1.0)
+    return broadcast.channel(("scalp-chart", symbol, tf, swing), factory, 1.0)
 
 
 SCALP_PANELS = ("head", "ladder", "prints", "hedge", "price")
@@ -3034,7 +3040,8 @@ def _scalp_indicator_snapshot(symbol: str, ctx: dict, spot: float,
     (pas recalculé ici) : les deux appelants en ont de toute façon besoin
     pour autre chose (bougies volume, boucle SSE), pas la peine de lire
     `store.load_ticks` deux fois pour le même instant."""
-    levels = [{"name": r.name, "price": r.price, "color": C[_SC_KIND_COLOR[r.kind]]}
+    levels = [{"name": r.name, "price": r.price, "color": C[_SC_KIND_COLOR[r.kind]],
+               "kind": r.kind}
              for r in scalp.build_ladder(symbol, spot, ctx["zg"], ctx["hvl"], ctx["keys"], ctx["walls"])]
     confluence = scalp_confluence_zones(symbol)
     try:
@@ -3053,7 +3060,8 @@ def _scalp_indicator_snapshot(symbol: str, ctx: dict, spot: float,
 
 
 def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
-                        tf: str = CHART_TF_DEFAULT, lookback_min: int | None = None) -> dict:
+                        tf: str = CHART_TF_DEFAULT, lookback_min: int | None = None,
+                        swing_pts: float | None = None) -> dict:
     """Bougies (volume OU temps, cf. `tf`) + pivots swing (base volume
     seulement) + niveaux (GEX/HVL/Flip/murs) pour le graphique TradingView
     Lightweight Charts de `/scalp` v2 — remplace `scalp_price_fig` (Plotly,
@@ -3077,6 +3085,11 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
             "orderflow_profile": orderflow_profile, "symbol": symbol}
 
     kind, size = tf[0], int(tf[1:])
+    # Swing H/L du graphique : sur les MÈCHES (plus hauts / plus bas, cf.
+    # bars.zigzag) ; seuil réglable dans les réglages /scalp, défaut = celui
+    # du bandeau (move_threshold × 0,6 : 15 pts NQ, 3,6 pts ES)
+    swing_pts = float(swing_pts) if swing_pts and swing_pts > 0 \
+        else scalp.move_threshold(symbol) * 0.6
 
     if kind == "t":
         # Indépendant de day_ticks à dessein : les bougies 1 min déjà
@@ -3133,7 +3146,7 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
         if len(bars) >= 5:
             zz_bars = bars.reset_index(drop=True).copy()
             zz_bars["ts_close"] = epoch.to_numpy()
-            swings = zigzag(zz_bars, min_move=scalp.move_threshold(symbol) * 0.6)
+            swings = zigzag(zz_bars, min_move=swing_pts, wicks=True)
             confirmed = swings[~swings["kind"].str.endswith("?")]
             markers = [{"time": int(r.ts), "price": r.price, "kind": r.kind}
                       for r in confirmed.itertuples()]
@@ -3170,7 +3183,9 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
                 "low": r.low, "close": r.close} for r in bars_df.itertuples()]
     markers = []
     if len(bars_df) >= 5:
-        swings = zigzag(bars_df, min_move=scalp.move_threshold(symbol) * 0.6)
+        # horodatés à l'OUVERTURE de la barre, comme les bougies affichées
+        # (sinon le marqueur ne tombe sur aucune bougie)
+        swings = zigzag(bars_df, min_move=swing_pts, ts_col="ts_open", wicks=True)
         confirmed = swings[~swings["kind"].str.endswith("?")]
         markers = [{"time": int(r.ts), "price": r.price, "kind": r.kind}
                    for r in confirmed.itertuples()]
@@ -4182,7 +4197,40 @@ def create_app() -> Dash:
                                                   "séance (rond sous la bougie : vendeurs "
                                                   "absorbés au bid = support ; au-dessus : "
                                                   "acheteurs absorbés à l'ask = résistance)"),
+                                html.Button("⚙ Réglages", id="scalp-settings-toggle",
+                                            className="sc-draw-btn sc-ind-btn",
+                                            title="Réglages fins des indicateurs du graphique"),
                             ], className="sc-ind-toolbar"),
+                            # Réglages fins (2026-10-16) : cf. callbacks « scalp-settings »
+                            html.Div([
+                                html.Label(["Swing H/L (pts) ",
+                                            dcc.Input(id="scalp-set-swing", type="number", min=0.25,
+                                                      step=0.25, debounce=True,
+                                                      placeholder="défaut : 15 NQ / 3,6 ES",
+                                                      persistence=True, persistence_type="local",
+                                                      className="sc-set-num")],
+                                           title="Retracement minimum, de mèche à mèche, pour "
+                                                 "confirmer un sommet ou un creux"),
+                                html.Label(["Fusion HVN/LVN (pts) ",
+                                            dcc.Input(id="scalp-set-merge", type="number", min=0,
+                                                      step=0.25, value=2, debounce=True,
+                                                      persistence=True, persistence_type="local",
+                                                      className="sc-set-num")],
+                                           title="Nœuds de même nature à moins de cet écart "
+                                                 "fusionnés en une zone (0 : aucune fusion)"),
+                                html.Span("Niveaux GEX :", className="sc-set-lbl"),
+                                dcc.Checklist(id="scalp-set-levels", inline=True, className="check",
+                                              persistence=True, persistence_type="local",
+                                              value=["zg", "hvl", "cw", "ps", "d1", "gex"],
+                                              options=[{"label": "Flip", "value": "zg"},
+                                                       {"label": "HVL", "value": "hvl"},
+                                                       {"label": "Call Wall", "value": "cw"},
+                                                       {"label": "Put Support", "value": "ps"},
+                                                       {"label": "1D Min/Max", "value": "d1"},
+                                                       {"label": "Murs GEX", "value": "gex"}]),
+                                html.Span(id="scalp-settings-sink", style={"display": "none"}),
+                            ], id="scalp-settings-panel", className="sc-settings",
+                               style={"display": "none"}),
                             html.Div(id="scalp-lw-chart", className="sc-lw-chart"),
                         ], id="scalp-lw-card", className="sc-card sc-underlying"),
                         dcc.Store(id="scalp-lw-data"),
@@ -4871,7 +4919,12 @@ def create_app() -> Dash:
                     if (!d) return;
                     const ind = window._gexIndicators;
                     for (const pl of st.priceLines) { st.series.removePriceLine(pl); }
-                    const simpleLines = ind.levels ? (d.levels || []).map(function(lv) {
+                    // réglages fins (panneau ⚙) : catégories de niveaux GEX affichées
+                    const gs = window._gexSettings || {};
+                    const kinds = gs.levelKinds;
+                    const simpleLines = ind.levels ? (d.levels || []).filter(function(lv) {
+                        return !kinds || !lv.kind || kinds.includes(lv.kind);
+                    }).map(function(lv) {
                         return st.series.createPriceLine({
                             price: lv.price, color: lv.color, lineWidth: 1,
                             lineStyle: LightweightCharts.LineStyle.Dashed,
@@ -4951,8 +5004,13 @@ def create_app() -> Dash:
                         st.ofProfile.setVisible(ind.orderflow_profile);
                         st.ofProfile.setUntestedVisible(ind.orderflow_untested);
                         st.ofProfile.setData(((d.orderflow_profile || {}).legs) || []);
-                        st.ofProfile.setUntested(((d.orderflow_profile || {}).untested) || [],
-                                                 (d.orderflow_profile || {}).bucket_size);
+                        // nœuds proches de même nature fusionnés en zones
+                        // (réglage « Fusion HVN/LVN », 2 pts par défaut)
+                        const rawNodes = ((d.orderflow_profile || {}).untested) || [];
+                        const gap = (gs.mergePts === undefined) ? 2 : gs.mergePts;
+                        const zones = window.GexMergeUntested
+                            ? window.GexMergeUntested(rawNodes, gap, 20) : rawNodes;
+                        st.ofProfile.setUntested(zones, (d.orderflow_profile || {}).bucket_size);
                     }
                 };
                 setupDrawingTools(chart, series, container);
@@ -5010,7 +5068,7 @@ def create_app() -> Dash:
     # (la route ne gère qu'un seul tf par connexion).
     app.clientside_callback(
         """
-        function(symbol, path, tf, ergo) {
+        function(symbol, path, tf, ergo, swing) {
             if (window._scChartStream) { window._scChartStream.close(); window._scChartStream = null; }
             if (window._scChartStreamTimer) { clearTimeout(window._scChartStreamTimer); window._scChartStreamTimer = null; }
             // Réactivé 2026-10-08 : la mesure d'urgence du 06 coupait ce flux
@@ -5032,7 +5090,9 @@ def create_app() -> Dash:
             const state = {delay: 3000};
             const connect = function() {
                 const qtf = encodeURIComponent(tf || '');
-                const es = new EventSource(`/api/v1/${symbol}/chart-stream?tf=${qtf}`);
+                // seuil du swing H/L (réglages /scalp) : vide = défaut du bandeau
+                const qsw = (swing && Number(swing) > 0) ? `&swing=${encodeURIComponent(swing)}` : '';
+                const es = new EventSource(`/api/v1/${symbol}/chart-stream?tf=${qtf}${qsw}`);
                 window._scChartStream = es;
                 es.onmessage = function(ev) {
                     state.delay = 3000;
@@ -5059,7 +5119,41 @@ def create_app() -> Dash:
         Input("url", "pathname"),
         Input("scalp-chart-tf", "value"),
         Input("sc-ergo-options", "value"),
+        Input("scalp-set-swing", "value"),
         prevent_initial_call="initial_duplicate",
+    )
+
+    # Réglages fins du graphique /scalp (2026-10-16, demande de l'utilisateur) :
+    # panneau ⚙ ouvert/fermé, puis fusion HVN/LVN et filtre des niveaux GEX
+    # appliqués côté navigateur (applyIndicators) ; le seuil du swing, lui,
+    # rouvre le flux du graphique (callback ci-dessus). Valeurs persistées
+    # par le navigateur (persistence locale des composants).
+    app.clientside_callback(
+        """
+        function(n, style) {
+            const open = (n || 0) % 2 === 1;
+            return Object.assign({}, style || {}, {display: open ? 'flex' : 'none'});
+        }
+        """,
+        Output("scalp-settings-panel", "style"),
+        Input("scalp-settings-toggle", "n_clicks"),
+        State("scalp-settings-panel", "style"),
+    )
+    app.clientside_callback(
+        """
+        function(merge, levels) {
+            window._gexSettings = {
+                mergePts: (merge === null || merge === undefined || merge === '') ? 2 : Number(merge),
+                levelKinds: levels || ['zg', 'hvl', 'cw', 'ps', 'd1', 'gex'],
+            };
+            const st = window._gexLwChart;
+            if (st && st.applyIndicators) st.applyIndicators();
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("scalp-settings-sink", "children"),
+        Input("scalp-set-merge", "value"),
+        Input("scalp-set-levels", "value"),
     )
 
     # Bascule V1/V2 du bandeau (cf. commentaire sur scalp-banner-version dans
@@ -6261,7 +6355,7 @@ def create_app() -> Dash:
             return Response("symbole non couvert (NQ/ES seulement)", status=404)
         tf = request.args.get("tf") or CHART_TF_DEFAULT
 
-        ch = scalp_chart_channel(symbol, tf)
+        ch = scalp_chart_channel(symbol, tf, swing_param(request.args.get("swing")))
         return Response(broadcast.sse_events(ch), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
