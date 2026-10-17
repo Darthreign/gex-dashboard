@@ -507,6 +507,131 @@ def gamma_analysis(rt: pd.DataFrame, split_day: str, sessions: list[dict]) -> li
     return lines
 
 
+def _labels(train: pd.DataFrame, test: pd.DataFrame) -> dict[str, pd.Series]:
+    """Étiquettes des critères essayés, sur le TEST, bornes calées sur
+    l'APPRENTISSAGE (mêmes règles que les sections précédentes)."""
+    out: dict[str, pd.Series] = {}
+
+    def terc(col, names):
+        if col not in train or train[col].notna().sum() < 30:
+            return None
+        e = excess.tercile_edges(train[col])
+        return test[col].map(lambda x: names[excess.tercile(x, e)])
+    dur = terc("duree_reaction_s", {"bas": "express", "milieu": "normale", "haut": "lente",
+                                    "": ""})
+    if dur is not None:
+        out["duree"] = dur
+    for key in ("g_regime", "g_regime_tdb2"):
+        if key in test:
+            out[key] = test[key]
+    if dur is not None and "g_regime" in test:
+        out["regime_duree"] = test["g_regime"] + " / " + dur
+    if "couleur" in test:
+        out["couleur"] = test["couleur"]
+    if "sup_exces" in train and "sup_reaction" in train:
+        ea = excess.tercile_edges(train["sup_exces"])
+        eb = excess.tercile_edges(train["sup_reaction"])
+        out["situation"] = pd.Series(
+            [excess.support_situation(excess.tercile(a, ea), excess.tercile(b, eb))
+             for a, b in zip(test["sup_exces"], test["sup_reaction"])], index=test.index)
+    it = terc("intensite", excess.INTENSITY_LABELS)
+    if it is not None:
+        out["intensite"] = it
+    w = terc("sup_60s", {"bas": "contre", "milieu": "neutre", "haut": "pour", "": ""})
+    if w is not None:
+        out["flux_60s"] = w
+    return out
+
+
+# (critère, groupe A, groupe B, libellé) — tous les critères essayés depuis le
+# 10/10 : la correction pour tests multiples porte sur l'ENSEMBLE, pas sur les
+# seuls qui ont l'air de marcher
+CONTRASTS = (
+    ("g_regime", "accélérateur", "frein", "régime (étude) : accélérateur − frein"),
+    ("g_regime_tdb2", "accélérateur", "frein", "zone /scalp : accélérateur − frein"),
+    ("duree", "express", "lente", "réaction : express − lente"),
+    ("regime_duree", "accélérateur / express", "frein / lente",
+     "accélérateur + express − frein + lente"),
+    ("couleur", "rouge", "vert", "voyant : rouge − vert"),
+    ("situation", "soutien maintenu", "jamais de soutien",
+     "piste 1 : soutien maintenu − jamais de soutien"),
+    ("intensite", "flux qui enfle", "flux qui s'éteint", "intensité : enfle − s'éteint"),
+    ("flux_60s", "pour", "contre", "flux des 60 dernières s : pour − contre"),
+)
+
+
+def robustness_analysis(rt: pd.DataFrame, split_day: str, n_boot: int = 2000) -> list[str]:
+    """Intervalles et tests par RÉÉCHANTILLONNAGE DES SÉANCES (gex/edgestats.py)
+    sur la moitié TEST, avec correction pour tests multiples."""
+    from gex import edgestats as es
+    if rt.empty or "continuation" not in rt:
+        return ["_(aucun second test)_", ""]
+    train, test = rt[rt["day"] < split_day], rt[rt["day"] >= split_day].reset_index(drop=True)
+    if train["day"].nunique() < 20 or test["day"].nunique() < 20:
+        return [f"_Trop peu de séances de part et d'autre du {split_day}._", ""]
+    labels = _labels(train, test)
+    lines = ["Les seconds tests d'une même séance ne sont pas indépendants : intervalles et "
+             "p-values sont calculés en tirant des SÉANCES entières avec remise "
+             f"({n_boot} tirages), moitié TEST seulement ({test['day'].nunique()} séances). "
+             "`ic95_naif` = intervalle classique qui compte chaque cas comme indépendant "
+             "(trop étroit) ; `p_holm` = p-value corrigée pour l'ensemble des critères "
+             "essayés : un écart avec `p_holm` >= 0,05 peut venir du hasard d'avoir "
+             "beaucoup cherché.", ""]
+    if "regime_duree" in labels:
+        rows = []
+        lab = labels["regime_duree"]
+        for cell in sorted(set(lab) - {""}):
+            if cell.endswith(" / ") or cell.startswith("inconnu"):
+                continue
+            g = test[lab == cell]
+            if len(g) < 20:
+                continue
+            row = {"régime / réaction": cell, "n": len(g), "seances": g["day"].nunique()}
+            for m in (50.0, 100.0):
+                k = int((g["continuation"] >= m).sum())
+                lo, hi = es.cluster_ci(g, "continuation", es.share_at_least(m), n_boot)
+                wl, wh = excess.wilson(k, len(g))
+                row[f"cont>={m:g}_%"] = round(100 * k / len(g), 1)
+                row[f"ic95_séances_{m:g}"] = f"{lo:.0f}-{hi:.0f}"
+                row[f"ic95_naif_{m:g}"] = f"{100 * wl:.0f}-{100 * wh:.0f}"
+            lo, hi = es.cluster_ci(g, "continuation", es.quantile_of(0.9), n_boot)
+            row["cont_p90"] = round(float(g["continuation"].quantile(0.9)))
+            row["ic95_p90"] = f"{lo:.0f}-{hi:.0f}"
+            rows.append(row)
+        if rows:
+            lines += ["#### TEST — régime × réaction, intervalles par séances", "",
+                      "`cont_p90` : une fois sur dix, la prolongation dépasse ce nombre de "
+                      "points (ta douleur sans stop) ; `ic95_p90` : son intervalle.", "",
+                      _table(pd.DataFrame(rows).set_index("régime / réaction")), ""]
+    tests = []
+    for key, a, b, name in CONTRASTS:
+        if key not in labels:
+            continue
+        for m in (50.0, 100.0):
+            r = es.diff_test(test, labels[key], a, b, "continuation", es.share_at_least(m),
+                             n_boot)
+            if r["n_a"] < 10 or r["n_b"] < 10:
+                continue
+            tests.append({"critère": name, "seuil": f">= {m:g} pts", "n_A": r["n_a"],
+                          "n_B": r["n_b"], "écart_pts_%": round(r["diff"], 1),
+                          "ic95": f"{r['ic_lo']:+.0f} à {r['ic_hi']:+.0f}", "p": r["p"]})
+    if tests:
+        df = pd.DataFrame(tests)
+        df["p_holm"] = es.holm(df["p"])
+        df["verdict"] = np.where(df["p_holm"] < 0.05, "tient",
+                                 np.where(df["p"] < 0.05, "fragile (tests multiples)",
+                                          "pas démontré"))
+        df["p"] = df["p"].map(lambda x: f"{x:.2g}")
+        df["p_holm"] = df["p_holm"].map(lambda x: f"{x:.2g}")
+        lines += ["#### TEST — chaque critère essayé : écart A − B de la part de "
+                  "prolongations", "",
+                  f"{len(df)} comparaisons. `tient` : significatif même après correction ; "
+                  "`fragile` : significatif seul, pas après correction ; `pas démontré` : "
+                  "compatible avec le hasard.", "",
+                  _table(df.set_index(["critère", "seuil"])), ""]
+    return lines
+
+
 def retests(ev: pd.DataFrame) -> pd.DataFrame:
     if ev.empty or "retest" not in ev:
         return pd.DataFrame()
@@ -756,6 +881,8 @@ def report(symbol: str, excess_pts: float, swing_pts: float, horizon: int,
     if gamma:
         lines += ["## Piste 2 — positionnement gamma au second test", ""]
         lines += gamma_analysis(rt, split, sessions)
+        lines += ["## Le hasard peut-il l'expliquer ?", ""]
+        lines += robustness_analysis(rt, split)
     evb, info = run(sessions, "B", excess_pts, swing_pts, horizon)
     lines += ["## Variante B — en EM (ensemble, au franchissement)", ""]
     if info.get("erreur"):
