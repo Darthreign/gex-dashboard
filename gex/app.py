@@ -4240,10 +4240,16 @@ def create_app() -> Dash:
                                                   "séance (rond sous la bougie : vendeurs "
                                                   "absorbés au bid = support ; au-dessus : "
                                                   "acheteurs absorbés à l'ask = résistance)"),
+                                html.Button("Expected move", id="scalp-ind-em-toggle",
+                                            className="sc-draw-btn sc-ind-btn",
+                                            title="Cadre d'amplitude de l'open US et mouvement "
+                                                  "attendu du jour (vol implicite et straddle)"),
                                 html.Button("⚙ Réglages", id="scalp-settings-toggle",
                                             className="sc-draw-btn sc-ind-btn",
                                             title="Réglages fins des indicateurs du graphique"),
                             ], className="sc-ind-toolbar"),
+                            html.Div(id="scalp-em-info", className="sc-em-info",
+                                     style={"display": "none"}),
                             # Réglages fins (2026-10-16) : cf. callbacks « scalp-settings »
                             html.Div([
                                 html.Label(["Swing H/L (pts) ",
@@ -4307,6 +4313,63 @@ def create_app() -> Dash:
                                                       className="sc-set-num")],
                                            title="Delta net ≥ N % du volume du palier "
                                                  "(défaut 35, minimum 15)"),
+                                html.Span("Cadre open US :", className="sc-set-lbl"),
+                                html.Label(["fenêtre (NY) ",
+                                            dcc.Input(id="scalp-set-of-window", type="text",
+                                                      value="0930-1030", debounce=True,
+                                                      persistence=True, persistence_type="local",
+                                                      className="sc-set-num",
+                                                      style={"width": "90px"})],
+                                           title="Fenêtre mesurée, heure de New York "
+                                                 "(0930-1030 = 15h30-16h30 à Paris)"),
+                                html.Label(["séances ",
+                                            dcc.Input(id="scalp-set-of-n", type="number", min=1,
+                                                      max=500, step=1, value=60, debounce=True,
+                                                      persistence=True, persistence_type="local",
+                                                      className="sc-set-num")]),
+                                dcc.RadioItems(id="scalp-set-of-mode", inline=True, className="check",
+                                               persistence=True, persistence_type="local",
+                                               value="center",
+                                               options=[{"label": "centré sur l'open",
+                                                         "value": "center"},
+                                                        {"label": "extensions moyennes haut/bas",
+                                                         "value": "ext"}]),
+                                dcc.Checklist(id="scalp-set-of-opts", inline=True, className="check",
+                                              persistence=True, persistence_type="local",
+                                              value=["fill", "ext50", "ext100", "base", "ivem",
+                                                     "stem"],
+                                              options=[{"label": "remplir", "value": "fill"},
+                                                       {"label": "ext. 50 %", "value": "ext50"},
+                                                       {"label": "ext. 100 %", "value": "ext100"},
+                                                       {"label": "jusqu'à 16h00",
+                                                        "value": "extend"},
+                                                       {"label": "ajusté par la vol implicite",
+                                                        "value": "ivadj"},
+                                                       {"label": "EM vol implicite",
+                                                        "value": "ivem"},
+                                                       {"label": "EM straddle", "value": "stem"},
+                                                       {"label": "prix de départ",
+                                                        "value": "base"}]),
+                                html.Label(["départ EM ",
+                                            dcc.Dropdown(id="scalp-set-em-anchor", clearable=False,
+                                                         persistence=True,
+                                                         persistence_type="local",
+                                                         value="close", searchable=False,
+                                                         style={"width": "200px"},
+                                                         options=[{"label": "clôture de la veille (16h00 NY)",
+                                                                   "value": "close"},
+                                                                  {"label": "ouverture Globex (18h00 NY)",
+                                                                   "value": "globex"},
+                                                                  {"label": "minuit NY",
+                                                                   "value": "midnight"},
+                                                                  {"label": "open 9h30 NY",
+                                                                   "value": "open"}])]),
+                                html.Label(["σ × ",
+                                            dcc.Input(id="scalp-set-em-mult", type="number",
+                                                      min=0.1, step=0.25, value=1, debounce=True,
+                                                      persistence=True, persistence_type="local",
+                                                      className="sc-set-num")],
+                                           title="1 = ±1σ ; 0,5 = demi-mouvement attendu"),
                                 html.Span(id="scalp-settings-sink", style={"display": "none"}),
                             ], id="scalp-settings-panel", className="sc-settings",
                                style={"display": "none"}),
@@ -4971,7 +5034,8 @@ def create_app() -> Dash:
                 // (callbacks séparés plus bas), jamais dupliquée.
                 let indicators = { levels: true, confluence: true, order_flow: true,
                                    gex_profile: true, markers: true, orderflow_profile: true,
-                                   orderflow_untested: true, absorptions: true };
+                                   orderflow_untested: true, absorptions: true,
+                                   expected_move: true };
                 try {
                     const saved = JSON.parse(window.localStorage.getItem('gex-scalp-indicators') || 'null');
                     if (saved) indicators = Object.assign(indicators, saved);
@@ -4988,7 +5052,8 @@ def create_app() -> Dash:
                  ["scalp-ind-markers-toggle", "markers"],
                  ["scalp-ind-ofprofile-toggle", "orderflow_profile"],
                  ["scalp-ind-untested-toggle", "orderflow_untested"],
-                 ["scalp-ind-absorb-toggle", "absorptions"]].forEach(function(pair) {
+                 ["scalp-ind-absorb-toggle", "absorptions"],
+                 ["scalp-ind-em-toggle", "expected_move"]].forEach(function(pair) {
                     const btn = document.getElementById(pair[0]);
                     if (btn) btn.classList.toggle('sc-draw-active', indicators[pair[1]]);
                 });
@@ -5103,6 +5168,11 @@ def create_app() -> Dash:
                         const zones = window.GexMergeUntested
                             ? window.GexMergeUntested(rawNodes, gap, 20) : rawNodes;
                         st.ofProfile.setUntested(zones, (d.orderflow_profile || {}).bucket_size);
+                    }
+                    // Cadre de l'open US + mouvement attendu (assets/gex-openframe.js)
+                    if (window.GexOpenFrame) {
+                        try { window.GexOpenFrame.update(st, d, gs, ind.expected_move); }
+                        catch (e) { /* un indicateur raté ne casse pas le graphique */ }
                     }
                 };
                 setupDrawingTools(chart, series, container);
@@ -5233,7 +5303,8 @@ def create_app() -> Dash:
     )
     app.clientside_callback(
         """
-        function(merge, levels, expiry, absTotal, absRatio, hvlRatio, hvlDelta) {
+        function(merge, levels, expiry, absTotal, absRatio, hvlRatio, hvlDelta,
+                 ofWindow, ofN, ofMode, ofOpts, emAnchor, emMult) {
             const num = function(v, dflt) {
                 return (v === null || v === undefined || v === '' || isNaN(Number(v)))
                     ? dflt : Number(v);
@@ -5246,6 +5317,16 @@ def create_app() -> Dash:
                 absRatio: num(absRatio, 4),
                 hvlRatio: num(hvlRatio, 3),
                 hvlDelta: num(hvlDelta, 35) / 100,
+            };
+            const o = ofOpts || [];
+            window._gexSettings.of = {
+                window: (ofWindow && /^\d{4}-\d{4}$/.test(ofWindow)) ? ofWindow : '0930-1030',
+                n: Math.max(1, Math.min(500, Math.round(num(ofN, 60)))),
+                mode: ofMode || 'center',
+                fill: o.includes('fill'), ext50: o.includes('ext50'), ext100: o.includes('ext100'),
+                extend: o.includes('extend'), ivadj: o.includes('ivadj'),
+                ivEm: o.includes('ivem'), straddleEm: o.includes('stem'), base: o.includes('base'),
+                anchor: emAnchor || 'close', mult: num(emMult, 1),
             };
             const st = window._gexLwChart;
             if (st && st.applyIndicators) st.applyIndicators();
@@ -5260,6 +5341,12 @@ def create_app() -> Dash:
         Input("scalp-set-abs-ratio", "value"),
         Input("scalp-set-hvl-ratio", "value"),
         Input("scalp-set-hvl-delta", "value"),
+        Input("scalp-set-of-window", "value"),
+        Input("scalp-set-of-n", "value"),
+        Input("scalp-set-of-mode", "value"),
+        Input("scalp-set-of-opts", "value"),
+        Input("scalp-set-em-anchor", "value"),
+        Input("scalp-set-em-mult", "value"),
     )
 
     # Bascule V1/V2 du bandeau (cf. commentaire sur scalp-banner-version dans
@@ -5314,6 +5401,7 @@ def create_app() -> Dash:
         ("orderflow_profile", "scalp-ind-ofprofile-toggle"),
         ("orderflow_untested", "scalp-ind-untested-toggle"),
         ("absorptions", "scalp-ind-absorb-toggle"),
+        ("expected_move", "scalp-ind-em-toggle"),
     ):
         app.clientside_callback(
             """
@@ -6422,6 +6510,25 @@ def create_app() -> Dash:
         return Response(broadcast.sse_events(lw_channel(name, params)),
                         mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    # Cadre d'amplitude de l'open US + mouvement attendu (gex/openframe.py,
+    # portage du Pine de l'utilisateur) : ingrédients pour le graphique
+    # /scalp, les lignes sont construites par assets/gex-openframe.js
+    @app.server.route("/api/v1/<symbol>/open-frame")
+    def _open_frame(symbol):
+        from flask import jsonify, request
+        from . import openframe
+        symbol = symbol.upper()
+        if symbol not in SCALP_SCHED_SYMBOLS:
+            return jsonify({"error": "symbole non couvert (NQ/ES seulement)"}), 404
+        a = request.args
+        ctx = scalp_context(symbol) or {}
+        try:
+            n = int(a.get("n") or 60)
+        except ValueError:
+            n = 60
+        return jsonify(openframe.compute(symbol, a.get("window"), n, a.get("anchor") or "close",
+                                         straddle_em=ctx.get("em")))
 
     @app.server.route("/api/v1/heatmap-replay")
     def _heatmap_replay():
