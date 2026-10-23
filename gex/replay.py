@@ -123,3 +123,62 @@ def load(symbol: str, session: str) -> list[dict]:
         out.append({**f, "profile": prof, "lo": lo, "hi": hi})
     out.sort(key=lambda f: f["t"])
     return out
+
+
+# --- séances sans images enregistrées : reconstruction depuis les chaînes ----
+
+_SNAP_CACHE: dict = {}
+
+
+def _snapshot_keys(symbol: str) -> tuple[str, ...]:
+    """Clés de stockage des chaînes affichées par la heatmap : chaîne native
+    dxFeed d'abord pour SPX/NDX (scheduler.native_index_key), CBOE ensuite."""
+    from .scheduler import native_index_key
+    return (native_index_key(symbol), symbol) if symbol in ("SPX", "NDX") else (symbol,)
+
+
+def from_snapshots(symbol: str, session: str, window: float = WINDOW) -> list[dict]:
+    """Une image par chaîne sauvegardée de la séance CME `session` (18h00 ET la
+    veille -> 17h00 ET), même calcul que l'enregistrement en direct
+    (`app.heatmap_levels`), murs évalués à la clôture de la VEILLE de cette
+    séance. Plus espacées que les images enregistrées (cadence des collectes
+    sauvegardées : ~3 min pour SPX/NDX, quelques fois par jour pour NQ/ES).
+    Mis en cache par nombre de chaînes trouvées (une séance passée ne change
+    plus)."""
+    from datetime import date, datetime, timedelta
+
+    from . import app, store
+    from .metrics import ET
+    d = date.fromisoformat(session)
+    prev = (d - timedelta(days=1)).isoformat()
+    for key in _snapshot_keys(symbol):
+        snaps = [(ts, df) for ts, df in store.load_day_snapshots(key, prev) if ts.hour >= 18]
+        snaps += [(ts, df) for ts, df in store.load_day_snapshots(key, session) if ts.hour < 17]
+        if snaps:
+            break
+    else:
+        return []
+    ck = (symbol, session, len(snaps), snaps[-1][0], window)
+    if ck in _SNAP_CACHE:
+        return _SNAP_CACHE[ck]
+    ref = store.previous_close_spot(symbol, session)
+    out, last = [], None
+    for ts, df in sorted(snaps, key=lambda x: x[0]):
+        if df is None or df.empty or "spot" not in df:
+            continue
+        spot = float(df["spot"].iloc[0])
+        try:
+            lv = app.heatmap_levels(symbol, df, spot, window, ref=ref or spot)
+        except Exception:  # noqa: BLE001 — une chaîne illisible n'arrête pas le replay
+            log.exception("Replay : chaîne %s %s illisible", symbol, ts)
+            continue
+        if lv is None:
+            continue
+        t = datetime.combine(ts.date(), ts.time()).replace(tzinfo=ET).timestamp()
+        frame, last = make_frame(t, lv, None)
+        out.append({**frame, "profile": last, "lo": frame.get("lo"), "hi": frame.get("hi"),
+                    "source": "chaine"})
+    if len(_SNAP_CACHE) > 16:
+        _SNAP_CACHE.clear()
+    _SNAP_CACHE[ck] = out
+    return out

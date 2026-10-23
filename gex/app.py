@@ -425,7 +425,8 @@ def _apply_user_zoom(lay: dict, relayout: dict | None) -> None:
 
 
 def heatmap_levels(symbol: str, df: pd.DataFrame, spot: float,
-                   window: float = 0.04, shown: list[str] | None = None) -> dict | None:
+                   window: float = 0.04, shown: list[str] | None = None,
+                   ref: float | None = None) -> dict | None:
     """Profil de gamma par strike et niveaux de la heatmap, en prix NATIFS du
     sous-jacent (aucune transposition) : un seul calcul pour l'affichage en
     direct (`_heatmap_inputs`) et pour le replay de la séance (gex/replay.py,
@@ -440,7 +441,8 @@ def heatmap_levels(symbol: str, df: pd.DataFrame, spot: float,
     oi = metrics.gex_by_strike_weighted(sel, spot, "open_interest") / 1e9
     vol = metrics.gex_by_strike_weighted(sel, spot, "volume") / 1e9
     # Murs classés au spot structurel (clôture veille), comme partout ailleurs.
-    _ref = ref_spot(symbol, spot)
+    # `ref` : clôture de la veille d'une séance PASSÉE (replay reconstruit)
+    _ref = ref if ref is not None else ref_spot(symbol, spot)
     keys = metrics.key_levels(sel, spot, ref_spot=_ref, all_expiries=True)
     walls = (metrics.top_gex_levels(sel, ref_spot=_ref, all_expiries=True)
              if want("gex_walls") else pd.DataFrame())
@@ -712,8 +714,13 @@ def heatmap_spec(symbol: str, lang: str, day: str | None = None, window: float =
 
 
 def heatmap_replay(symbol: str, lang: str, window: float = 0.04, unit: str | None = None,
-                   levels_shown: list[str] | None = None, now: float | None = None) -> dict:
-    """Replay de la séance du jour (séance CME, depuis l'ouverture Globex) :
+                   levels_shown: list[str] | None = None, now: float | None = None,
+                   day: str | None = None) -> dict:
+    """Replay d'une séance (séance CME, depuis l'ouverture Globex) — celle du
+    jour choisi dans le sélecteur de la heatmap (`day`), sinon la séance en
+    cours. Images enregistrées chaque minute (gex/replay.py), complétées pour
+    les heures non enregistrées par les chaînes sauvegardées sur disque
+    (`replay.from_snapshots`, une image par chaîne) :
     la heatmap complète actuelle (`base`, bougies comprises) et les images
     enregistrées chaque minute par gex/replay.py (`frames`), déjà mises à
     l'échelle affichée et filtrées par la checklist des niveaux — le
@@ -722,10 +729,17 @@ def heatmap_replay(symbol: str, lang: str, window: float = 0.04, unit: str | Non
     from . import replay
     levels_shown = (levels_shown if levels_shown is not None
                     else ["zero_gamma", "call_wall", "put_support"])
-    base = heatmap_spec(symbol, lang, None, window, unit, levels_shown)
+    current = replay._session_day(time.time() if now is None else now)
+    session = day or current
+    base = heatmap_spec(symbol, lang, day if day and day != current else None,
+                        window, unit, levels_shown)
     sym = symbol if symbol in replay.SYMBOLS else None
-    session = replay._session_day(time.time() if now is None else now)
     raw = replay.load(sym, session) if sym else []
+    if sym:
+        # heures sans image enregistrée (avant la mise en place du replay, ou
+        # séance passée) : images reconstruites depuis les chaînes sauvegardées
+        first = raw[0]["t"] if raw else float("inf")
+        raw = [f for f in replay.from_snapshots(sym, session, window) if f["t"] < first] + raw
     xf, _, _ = _transform_for(symbol, unit)
     conv = lambda v: float(xf(np.array([v]))[0])  # noqa: E731
     frames = []
@@ -4665,6 +4679,7 @@ def create_app() -> Dash:
             // réglages transmis au replay de la heatmap (gex-replay.js)
             if (window.GexReplay) window.GexReplay.context({
                 symbol: symbol || '', lang: lang || 'fr', window: String(win || 0.04),
+                day: heatDay || '',
                 unit: unit || '', levels: (heatLevels || []).join(',')});
             add('hedge-graph', 'hedge', tab === 'tape',
                 {window: String(hedgeWin == null ? 15 : hedgeWin)});
@@ -6537,9 +6552,13 @@ def create_app() -> Dash:
         symbol = a.get("symbol")
         if symbol not in UNDERLYINGS:
             return jsonify({"error": "symbole inconnu"}), 404
+        day = a.get("day") or None
+        if day and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+            day = None
         return jsonify(heatmap_replay(symbol, a.get("lang") or "fr",
                                       float(a.get("window") or 0.04), a.get("unit") or None,
-                                      _lw_list(a.get("levels")) if "levels" in a else None))
+                                      _lw_list(a.get("levels")) if "levels" in a else None,
+                                      day=day))
 
     @app.server.route("/api/v1/lw-multi")
     def _lw_multi_stream():

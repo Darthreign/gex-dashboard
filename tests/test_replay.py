@@ -108,3 +108,56 @@ def test_heatmap_levels_identique_a_laffichage(monkeypatch):
     part = app.heatmap_levels("NQ", df, spot, shown=["call_wall"])
     assert full["profile"] == part["profile"] and full["call_wall"] == part["call_wall"]
     assert part["zero_gamma"] is None and part["walls"] == []
+
+
+def _snap(spot):
+    return pd.DataFrame({"strike": [spot], "spot": [spot]})
+
+
+def test_reconstruction_depuis_les_chaines_sauvegardees(data_dir, monkeypatch):
+    from gex import store
+    jours = {
+        "2026-10-14": [(datetime(2026, 10, 14, 17, 30), _snap(1.0)),     # avant Globex : exclu
+                       (datetime(2026, 10, 14, 18, 30), _snap(30000.0))],
+        "2026-10-15": [(datetime(2026, 10, 15, 10, 0), _snap(30100.0)),
+                       (datetime(2026, 10, 15, 17, 30), _snap(2.0))],   # après 17h : exclu
+    }
+    monkeypatch.setattr(store, "load_day_snapshots", lambda key, day: jours.get(day, []))
+    monkeypatch.setattr(store, "previous_close_spot", lambda s, day=None: 29900.0)
+    vus = []
+
+    def niveaux(sym, df, spot, w, ref=None):
+        vus.append((spot, ref))
+        return _lv(spot, zg=spot - 50)
+    monkeypatch.setattr(app, "heatmap_levels", niveaux)
+    replay._SNAP_CACHE.clear()
+    frames = replay.from_snapshots("NQ", "2026-10-15")
+    assert [f["spot"] for f in frames] == [30000.0, 30100.0]
+    assert all(ref == 29900.0 for _, ref in vus)              # clôture de la veille de CETTE séance
+    assert frames[0]["t"] == datetime(2026, 10, 14, 18, 30, tzinfo=ET).timestamp()
+    assert all(f["profile"] for f in frames)
+
+
+import pandas as pd  # noqa: E402
+
+
+def test_replay_du_jour_choisi(data_dir, monkeypatch):
+    from gex import store
+    monkeypatch.setattr(app, "heatmap_spec", lambda *a, **k: {"series": [], "lines": [], "day": a[2]})
+    monkeypatch.setattr(app, "_transform_for", lambda s, u: ((lambda v: v), 1.0, "native"))
+    monkeypatch.setattr(store, "load_day_snapshots",
+                        lambda key, day: [(datetime(2026, 10, 15, 9, 0), _snap(30000.0))]
+                        if day == "2026-10-15" else [])
+    monkeypatch.setattr(store, "previous_close_spot", lambda s, day=None: 29900.0)
+    monkeypatch.setattr(app, "heatmap_levels", lambda sym, df, spot, w, ref=None: _lv(spot))
+    replay._SNAP_CACHE.clear()
+    # une image enregistrée à 10h00 : la chaîne de 9h00 la précède et s'ajoute devant
+    replay.record("NQ", _lv(30050.0), datetime(2026, 10, 15, 10, 0, tzinfo=ET).timestamp())
+    now = datetime(2026, 10, 23, 12, 0, tzinfo=ET).timestamp()
+    r = app.heatmap_replay("NQ", "fr", now=now, day="2026-10-15")
+    assert r["session"] == "2026-10-15" and r["base"]["day"] == "2026-10-15"
+    assert [f["t"] for f in r["frames"]] == [
+        datetime(2026, 10, 15, 9, 0, tzinfo=ET).timestamp(),
+        datetime(2026, 10, 15, 10, 0, tzinfo=ET).timestamp()]
+    courant = app.heatmap_replay("NQ", "fr", now=now)
+    assert courant["session"] == "2026-10-23" and courant["base"]["day"] is None
