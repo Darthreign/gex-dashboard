@@ -53,6 +53,9 @@ dependencies = [
     "idna>=3.15",
     "h11>=0.16.0",
     "anyio>=4.14.2",
+    "python-multipart>=0.0.31",
+    "setuptools>=83.0.0",
+    "soupsieve>=2.9.0",
 ]
 
 [project.optional-dependencies]
