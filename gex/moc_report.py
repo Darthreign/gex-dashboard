@@ -16,7 +16,9 @@ corrélations, mouvement moyen par tercile de pression, intervalle à 90 %
 de la corrélation par bootstrap sur les séances.
 
 Historique écrit dans `data/reports/moc_history_<SYM>.csv` (affiché en bas
-de la page /moc), rapport dans `data/reports/moc_<SYM>_<date>.md`.
+de la page /moc), rapport dans `data/reports/moc_<SYM>_<date>.md`. L'historique
+est aussi complété AUTOMATIQUEMENT chaque soir de semaine à 16h30 ET
+(`update_history`, séances manquantes seulement, cf. scheduler).
 """
 from __future__ import annotations
 
@@ -202,6 +204,39 @@ def report(symbol: str, max_days: int | None = None) -> dict:
     if h["cash_unwind"].abs().sum() > 0:
         out["stats_cash"] = stats(h.assign(contracts=h["contracts_with_cash"]))
     return out
+
+
+def update_history(symbol: str, lookback: int = 30) -> int:
+    """Mise à jour INCRÉMENTALE de l'historique affiché sur /moc (tâche du soir,
+    cf. scheduler.add_ingest_jobs) : seules les séances des `lookback` derniers
+    jours disponibles absentes du fichier sont calculées et ajoutées — pas de
+    recalcul complet (le rapport `report` reste là pour ça). Renvoie le nombre
+    de séances ajoutées."""
+    path = history_path(symbol)
+    old = pd.read_csv(path) if path.exists() else pd.DataFrame()
+    have = set(old["day"].astype(str)) if "day" in old else set()
+    todo = [d for d in available_days(symbol)[-lookback:] if d not in have]
+    if not todo:
+        return 0
+    new = build_history(symbol, todo)
+    if new.empty:
+        return 0
+    out = pd.concat([old, new], ignore_index=True) if not old.empty else new
+    out = out.drop_duplicates(subset="day", keep="last").sort_values("day")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(path, index=False)
+    log.info("MOC %s : %d séance(s) ajoutée(s) à l'historique (%s)", symbol, len(new),
+             ", ".join(new["day"].astype(str)))
+    return len(new)
+
+
+def update_all() -> None:
+    """NQ et ES ; une erreur sur l'un n'empêche pas l'autre."""
+    for sym in moc.FAMILIES:
+        try:
+            update_history(sym)
+        except Exception:  # noqa: BLE001 — tâche planifiée, ne doit pas tomber
+            log.exception("Historique MOC %s non mis à jour", sym)
 
 
 def to_markdown(r: dict) -> str:

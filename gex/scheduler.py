@@ -648,6 +648,17 @@ def add_ingest_jobs(sched: BackgroundScheduler) -> None:
     from . import letf_aum
     sched.add_job(letf_aum.update, "cron", day_of_week="mon-fri", hour=18, minute=10,
                   max_instances=1, coalesce=True, misfire_grace_time=6 * 3600)
+    # Historique de validation de la page /moc (gex/moc_report.py) : complété
+    # chaque soir de semaine, après la clôture et le vidage des ticks de 16h00,
+    # au lieu d'attendre un lancement manuel du rapport (demande de
+    # l'utilisateur, 2026-10-24). Séances manquantes seulement.
+    from . import moc_report
+    sched.add_job(moc_report.update_all, "cron", day_of_week="mon-fri", hour=16, minute=30,
+                  max_instances=1, coalesce=True, misfire_grace_time=6 * 3600,
+                  id="moc_history")
+    # rattrapage au démarrage (séances manquées pendant un arrêt)
+    sched.add_job(moc_report.update_all, "date",
+                  run_date=datetime.now(ET) + timedelta(seconds=150))
     if letf_aum.is_stale():
         sched.add_job(letf_aum.update, "date",
                       run_date=datetime.now(ET) + timedelta(seconds=90))

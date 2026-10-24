@@ -94,7 +94,7 @@ def test_trail_only_inside_window(est):
 
 def test_history_table(tmp_path, monkeypatch):
     monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
-    assert "moc_report" in _text(mocpage.history_table("NQ", "fr"))
+    assert "automatiquement" in _text(mocpage.history_table("NQ", "fr"))
     (tmp_path / "reports").mkdir()
     pd.DataFrame({"day": ["2026-10-05", "2026-10-06"], "contracts": [120.0, -80.0],
                   "move_pts": [6.5, 3.0]}).to_csv(tmp_path / "reports" / "moc_history_NQ.csv")
@@ -148,3 +148,34 @@ def test_chrono_enregistre_cote_navigateur():
     mocpage.register(app)
     assert any("moc-clock" in str(c.get("inputs")) and "moc-clock-sink" in str(c.get("output"))
                for c in app._callback_list)
+
+
+def test_historique_complete_automatiquement_sans_tout_recalculer(tmp_path, monkeypatch):
+    from gex import moc_report
+    monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
+    path = moc_report.history_path("NQ")
+    path.parent.mkdir(parents=True)
+    pd.DataFrame([{"day": "2026-10-20", "contracts": 100.0, "move_pts": 5.0}]).to_csv(path, index=False)
+    monkeypatch.setattr(moc_report, "available_days",
+                        lambda s: ["2026-10-20", "2026-10-21", "2026-10-22"])
+    calcule = []
+
+    def build(sym, days):
+        calcule.extend(days)
+        return pd.DataFrame([{"day": d, "contracts": -50.0, "move_pts": -3.0} for d in days])
+    monkeypatch.setattr(moc_report, "build_history", build)
+    assert moc_report.update_history("NQ") == 2
+    assert calcule == ["2026-10-21", "2026-10-22"]               # jamais la séance déjà connue
+    h = pd.read_csv(path)
+    assert list(h["day"]) == ["2026-10-20", "2026-10-21", "2026-10-22"]
+    calcule.clear()
+    assert moc_report.update_history("NQ") == 0 and calcule == []  # rien de neuf
+
+
+def test_tache_du_soir_planifiee():
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from gex import scheduler
+    sched = BackgroundScheduler(timezone="America/New_York")
+    scheduler.add_ingest_jobs(sched)
+    job = sched.get_job("moc_history")
+    assert job is not None and "hour='16'" in str(job.trigger) and "minute='30'" in str(job.trigger)
