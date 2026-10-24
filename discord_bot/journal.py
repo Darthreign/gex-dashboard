@@ -147,6 +147,24 @@ CREATE TABLE IF NOT EXISTS absorption_events (
 CREATE INDEX IF NOT EXISTS idx_absorption_date ON absorption_events(date);
 CREATE INDEX IF NOT EXISTS idx_absorption_symbol_price ON absorption_events(symbol, price);
 
+-- Setups de la lecture normalisée /scalp v2 (cf. gex/edge.py) : chaque
+-- transition vers « rejet » ou « à éviter », avec les mesures qui l'ont
+-- produite — pour vérifier en direct, après coup, ce que le rapport
+-- (scripts/edge_report.py) a mesuré sur l'historique.
+CREATE TABLE IF NOT EXISTS scalp_setups (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    date          TEXT NOT NULL,
+    ts            TEXT NOT NULL,          -- ISO 8601 avec tz
+    symbol        TEXT NOT NULL,
+    setup         TEXT NOT NULL,          -- fade | avoid
+    fade_dir      INTEGER NOT NULL,       -- +1 rejet haussier, -1 baissier, 0 (avoid)
+    spot          REAL NOT NULL,
+    ext_em        REAL, zone TEXT, dist_flip_em REAL, em REAL,
+    confirmations TEXT,
+    params_version TEXT, validated INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_scalp_setups_date ON scalp_setups(date);
+
 -- Mémoire du labo : hypothèses, observations, conclusions, décisions, bugs…
 -- Dans un an, c'est ce qui dira POURQUOI telle donnée existe et si elle a été
 -- tranchée. `linked_date` = la séance CONCERNÉE (≠ `created`, quand c'est
@@ -577,6 +595,23 @@ def resolve_scalp_signal(conn: sqlite3.Connection, *, signal_id: int, resolved_t
         (resolved_ts, outcome_move_pts, outcome, signal_id),
     )
     conn.commit()
+
+
+def record_scalp_setup(conn: sqlite3.Connection, *, date: str, ts: str, symbol: str,
+                       setup: str, fade_dir: int, spot: float, ext_em: float | None,
+                       zone: str | None, dist_flip_em: float | None, em: float | None,
+                       confirmations: str, params_version: str, validated: bool) -> int:
+    """Enregistre une TRANSITION de la lecture /scalp v2 (cf. gex/edge.py)."""
+    cur = conn.execute(
+        """INSERT INTO scalp_setups
+           (date, ts, symbol, setup, fade_dir, spot, ext_em, zone, dist_flip_em, em,
+            confirmations, params_version, validated)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (date, ts, symbol, setup, int(fade_dir), spot, ext_em, zone, dist_flip_em, em,
+         confirmations, params_version, int(validated)),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
 
 
 def record_absorption(conn: sqlite3.Connection, *, date: str, ts: str, symbol: str,

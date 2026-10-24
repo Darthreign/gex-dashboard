@@ -63,6 +63,9 @@ def test_sans_prix_disponible_reste_non_resolu(db, monkeypatch):
     assert row["resolved_ts"] is None
 
 
-def test_ne_leve_jamais_meme_si_le_journal_est_hors_service(monkeypatch):
-    monkeypatch.setattr(SETTINGS, "data_dir", Path("Z:/chemin/qui/nexiste/pas"))
+def test_ne_leve_jamais_meme_si_le_journal_est_hors_service(monkeypatch, tmp_path):
+    # un FICHIER à la place du dossier : le journal ne peut pas s'ouvrir, sur tout OS
+    bloque = tmp_path / "pas_un_dossier"
+    bloque.write_text("")
+    monkeypatch.setattr(SETTINGS, "data_dir", bloque)
     scheduler.resolve_scalp_signals()          # ne doit pas lever

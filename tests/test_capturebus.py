@@ -31,6 +31,14 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+def _port_ouvert(port) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+            return True
+    except OSError:
+        return False
+
+
 def _attendre(cond, timeout=8.0):
     fin = time.time() + timeout
     while time.time() < fin:
@@ -250,10 +258,14 @@ def test_remote_tape_absorption_remplace_ne_fusionne_pas():
     assert r.absorption("NQ") is None                        # disparue, pas fusionnée
 
 
-def test_liaison_reelle_relaie_labsorption():
+def test_liaison_reelle_relaie_labsorption(monkeypatch):
     from gex import iceberg as ib
+    from gex import tickcapture
     from gex.tickcapture import TickCapture
 
+    # la salve posée à la main ne doit pas être recalculée (fenêtre vide)
+    # si la première connexion échoue et ne reprend que 2 s plus tard
+    monkeypatch.setattr(tickcapture, "ABSORPTION_RECOMPUTE_S", 3600.0)
     t = _tape()
     tc = TickCapture()
     now = time.time()
@@ -262,6 +274,7 @@ def test_liaison_reelle_relaie_labsorption():
     tc._absorb_cache["NQ"] = (now, [sweep])                    # ratio = 50/10 = 5.0
     port = _free_port()
     capturebus.serve_in_thread(t, "127.0.0.1", port, ticks=tc)
+    assert _attendre(lambda: _port_ouvert(port))
     r = RemoteTape(f"ws://127.0.0.1:{port}")
     r.start()
     assert _attendre(lambda: r.absorption("NQ") is not None and r.absorption("NQ")["price"] == 30500.0)

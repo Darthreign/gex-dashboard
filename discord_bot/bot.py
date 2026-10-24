@@ -764,6 +764,7 @@ async def niveaux(ctx: commands.Context, symbole: str | None = None,
         await ctx.send(f"Pas de niveaux pour {sym} (pull pas encore fait ?).")
         return
     k = d.get("key_levels", {})
+    # GEX1-5 : classés par |GEX net| (calls + puts)
     murs = " · ".join(
         f"{w['strike']:.0f} ({w['gex'] / 1e9:+.2f} Bn "
         f"{'call' if w['gex'] > 0 else 'put'})"
@@ -774,13 +775,20 @@ async def niveaux(ctx: commands.Context, symbole: str | None = None,
     if sc and sc != sym:
         titre += f" (échelle {sc})"
     titre += f" · spot {_fmt(d.get('spot'))}"
+    flip = _fmt(d.get("zero_gamma"))
+    if d.get("zero_gamma") is None and d.get("zero_gamma_status") == "no_flip":
+        flip = "aucun à ±25 % (régime franc)"
     lignes = [
         titre,
-        f"Gamma Flip {_fmt(d.get('zero_gamma'))} · HVL {_fmt(d.get('hvl'))}",
-        f"Call Wall {_fmt(k.get('call_wall'))} · Put Support {_fmt(k.get('put_support'))}",
+        f"Gamma Flip {flip} · HVL {_fmt(d.get('hvl'))}",
+        f"Call Wall (γ calls) {_fmt(k.get('call_wall'))} · "
+        f"Put Support (γ puts) {_fmt(k.get('put_support'))}",
         f"1D min/max : {_fmt(k.get('d1_min'))} – {_fmt(k.get('d1_max'))}",
-        f"Murs GEX : {murs}",
+        f"Max pain {_fmt(k.get('max_pain'))} (heuristique faible, repère d'échéance)",
+        f"Murs GEX (net) : {murs}",
     ]
+    if d.get("scale_warning"):
+        lignes.append(f"⚠ {d['scale_warning']}")
     await ctx.send("\n".join(lignes))
 
 

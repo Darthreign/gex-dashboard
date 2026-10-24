@@ -22,7 +22,7 @@ from dash import Dash, ctx, dcc, html, no_update
 from dash.dependencies import Input, Output, State
 from dash.exceptions import PreventUpdate
 
-from . import digest, metrics, scales, scalp, store
+from . import broadcast, digest, livechain, metrics, mocpage, scales, scalp, store
 from .bars import swing_move, volume_bars, zigzag
 from .api import _futures_last_price, register_api
 from .tt_web import connection_status, register_oauth
@@ -75,7 +75,8 @@ FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif'
 LOCAL_TZ = datetime.now().astimezone().tzinfo
 
 BUCKET_KEYS = {"0DTE": "bucket_0DTE", "Semaine": "bucket_week",
-               "Mois": "bucket_month", "Tout": "bucket_all"}
+               "Mois": "bucket_month", "Tout": "bucket_all",
+               "Pondéré": "bucket_weighted"}
 
 TAB_STYLE = {"backgroundColor": "#0d0d0d", "color": "#898781",
              "border": "1px solid #2c2c2a", "padding": "8px 14px", "fontSize": "13px"}
@@ -273,10 +274,12 @@ def tv_levels_string(levels: pd.DataFrame | None, hvl: float | None,
     def add(value, label, kind, dedup=False):
         """dedup : n'écrit pas un mur déjà couvert par un niveau nommé.
 
-        Call Wall et Put Support sont choisis dans le même classement de
-        strikes que GEX1-5, et le flip tombe souvent sur un mur : sans ce
-        filtre, TradingView superpose des lignes dont les étiquettes se
-        recouvrent. Le niveau nommé l'emporte, étant le plus parlant.
+        Call Wall et Put Support (concentrations call / put) tombent souvent
+        sur un des murs GEX1-5 (classés au GEX net), et le flip aussi : sans
+        ce filtre, TradingView superpose des lignes dont les étiquettes se
+        recouvrent. Le niveau nommé l'emporte, étant le plus parlant. Les
+        libellés de l'export restent « Call Wall » / « Put Support » : un
+        script Pine peut les lire.
         """
         if value is None:
             return
@@ -421,6 +424,117 @@ def _apply_user_zoom(lay: dict, relayout: dict | None) -> None:
             lay[axe]["autorange"] = False
 
 
+def heatmap_levels(symbol: str, df: pd.DataFrame, spot: float,
+                   window: float = 0.04, shown: list[str] | None = None,
+                   ref: float | None = None) -> dict | None:
+    """Profil de gamma par strike et niveaux de la heatmap, en prix NATIFS du
+    sous-jacent (aucune transposition) : un seul calcul pour l'affichage en
+    direct (`_heatmap_inputs`) et pour le replay de la séance (gex/replay.py,
+    qui enregistre ce dictionnaire chaque minute). None si aucun strike dans
+    la fenêtre. `shown` (checklist de l'onglet) évite de calculer les niveaux
+    non affichés ; None = tous (replay)."""
+    want = (lambda k: True) if shown is None else (lambda k: k in shown)
+    lo, hi = spot * (1 - window), spot * (1 + window)
+    sel = df[df["strike"].between(lo, hi)]
+    if sel.empty:
+        return None
+    oi = metrics.gex_by_strike_weighted(sel, spot, "open_interest") / 1e9
+    vol = metrics.gex_by_strike_weighted(sel, spot, "volume") / 1e9
+    # Murs classés au spot structurel (clôture veille), comme partout ailleurs.
+    # `ref` : clôture de la veille d'une séance PASSÉE (replay reconstruit)
+    _ref = ref if ref is not None else ref_spot(symbol, spot)
+    keys = metrics.key_levels(sel, spot, ref_spot=_ref, all_expiries=True)
+    walls = (metrics.top_gex_levels(sel, ref_spot=_ref, all_expiries=True)
+             if want("gex_walls") else pd.DataFrame())
+    labels = wall_labels(walls) if not walls.empty else {}
+    strikes = sorted(set(oi.index) | set(vol.index))
+    return {"spot": float(spot), "lo": float(lo), "hi": float(hi),
+            "profile": [(float(k), float(oi.get(k, 0.0)), float(vol.get(k, 0.0)))
+                        for k in strikes],
+            "zero_gamma": metrics.zero_gamma(df, spot) if want("zero_gamma") else None,
+            "hvl": (metrics.zero_gamma(df, spot, weight_col="volume")
+                    if want("hvl") else None),
+            **{k: keys.get(k) for k in ("call_wall", "put_support", "d1_min", "d1_max")},
+            "walls": [(float(lv.strike), labels.get(lv.strike, "GEX"))
+                      for lv in walls.itertuples()] if not walls.empty else []}
+
+
+def heatmap_items(lv: dict, levels_shown: list[str], xf, lang: str) -> list[dict]:
+    """Repères horizontaux de la heatmap d'après `heatmap_levels`, choisis par
+    la checklist de l'onglet — seul le spot reste toujours affiché, comme
+    référence de lecture systématique."""
+    items = [dict(y=xf(lv["spot"]), label=t(lang, "legend_spot"), color=C["spot"], dash="dot")]
+    if "zero_gamma" in levels_shown and lv.get("zero_gamma") is not None:
+        items.append(dict(y=xf(lv["zero_gamma"]), label="Gamma Flip", color=C["zg"], dash="dash"))
+    if "hvl" in levels_shown and lv.get("hvl") is not None:
+        items.append(dict(y=xf(lv["hvl"]), label="HVL", color=C["hvl"], dash="dash"))
+    for opt_key, key, color, label in (
+        ("call_wall", "call_wall", C["cw"], "Call Wall"),
+        ("put_support", "put_support", C["ps"], "Put Support"),
+        ("d1", "d1_min", C["d1"], "1D Min"),
+        ("d1", "d1_max", C["d1"], "1D Max"),
+    ):
+        if opt_key in levels_shown and lv.get(key) is not None:
+            items.append(dict(y=xf(lv[key]), label=label, color=color, dash="dash"))
+    if "gex_walls" in levels_shown:
+        for strike, label in lv.get("walls") or ():
+            items.append(dict(y=xf(strike), label=label, color=C["lvl"], dash="dot"))
+    return items
+
+
+def _heatmap_inputs(symbol: str, lang: str, day: str | None, window: float, xf,
+                    unit: str | None, levels_shown: list[str] | None) -> dict:
+    """Données de la heatmap (profil de gamma + parcours du prix + niveaux),
+    partagées par la figure Plotly (PNG du bot) et le graphique Lightweight
+    Charts du dashboard : un seul calcul, deux rendus. `error` renseigné quand
+    il n'y a rien à tracer."""
+    day = day or datetime.now(ET).strftime("%Y-%m-%d")
+    title = guided(t(lang, "heat_title", day=day), "heat")
+    xf = xf or (lambda v: v)
+    levels_shown = (levels_shown if levels_shown is not None
+                    else ["zero_gamma", "call_wall", "put_support"])
+
+    df, spot = _chain_for_day(symbol, day)
+    if df is None or df.empty or not spot:
+        return {"title": title, "error": t(lang, "heat_none", day=day)}
+
+    # Parcours du prix : si l'échelle affichée est un future qui a SON PROPRE
+    # historique (NQ/ES), on le prend tel quel — inutile de transposer une
+    # approximation quand le prix réel existe déjà à cette échelle. Sinon on
+    # retombe sur l'historique du symbole natif, passé par xf.
+    # Future NQ/ES : séance CME complète, depuis l'ouverture Globex de 18h00
+    # la veille (bougies de la nuit comprises) et bougie en cours en direct.
+    path, native_price, globex = None, False, False
+    if unit and unit in ("NQ", "ES") and unit != symbol:
+        alt = _futures_overlay(unit, day)
+        if alt is not None and not alt.empty:
+            path, native_price, globex = alt, True, True
+    if path is None and symbol in ("NQ", "ES"):
+        path = _futures_overlay(symbol, day)
+        globex = path is not None and not path.empty
+    if path is None:
+        path = _price_overlay(symbol, day)
+
+    lv = heatmap_levels(symbol, df, spot, window, levels_shown)
+    if lv is None:
+        return {"title": title, "error": t(lang, "no_data_window")}
+    items = heatmap_items(lv, levels_shown, xf, lang)
+    lo, hi = lv["lo"], lv["hi"]
+    oi = pd.Series({k: o for k, o, _ in lv["profile"]}, dtype=float)
+    vol = pd.Series({k: v for k, _, v in lv["profile"]}, dtype=float)
+    # fenêtre de temps : la séance cash pour un indice ; toute la séance
+    # Globex chargée pour un future (sinon la nuit serait hors champ)
+    if globex:
+        span = list(to_local(pd.Series([path["timestamp"].iloc[0],
+                                         max(path["timestamp"].iloc[-1],
+                                             pd.Timestamp(f"{day} 16:15"))])))
+    else:
+        span = _session_range(day)
+    return {"title": title, "error": None, "day": day, "spot": spot, "path": path,
+            "native_price": native_price, "oi": oi, "vol": vol, "items": items,
+            "lo": lo, "hi": hi, "span": span}
+
+
 def heatmap_fig(symbol: str, lang: str, day: str | None = None,
                 window: float = 0.04, xf=None, unit: str | None = None,
                 levels_shown: list[str] | None = None,
@@ -437,35 +551,13 @@ def heatmap_fig(symbol: str, lang: str, day: str | None = None,
     maintenant. Un strike lourd en volume mais absent en open interest est un
     niveau qui prend de l'importance en séance.
     """
-    day = day or datetime.now(ET).strftime("%Y-%m-%d")
-    title = guided(t(lang, "heat_title", day=day), "heat")
     xf = xf or (lambda v: v)
-    levels_shown = (levels_shown if levels_shown is not None
-                    else ["zero_gamma", "call_wall", "put_support"])
-
-    df, spot = _chain_for_day(symbol, day)
-    if df is None or df.empty or not spot:
-        return empty_fig(t(lang, "heat_none", day=day), title)
-
-    # Parcours du prix : si l'échelle affichée est un future qui a SON PROPRE
-    # historique (NQ/ES), on le prend tel quel — inutile de transposer une
-    # approximation quand le prix réel existe déjà à cette échelle. Sinon on
-    # retombe sur l'historique du symbole natif, passé par xf.
-    path, native_price = None, False
-    if unit and unit in ("NQ", "ES") and unit != symbol:
-        alt = _price_overlay(unit, day)
-        if alt is not None and not alt.empty:
-            path, native_price = alt, True
-    if path is None:
-        path = _price_overlay(symbol, day)
-
-    lo, hi = spot * (1 - window), spot * (1 + window)
-    sel = df[df["strike"].between(lo, hi)]
-    if sel.empty:
-        return empty_fig(t(lang, "no_data_window"), title)
-
-    oi = metrics.gex_by_strike_weighted(sel, spot, "open_interest") / 1e9
-    vol = metrics.gex_by_strike_weighted(sel, spot, "volume") / 1e9
+    h = _heatmap_inputs(symbol, lang, day, window, xf, unit, levels_shown)
+    title = h["title"]
+    if h["error"]:
+        return empty_fig(h["error"], title)
+    day, spot, path, native_price = h["day"], h["spot"], h["path"], h["native_price"]
+    oi, vol, items, lo, hi = h["oi"], h["vol"], h["items"], h["lo"], h["hi"]
 
     fig = go.Figure()
     # Barres épaisses (open interest) en fond, barres fines (volume) devant :
@@ -513,37 +605,6 @@ def heatmap_fig(symbol: str, lang: str, day: str | None = None,
                             hovertemplate=(f"%{{x|%H:%M}}<br>{t(lang, 'legend_spot')}"
                                            " %{y:.0f}<extra></extra>"))
 
-    # repères horizontaux, choisis par la checklist de l'onglet — seul le
-    # spot reste toujours affiché, comme référence de lecture systématique.
-    # Murs classés au spot structurel (clôture veille), comme partout ailleurs.
-    _ref = ref_spot(symbol, spot)
-    keys = metrics.key_levels(sel, spot, ref_spot=_ref, all_expiries=True)
-    items = [dict(y=xf(spot), label=t(lang, "legend_spot"), color=C["spot"], dash="dot")]
-    if "zero_gamma" in levels_shown:
-        zg = metrics.zero_gamma(df, spot)
-        if zg is not None:
-            items.append(dict(y=xf(zg), label="Gamma Flip", color=C["zg"], dash="dash"))
-    if "hvl" in levels_shown:
-        hvl = metrics.zero_gamma(df, spot, weight_col="volume")
-        if hvl is not None:
-            items.append(dict(y=xf(hvl), label="HVL", color=C["hvl"], dash="dash"))
-    for opt_key, key, color, label in (
-        ("call_wall", "call_wall", C["cw"], "Call Wall"),
-        ("put_support", "put_support", C["ps"], "Put Support"),
-        ("d1", "d1_min", C["d1"], "1D Min"),
-        ("d1", "d1_max", C["d1"], "1D Max"),
-    ):
-        if opt_key not in levels_shown:
-            continue
-        v = keys.get(key)
-        if v is not None:
-            items.append(dict(y=xf(v), label=label, color=color, dash="dash"))
-    if "gex_walls" in levels_shown:
-        walls = metrics.top_gex_levels(sel, ref_spot=_ref, all_expiries=True)
-        labels = wall_labels(walls) if not walls.empty else {}
-        for lv in walls.itertuples():
-            items.append(dict(y=xf(lv.strike), label=labels.get(lv.strike, "GEX"),
-                              color=C["lvl"], dash="dot"))
     _draw_levels(fig, items, xf(lo), xf(hi))
 
     lay = with_legend(base_layout(title, height=560))
@@ -565,7 +626,7 @@ def heatmap_fig(symbol: str, lang: str, day: str | None = None,
     lay["xaxis"]["tickformat"] = "%H:%M"
     # Fenêtre fixée sur la séance : sans cela, une journée peu fournie écrase
     # l'échelle sur quelques minutes et le graphique devient illisible.
-    lay["xaxis"]["range"] = _session_range(day)
+    lay["xaxis"]["range"] = h["span"]
     # Persistance de l'état d'interaction : la heatmap se régénère toutes les
     # quelques secondes (callback sur `tick`). Sans uirevision, un zoom manuel
     # sur l'axe des prix — pour resserrer la fenêtre — serait remis à zéro à
@@ -587,6 +648,112 @@ def heatmap_fig(symbol: str, lang: str, day: str | None = None,
                                     font=dict(color=C["muted"])))
     fig.update_layout(**lay)
     return fig
+
+
+_LW_DASH = {"dash": 2, "dot": 1, "solid": 0}
+
+
+def heatmap_spec(symbol: str, lang: str, day: str | None = None, window: float = 0.04,
+                 unit: str | None = None, levels_shown: list[str] | None = None) -> dict:
+    """Heatmap en Lightweight Charts : parcours du prix (bougies 1 min) avec
+    le profil de gamma par strike en barres horizontales sur le bord droit —
+    le même rendu que l'indicateur « Σ Profil gamma » de /scalp v2
+    (gex/assets/gex-profile-overlay.js) — et les niveaux choisis."""
+    from . import lwspec
+    xf, _, _ = _transform_for(symbol, unit)
+    h = _heatmap_inputs(symbol, lang, day, window, xf, unit, levels_shown)
+    spec = {"title": lwspec._clean_title(h["title"]), "message": h["error"], "height": 560,
+            # couleurs de gex-profile-overlay.js : vert = net call, rouge = net
+            # put ; barre épaisse pâle = open interest, fine vive = volume
+            "legend": [{"name": t(lang, "legend_gex_oi"), "color": "rgba(25, 158, 112, 0.45)"},
+                       {"name": t(lang, "legend_gex_vol"), "color": "rgba(25, 158, 112, 0.85)"},
+                       {"name": t(lang, "legend_heat_sign"), "color": "rgba(230, 103, 103, 0.85)"}],
+            "range": None, "rangeButtons": False, "series": [], "lines": [],
+            "profile": [], "priceRange": None,
+            # longueur max des barres de gamma : 65 % de la largeur (30 % sur
+            # /scalp v2, où elles ne doivent pas masquer les bougies récentes)
+            "profileWidth": 0.65}
+    if h["error"]:
+        return spec
+    path, native = h["path"], h["native_price"]
+    if path is not None and not path.empty:
+        ts = lwspec._epoch(to_local(path["timestamp"]))
+        conv = (lambda v: v) if native else xf
+        o, hi, lo, c = (np.asarray(conv(path[k].to_numpy()), dtype=float)
+                        for k in ("open", "high", "low", "close"))
+        ok = np.isfinite(ts) & np.isfinite(c)
+        order = np.argsort(ts[ok], kind="stable")
+        rows = list(zip(*(a[ok][order] for a in (ts, o, hi, lo, c))))
+        has_ohlc = (path["open"] != path["close"]).any() or (path["high"] != path["low"]).any()
+        seen, data = set(), []
+        for tt, oo, hh, ll, cc in rows:
+            if tt in seen:
+                continue
+            seen.add(tt)
+            data.append({"time": float(tt), "open": float(oo), "high": float(hh),
+                         "low": float(ll), "close": float(cc)} if has_ohlc
+                        else {"time": float(tt), "value": float(cc)})
+        spec["series"].append({
+            "name": t(lang, "legend_spot"), "type": "Candlestick" if has_ohlc else "Line",
+            "pane": 0, "scale": "right",
+            "options": ({"upColor": C["pos"], "downColor": C["neg"], "wickUpColor": C["pos"],
+                         "wickDownColor": C["neg"], "borderVisible": False} if has_ohlc
+                        else {"color": "#22d3ee", "lineWidth": 1, "priceLineVisible": False}),
+            "data": data})
+    strikes = sorted(set(h["oi"].index) | set(h["vol"].index))
+    spec["profile"] = [{"price": float(xf(np.array([k]))[0]), "oi": float(h["oi"].get(k, 0.0)),
+                        "vol": float(h["vol"].get(k, 0.0))} for k in strikes]
+    spec["lines"] = [{"series": 0, "price": float(it["y"]), "color": it["color"],
+                      "title": it["label"], "style": _LW_DASH.get(it.get("dash"), 2),
+                      "axisLabel": True} for it in h["items"]]
+    spec["priceRange"] = [float(xf(np.array([h["lo"]]))[0]), float(xf(np.array([h["hi"]]))[0])]
+    r = lwspec._epoch(h["span"])
+    if np.isfinite(r).all():
+        spec["range"] = [float(r[0]), float(r[1])]
+    return spec
+
+
+def heatmap_replay(symbol: str, lang: str, window: float = 0.04, unit: str | None = None,
+                   levels_shown: list[str] | None = None, now: float | None = None,
+                   day: str | None = None) -> dict:
+    """Replay d'une séance (séance CME, depuis l'ouverture Globex) — celle du
+    jour choisi dans le sélecteur de la heatmap (`day`), sinon la séance en
+    cours. Images enregistrées chaque minute (gex/replay.py), complétées pour
+    les heures non enregistrées par les chaînes sauvegardées sur disque
+    (`replay.from_snapshots`, une image par chaîne) :
+    la heatmap complète actuelle (`base`, bougies comprises) et les images
+    enregistrées chaque minute par gex/replay.py (`frames`), déjà mises à
+    l'échelle affichée et filtrées par la checklist des niveaux — le
+    navigateur n'a plus qu'à les rejouer. Transposition (`unit`) au ratio
+    ACTUEL, comme la heatmap en direct."""
+    from . import replay
+    levels_shown = (levels_shown if levels_shown is not None
+                    else ["zero_gamma", "call_wall", "put_support"])
+    current = replay._session_day(time.time() if now is None else now)
+    session = day or current
+    base = heatmap_spec(symbol, lang, day if day and day != current else None,
+                        window, unit, levels_shown)
+    sym = symbol if symbol in replay.SYMBOLS else None
+    raw = replay.load(sym, session) if sym else []
+    if sym:
+        # heures sans image enregistrée (avant la mise en place du replay, ou
+        # séance passée) : images reconstruites depuis les chaînes sauvegardées
+        first = raw[0]["t"] if raw else float("inf")
+        raw = [f for f in replay.from_snapshots(sym, session, window) if f["t"] < first] + raw
+    xf, _, _ = _transform_for(symbol, unit)
+    conv = lambda v: float(xf(np.array([v]))[0])  # noqa: E731
+    frames = []
+    for f in raw:
+        lv = {**f, "walls": [tuple(w) for w in f.get("walls") or ()]}
+        items = heatmap_items(lv, levels_shown, conv, lang)
+        frames.append({
+            "t": f["t"],
+            "lines": [{"series": 0, "price": float(it["y"]), "color": it["color"],
+                       "title": it["label"], "style": _LW_DASH.get(it.get("dash"), 2),
+                       "axisLabel": True} for it in items],
+            "profile": [{"price": conv(k), "oi": o, "vol": v} for k, o, v in f["profile"]]})
+    return {"symbol": symbol, "session": session, "base": base, "frames": frames,
+            "message": None if frames else t(lang, "replay_empty")}
 
 
 def _session_range(day: str) -> list:
@@ -620,6 +787,28 @@ def _chain_for_day(symbol: str, day: str) -> tuple[pd.DataFrame | None, float | 
         return None, None
     spot = float(df["spot"].iloc[0]) if "spot" in df.columns else None
     return df, spot
+
+
+def _futures_overlay(symbol: str, day: str) -> pd.DataFrame | None:
+    """Bougies d'un future NQ/ES pour la heatmap, sur la séance CME : la
+    séance EN COURS (depuis 18h00 ET la veille, bougie live comprise) si `day`
+    est aujourd'hui ; sinon de 18h00 la veille de `day` à 17h00 ce jour-là."""
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    cols = ["timestamp", "open", "high", "low", "close"]
+    if day == today:
+        bars, used = futures_session_bars(symbol, _futures_last_price(symbol))
+        if not bars.empty and used == today:
+            return bars.sort_values("timestamp")[cols].reset_index(drop=True)
+    d0 = pd.Timestamp(day)
+    start, end = d0 - pd.Timedelta(hours=6), d0 + pd.Timedelta(hours=17)
+    parts = [store.load_prices(symbol, x) for x in ((d0 - pd.Timedelta(days=1)).strftime("%Y-%m-%d"), day)]
+    parts = [p for p in parts if not p.empty]
+    if not parts:
+        return None
+    px = pd.concat(parts, ignore_index=True)
+    ts = pd.to_datetime(px["timestamp"])
+    px = px[(ts >= start) & (ts < end)]
+    return px.sort_values("timestamp")[cols].reset_index(drop=True) if not px.empty else None
 
 
 def _price_overlay(symbol: str, day: str) -> pd.DataFrame | None:
@@ -688,6 +877,25 @@ def gamma_flow_fig(symbol: str, lang: str, day: str | None = None,
     return fig
 
 
+def tape_day(symbol: str, day: str) -> pd.DataFrame:
+    """Barres 1 min du flux OPRA d'une journée : le disque (barres achevées,
+    vidé toutes les 30 s) plus, pour la journée en cours, les barres encore en
+    mémoire et la minute EN COURS (TAPE.live_rows). C'est ce qui rend les
+    graphiques de flux vivants à la seconde au lieu d'attendre le flush."""
+    from .flowtape import TAPE
+    disk = store.load_tape(symbol, day)
+    live = pd.DataFrame(TAPE.live_rows(symbol))
+    if not live.empty:
+        live = live[pd.to_datetime(live["timestamp"]).dt.strftime("%Y-%m-%d") == day]
+    if not live.empty:
+        # la minute en cours (et celles en attente de flush) écrasent le disque
+        disk = live if disk.empty else pd.concat([disk, live], ignore_index=True)
+    if disk.empty:
+        return disk
+    return (disk.drop_duplicates(subset="timestamp", keep="last")
+            .sort_values("timestamp").reset_index(drop=True))
+
+
 def flow_source(symbol: str, day: str, dx_cols: tuple[str, ...]):
     """(données, source) pour les graphiques de flux, selon UNE règle unique :
     dxFeed s'il est disponible, CBOE sinon.
@@ -711,9 +919,9 @@ def flow_source(symbol: str, day: str, dx_cols: tuple[str, ...]):
     source à l'autre — d'où la source rendue avec les données, pour que le
     titre du graphique le dise au lieu de le laisser deviner.
     """
-    tape = store.load_tape(symbol, day)
+    tape = tape_day(symbol, day)
     if not tape.empty and all(c in tape.columns for c in dx_cols):
-        return tape.sort_values("timestamp"), "dxfeed"
+        return tape, "dxfeed"
     return store.load_flows(symbol, day), "cboe"
 
 
@@ -795,7 +1003,7 @@ def tape_fig(symbol: str, lang: str, day: str | None = None,
     et les prints sont pondérés par leur taille, jamais comptés à l'unité.
     """
     day = day or datetime.now(ET).strftime("%Y-%m-%d")
-    tape = store.load_tape(symbol, day)
+    tape = tape_day(symbol, day)
     title = guided(t(lang, "tape_title"), "tape")
     if tape.empty:
         return empty_fig(t(lang, "no_tape_day", day=day), title)
@@ -865,15 +1073,10 @@ def hedge_frame(symbol: str, day: str, window_min: int = 15) -> pd.DataFrame:
     """Barres 1 min de couverture dealers du jour : disque + minute en cours
     (mémoire). Les journées écrites avant l'ajout des colonnes `hedge_*` donnent
     des zéros plutôt qu'une erreur. `window_min` = 0 : toute la séance."""
-    from .flowtape import TAPE
-    disk = store.load_tape(symbol, day)
-    live = pd.DataFrame(TAPE.live_rows(symbol))
-    if not live.empty:
-        # la minute en cours (et celles en attente de flush) écrasent le disque
-        disk = live if disk.empty else pd.concat([disk, live], ignore_index=True)
+    disk = tape_day(symbol, day)
     if disk.empty:
         return disk
-    df = disk.drop_duplicates(subset="timestamp", keep="last").sort_values("timestamp")
+    df = disk.copy()
     for c in HEDGE_COLS:
         if c not in df.columns:
             df[c] = 0.0
@@ -1179,24 +1382,216 @@ def scalp_context(symbol: str) -> dict | None:
     if not levels.empty:
         labels = wall_labels(levels)
         walls = [(labels[lv.strike], lv.strike, lv.gex) for lv in levels.itertuples()]
+    # mêmes niveaux limités au 0DTE (réglage « Échéances » du graphique /scalp,
+    # 2026-10-16) ; le bandeau et l'échelle restent sur toutes les échéances
+    keys0, walls0 = {}, []
+    try:
+        r0 = metrics.compute_levels(df, ref, side_spot, bucket="0DTE")
+        keys0 = r0["keys"]
+        if not r0["levels"].empty:
+            lab0 = wall_labels(r0["levels"])
+            walls0 = [(lab0[lv.strike], lv.strike, lv.gex) for lv in r0["levels"].itertuples()]
+    except Exception:  # noqa: BLE001 — pas de 0DTE (week-end, chaîne partielle)
+        keys0, walls0 = {}, []
     hist = store.load_history(symbol)
     rd = None
     if summary is not None:
         rd = digest.symbol_reading(summary.net_gex, summary.net_dex,
                                    hist["net_gex"] if not hist.empty and "net_gex" in hist else None)
-    day = datetime.now(ET).strftime("%Y-%m-%d")
-    bars = store.load_prices(symbol, day)
+    # ouverture de la séance EN COURS : RTH 9h30, ou ETH 18h00 pour les
+    # futures après la réouverture Globex (fichier de la veille avant minuit)
+    start = scalp.session_start(datetime.now(ET), symbol in ("NQ", "ES"))
     open_ = None
-    if not bars.empty:
-        rth = bars[pd.to_datetime(bars["timestamp"]) >= pd.Timestamp(f"{day} 09:30")]
-        open_ = float(rth["open"].iloc[0]) if not rth.empty else None
+    for d in sorted({start.date(), datetime.now(ET).date()}):
+        bars = store.load_prices(symbol, d.strftime("%Y-%m-%d"))
+        if bars.empty:
+            continue
+        cur = bars[pd.to_datetime(bars["timestamp"]) >= pd.Timestamp(start)]
+        if not cur.empty:
+            open_ = float(cur["open"].iloc[0])
+            break
     ctx = {"snap_spot": snap.spot,
            "zg": summary.zero_gamma if summary else None,
            "hvl": metrics.zero_gamma(df, snap.spot, weight_col="volume"),
-           "keys": res["keys"], "walls": walls, "gamma": rd["gamma"] if rd else None,
-           "open": open_, "vix": digest._current_vix()}
+           "keys": res["keys"], "walls": walls, "keys_0dte": keys0, "walls_0dte": walls0,
+           "gamma": rd["gamma"] if rd else None,
+           "open": open_, "vix": digest._current_vix(),
+           "gex0": summary.net_gex_0dte if summary else None,
+           "em": _expected_move_pts(symbol, res["keys"])}
     _SCALP_CACHE[symbol] = (now, ctx)
     return ctx
+
+
+def _expected_move_pts(symbol: str, keys: dict) -> float | None:
+    """Mouvement attendu en points : straddle de l'échéance proche (1D Min /
+    Max), sinon 0,5 × la médiane des étendues des 10 séances précédentes —
+    même définition que le backtest (gex/edge_report.py)."""
+    hi, lo = keys.get("d1_max"), keys.get("d1_min")
+    if hi is not None and lo is not None and hi > lo:
+        return (hi - lo) / 2
+    return _realized_em(symbol)
+
+
+_REALIZED_EM: dict[str, tuple[str, float | None]] = {}
+
+
+def _realized_em(symbol: str) -> float | None:
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    hit = _REALIZED_EM.get(symbol)
+    if hit and hit[0] == today:
+        return hit[1]
+    ranges = []
+    for day in [d for d in store.price_days(symbol) if d < today][-10:]:
+        bars = store.load_prices(symbol, day)
+        if bars.empty:
+            continue
+        ts = pd.to_datetime(bars["timestamp"])
+        rth = bars[(ts.dt.hour * 60 + ts.dt.minute >= 570) & (ts.dt.hour < 16)]
+        if not rth.empty:
+            ranges.append(float(rth["high"].max() - rth["low"].min()))
+    em = 0.5 * float(np.median(ranges)) if ranges else None
+    _REALIZED_EM[symbol] = (today, em)
+    return em
+
+
+_EDGE_PARAMS: dict[str, tuple[float, object, bool, str]] = {}
+
+
+def _edge_params(symbol: str):
+    """(paramètres, validés ?, période de test) — ceux du rapport
+    scripts/edge_report.py s'ils sont VALIDÉS hors échantillon, sinon les
+    défauts. Relu au plus toutes les 60 s."""
+    from . import edge, edge_report
+    now = time.time()
+    hit = _EDGE_PARAMS.get(symbol)
+    if hit and now - hit[0] < 60:
+        return hit[1], hit[2], hit[3]
+    path = edge_report.params_path(symbol)
+    p, ok = edge.load_params(path)
+    validated, days = False, ""
+    if ok:
+        try:
+            meta = json.loads(path.read_text(encoding="utf-8"))
+            validated, days = bool(meta.get("validated")), meta.get("test_days", "")
+        except (OSError, ValueError):
+            pass
+    if not validated:
+        p = edge.EdgeParams()
+    _EDGE_PARAMS[symbol] = (now, p, validated, days)
+    return p, validated, days
+
+
+def _absorption_events(symbol: str, relaxed: bool = False) -> list[dict]:
+    """Absorptions de la séance (calcul planifié) + fenêtre live, sans doublon.
+    Aux seuils par défaut (iceberg.MIN_TOTAL / MIN_RATIO), sauf `relaxed` :
+    détection élargie pour le graphique, filtrée par les réglages /scalp."""
+    from . import iceberg as ib
+    try:
+        events = scalp_absorptions(symbol, _scalp_day_ticks(symbol, sides_only=False))
+        if not relaxed:
+            events = [e for e in events if e["total"] >= ib._min_total(symbol)
+                      and (e.get("ratio") or 0) >= ib.MIN_RATIO]
+    except Exception:  # noqa: BLE001 — un indicateur raté ne casse rien
+        log.exception("Absorptions de séance indisponibles (%s)", symbol)
+        events = []
+    try:
+        live = scalp_absorption_recent(symbol) or []
+    except Exception:  # noqa: BLE001
+        live = []
+    seen, merged = set(), []
+    for e in list(events) + [{"ts": a["ts"], "price": a["price"], "side": a["side"],
+                              "total": a["total"], "ratio": a.get("ratio"),
+                              "n_prints": a.get("n_prints")} for a in live]:
+        key = (round(float(e["ts"]), 3), e["price"], e["side"])
+        if key not in seen:
+            seen.add(key)
+            merged.append(e)
+    return merged
+
+
+def scalp_edge_reading(symbol: str, ctx: dict, spot: float,
+                       net: float | None, gross: float | None) -> dict:
+    """Lecture normalisée de /scalp v2 (cf. gex/edge.py), avec les seuils
+    validés par le rapport s'il y en a."""
+    from . import edge
+    p, validated, days = _edge_params(symbol)
+    r = edge.reading(spot, ctx.get("open"), ctx.get("em"), ctx.get("zg"), ctx.get("gex0"),
+                     _absorption_events(symbol), time.time(), net, gross, p)
+    r.update(validated=validated, test_days=days, params=p)
+    return r
+
+
+def scalp_edge_line(r: dict, lang: str) -> html.Div:
+    zone = t(lang, f"sc_zone_{r['zone']}")
+    if r["ext_em"] is None:
+        txt, cls = t(lang, "sc_edge_na"), "na"
+    elif r["setup"] == "fade" and "flux" in r["confirmations"]:
+        # couverture des dealers à contre-sens du mouvement : le frein est
+        # actif quelle que soit la zone — dit en clair (demande du 09/10)
+        rest = [c for c in r["confirmations"] if c != "flux"]
+        side = t(lang, "sc_edge_side_up" if r["fade_dir"] > 0 else "sc_edge_side_down")
+        txt = [t(lang, "sc_edge_fade_head", side=side, ext=_sc_fmt(r["ext_em"], 2)),
+               html.B(t(lang, "sc_edge_brake_on"), className="sc-edge-brake"),
+               t(lang, "sc_edge_brake_tail", zone=zone)
+               + "".join(" · " + t(lang, f"sc_conf_{c}") for c in rest)]
+        cls = "fade"
+    elif r["setup"] == "fade":
+        conf = ", ".join(t(lang, f"sc_conf_{c}") for c in r["confirmations"])
+        side = t(lang, "sc_edge_side_up" if r["fade_dir"] > 0 else "sc_edge_side_down")
+        txt, cls = t(lang, "sc_edge_fade", side=side, ext=_sc_fmt(r["ext_em"], 2),
+                     zone=zone, conf=conf), "fade"
+    elif r["setup"] == "avoid":
+        key = "sc_edge_avoid_flow" if r.get("veto") == "flux" else "sc_edge_avoid"
+        txt, cls = t(lang, key, ext=_sc_fmt(r["ext_em"], 2)), "avoid"
+    elif r["excess_dir"]:
+        txt, cls = t(lang, "sc_edge_watch", ext=_sc_fmt(r["ext_em"], 2), zone=zone), "watch"
+    else:
+        txt, cls = t(lang, "sc_edge_none", ext=_sc_fmt(r["ext_em"], 2), zone=zone), "none"
+    status = (t(lang, "sc_edge_validated", days=r["test_days"]) if r["validated"]
+              else t(lang, "sc_edge_unvalidated"))
+    title = (t(lang, "sc_edge_tooltip", em=f"{r['em']:.1f}",
+               dflip=_sc_fmt(r["dist_flip_em"], 2) if r["dist_flip_em"] is not None else "—")
+             if r.get("em") else "")
+    return html.Div([html.Span(txt, className="sc-edge-text"),
+                     html.Span(status, className="sc-edge-status"
+                               + (" sc-edge-ok" if r["validated"] else ""))],
+                    className=f"sc-edge sc-edge-{cls}", title=title)
+
+
+_EDGE_SEEN: dict[str, tuple[str, int]] = {}
+_EDGE_LAST_LOGGED: dict[str, tuple[str, int, float]] = {}
+
+
+def log_scalp_setup(symbol: str, r: dict, spot: float) -> None:
+    """Journalise une TRANSITION vers « rejet » ou « à éviter » — jamais à
+    chaque cycle, et pas de nouvelle ligne si la même lecture revient moins
+    de 2 min après sa dernière écriture (même garde que les signaux)."""
+    from . import edge
+    key = (r["setup"], r["fade_dir"])
+    prev = _EDGE_SEEN.get(symbol)
+    _EDGE_SEEN[symbol] = key
+    now_epoch = time.time()
+    if r["setup"] not in ("fade", "avoid") or prev == key:
+        return
+    last = _EDGE_LAST_LOGGED.get(symbol)
+    if last and last[:2] == key and now_epoch - last[2] < scalp.SIGNAL_COOLDOWN_S:
+        return
+    _EDGE_LAST_LOGGED[symbol] = (*key, now_epoch)
+    conn = _journal()
+    if conn is None:
+        return
+    try:
+        import journal
+        now = datetime.now(LOCAL_TZ)
+        with _JOURNAL_LOCK:
+            journal.record_scalp_setup(
+                conn, date=now.date().isoformat(), ts=now.isoformat(), symbol=symbol,
+                setup=r["setup"], fade_dir=r["fade_dir"], spot=spot, ext_em=r["ext_em"],
+                zone=r["zone"], dist_flip_em=r["dist_flip_em"], em=r["em"],
+                confirmations=",".join(r["confirmations"]),
+                params_version=edge.PARAMS_VERSION, validated=r["validated"])
+    except Exception:  # noqa: BLE001 — ne doit jamais casser le bandeau
+        log.exception("Écriture du setup /scalp échouée (%s)", symbol)
 
 
 def _sc_fmt(v: float, dec: int = 0) -> str:
@@ -1214,6 +1609,41 @@ def scalp_absorption(symbol: str) -> dict | None:
         return flowtape.TAPE.absorption(symbol)
     from .tickcapture import CAPTURE
     return CAPTURE.absorption_now(symbol)
+
+
+def scalp_second_test(symbol: str) -> dict | None:
+    """Second test d'excès en cours d'affichage (cf. gex/secondtest.py) — même
+    logique double-mode que `scalp_absorption_recent`."""
+    from . import flowtape
+    from .capturebus import remote_url
+    if remote_url():
+        getter = getattr(flowtape.TAPE, "second_test", None)
+        return getter(symbol) if getter else None
+    from .tickcapture import CAPTURE
+    return CAPTURE.second_test(symbol)
+
+
+def scalp_second_test_line(ev: dict, zone: str | None, lang: str) -> html.Div:
+    """Ligne d'avertissement du bandeau : ce que l'étude d'un an dit de ce
+    second test (zone /scalp × durée de la réaction)."""
+    from . import secondtest
+    zone_k = {"accelerateur": "accélérateur"}.get(zone or "", zone or "")
+    a = secondtest.assess(ev, zone_k, datetime.now(ET).date())
+    head = t(lang, "sc_st_head", sens=t(lang, f"sc_st_{ev['sens']}"),
+             cls=t(lang, f"sc_st_{a['duree_class']}"), duree=ev["duree_s"],
+             zone=t(lang, f"sc_zone_{zone or 'inconnu'}"))
+    if a["expiry_week"]:
+        parts, risk = [head, " — ", t(lang, "sc_st_expiry")], "inconnu"
+    elif a["risk"] == "inconnu":
+        parts, risk = [head, " — ", t(lang, "sc_st_nozone")], "inconnu"
+    else:
+        risk = a["risk"]
+        row = a["row"]
+        tail = (t(lang, "sc_st_stats", c100=row["cont100_pct"], c50=row["cont50_pct"],
+                  p90=row["cont_p90"], n=row["n"]) if row else " — " + t(lang, "sc_st_nostats"))
+        parts = [html.Span(t(lang, f"sc_st_risk_{risk}"), className="sc-st-risk"),
+                 " · ", head, tail]
+    return html.Div(parts, className=f"sc-second sc-risk-{risk}", title=t(lang, "sc_st_tip"))
 
 
 def scalp_absorption_recent(symbol: str) -> list[dict]:
@@ -1304,6 +1734,12 @@ def is_scalp_path(path: str | None) -> bool:
     return p == "/scalp" or p.startswith("/scalp/") or p == "/scalpv1" or p.startswith("/scalpv1/")
 
 
+def is_scalp_v2_page(path: str | None) -> bool:
+    """`/scalp` (page v2), pas `/scalpv1`."""
+    p = path or "/"
+    return p == "/scalp" or p.startswith("/scalp/")
+
+
 def scalp_inputs(symbol: str, spot: float) -> tuple[float | None, float, float]:
     """(mouvement sur 5 min en points, flux net M$, flux brut M$) pour le bandeau.
 
@@ -1353,8 +1789,20 @@ def scalp_inputs_swing(symbol: str, spot: float) -> tuple[float | None, float, f
     return move, net, gross
 
 
+def scalp_flow_context(symbol: str) -> tuple[float | None, bool]:
+    """(âge en s de la dernière transaction d'options gardée en mémoire par le
+    tape — 10 min, cf. FlowTape.SECONDS_KEPT — ou None, hors séance cash ?) :
+    seulement pour le texte du bandeau quand le flux est trop faible."""
+    from .flowtape import TAPE, FlowTape
+    now = time.time()
+    pts = TAPE.live_points(symbol, FlowTape.SECONDS_KEPT, now=now)
+    age = (now - pts[-1][0]) if pts else None
+    return age, scalp.session_state(datetime.now(ET))[0] in ("pre", "closed")
+
+
 def scalp_banner(symbol: str, ctx: dict, spot: float, lang: str,
-                 absorb: dict | None = None, *, swing: bool = False) -> html.Div:
+                 absorb: dict | None = None, *, swing: bool = False,
+                 edge: bool = False) -> html.Div:
     """`swing=True` (réservé à `/scalp` v2, cf. `refresh_scalp`) : mouvement
     ancré-structure (`scalp_inputs_swing`) au lieu de la fenêtre fixe 5 min —
     `/scalpv1` appelle toujours cette fonction avec `swing=False` (défaut),
@@ -1363,27 +1811,40 @@ def scalp_banner(symbol: str, ctx: dict, spot: float, lang: str,
     move, net, gross = (scalp_inputs_swing if swing else scalp_inputs)(symbol, spot)
     zg = ctx.get("zg")
     neg = bool(ctx.get("gamma")) and "Négatif" in ctx["gamma"]
+    age, hors_seance = scalp_flow_context(symbol)
     a = scalp.assess(symbol, move, net, gross, neg, (zg - spot) if zg is not None else None, lang,
-                     swing=swing)
+                     swing=swing, last_print_age_s=age, hors_seance=hors_seance)
     log_scalp_signal(symbol, a, spot, move, net, gross, basis=basis)
     recent = scalp_absorption_recent(symbol)
     log_absorption_levels(symbol, recent)
     voyants = [html.Span(f"{'●' if on else '○'} {t(lang, f'sc_light_{name}')}",
                          className="sc-light" + (" on" if on else ""))
                for name, on in a["lights"].items()]
-    return html.Div([
-        html.Div([
-            html.Div(a["title"], className="sc-banner-title"),
+    main = [html.Div(a["title"], className="sc-banner-title"),
             html.Div(a["detail"], className="sc-banner-detail"),
-            html.Div(voyants, className="sc-lights"),
-        ], className="sc-banner-main"),
+            html.Div(voyants, className="sc-lights")]
+    if edge:
+        # page /scalp (pas /scalpv1), quelle que soit la version du bandeau :
+        # lecture normalisée (excès en mouvement attendu depuis l'ouverture,
+        # zone de régime, confirmations d'épuisement), cf. gex/edge.py
+        try:
+            er = scalp_edge_reading(symbol, ctx, spot, net, gross)
+            log_scalp_setup(symbol, er, spot)
+            main.append(scalp_edge_line(er, lang))
+            ev = scalp_second_test(symbol) if symbol == "NQ" else None
+            if ev:
+                main.append(scalp_second_test_line(ev, er.get("zone"), lang))
+        except Exception:  # noqa: BLE001 — la lecture ne doit jamais casser le bandeau
+            log.exception("Lecture normalisée /scalp v2 indisponible (%s)", symbol)
+    return html.Div([
+        html.Div(main, className="sc-banner-main"),
         # à droite du bandeau (passe en dessous si la place manque) : la place
         # vide de la bannière était l'endroit naturel plutôt qu'un bloc de plus
         html.Div(scalp_absorb_panel(symbol, recent, absorb, lang), className="sc-banner-side"),
     ], className=f"sc-banner sc-tone-{a['tone']}")
 
 
-def scalp_ladder(symbol: str, ctx: dict, spot: float) -> html.Div:
+def scalp_ladder(symbol: str, ctx: dict, spot: float, lang: str = "fr") -> html.Div:
     rungs = scalp.build_ladder(symbol, spot, ctx["zg"], ctx["hvl"], ctx["keys"], ctx["walls"])
     if not rungs:
         return html.Div("Niveaux indisponibles", className="hint")
@@ -1401,9 +1862,12 @@ def scalp_ladder(symbol: str, ctx: dict, spot: float) -> html.Div:
         if r is haut or r is bas:
             cls += " sc-next"
         gex = (f" {r.gex / 1e9:+.1f}".replace("-", "−") + " Bn") if r.gex is not None else ""
+        tip = {"cw": "lvl_tip_call_wall", "ps": "lvl_tip_put_support",
+               "gex": "lvl_tip_gex_wall_short"}.get(r.kind)
         rows.append(html.Div([
             html.Span([html.Span("", className="sc-dot", style={"background": color}),
-                       r.name, html.Span(gex, className="sc-gex")], className="sc-name"),
+                       r.name, html.Span(gex, className="sc-gex")], className="sc-name",
+                      title=t(lang, tip) if tip else None),
             html.Span(f"{r.price:,.0f}", className="sc-price"),
             html.Span(_sc_fmt(r.dist), className="sc-dist " + ("sc-pos" if r.dist >= 0 else "sc-neg")),
         ], className=cls))
@@ -1415,6 +1879,68 @@ def scalp_ladder(symbol: str, ctx: dict, spot: float) -> html.Div:
 
 _LIVE_BARS: dict[str, dict[datetime, dict]] = {}
 LIVE_BARS_KEEP_MIN = 5     # de quoi couvrir le retard de flush_prices (vidé toutes les 30 s)
+
+
+def futures_session_bars(symbol: str, spot: float | None) -> tuple[pd.DataFrame, str]:
+    """(bougies 1 min de la séance CME EN COURS, jour de fichier utilisé) d'un
+    future NQ/ES : depuis l'ouverture Globex de 18h00 ET (fichier de la veille
+    avant minuit compris), plus la ou les bougies en cours reconstruites à
+    partir de `spot` (prix vivant vu par ce process). Repli sur la dernière
+    journée enregistrée s'il n'y a rien aujourd'hui. Partagé par le graphique
+    /scalp et la heatmap de la page principale."""
+    today_cal = datetime.now(ET).strftime("%Y-%m-%d")
+    used_day = today_cal
+    bars = _load_prices_cached(symbol, today_cal)
+    if bars.empty:
+        days = store.price_days(symbol)
+        if days:
+            used_day = days[-1]
+            bars = _load_prices_cached(symbol, used_day)
+    if bars.empty:
+        return bars, used_day
+    if used_day == today_cal:
+        # Séance CME, pas date calendaire ET (2026-10-05) : la séance en
+        # cours a commencé la veille (calendaire) à 18h ET = 00h Paris,
+        # bien avant minuit ET où bascule le fichier "aujourd'hui" (cf.
+        # commentaire au-dessus sur la convention de stockage). Sans ce
+        # complément, "depuis l'ouverture" démarrait à minuit ET (6h
+        # Paris) au lieu de 18h ET la veille (0h Paris) — repéré en
+        # direct juste après le retrait de la troncature par défaut.
+        now_et = datetime.now(ET)
+        session_start = now_et.replace(hour=18, minute=0, second=0, microsecond=0)
+        if now_et.hour < 18:
+            # avant 18h ET : la séance en cours a débordé sur la veille
+            # (calendaire) — préfixer le morceau manquant.
+            session_start -= timedelta(days=1)
+            prev_bars = _load_prices_cached(symbol, session_start.strftime("%Y-%m-%d"))
+            if not prev_bars.empty:
+                prev_bars = prev_bars[pd.to_datetime(prev_bars["timestamp"])
+                                     >= session_start.replace(tzinfo=None)]
+                if not prev_bars.empty:
+                    bars = pd.concat([prev_bars, bars], ignore_index=True)
+        else:
+            # à/après 18h ET : le fichier "aujourd'hui" contient encore
+            # la fin de la séance PRÉCÉDENTE (00h-17h ET) — la retirer,
+            # sinon "depuis l'ouverture" montre deux séances à la suite.
+            bars = bars[pd.to_datetime(bars["timestamp"])
+                       >= session_start.replace(tzinfo=None)]
+    # Bougie(s) en cours (2026-10-05) : sans ça, ce graphique n'affiche
+    # jamais rien de moins de 1-2 min (le temps que flush_prices écrive la
+    # minute achevée) — repéré en direct ("on dirait qu'il attend la
+    # clôture de bougie pour la dessiner"). Même mécanisme que
+    # `scalp_price_fig` (Plotly, /scalpv1) : `_update_live_bar` tient à
+    # jour les quelques dernières minutes à partir du spot vu par CE
+    # process, on ne complète que ce qui manque après le dernier point du
+    # disque. Seulement si on affiche la séance EN COURS — un repli sur un
+    # jour passé (`used_day != today_cal`) n'a pas de bougie "live" à ajouter.
+    if used_day == today_cal and spot:
+        live_bars = _update_live_bar(symbol, spot, datetime.now(ET))
+        last_ts = bars["timestamp"].iloc[-1] if not bars.empty else None
+        manquantes = sorted(m for m in live_bars if last_ts is None or m > last_ts)
+        if manquantes:
+            bars = pd.concat([bars, pd.DataFrame([
+                {"timestamp": m, **live_bars[m]} for m in manquantes])], ignore_index=True)
+    return bars, used_day
 
 
 def _update_live_bar(symbol: str, spot: float, now_et: datetime) -> dict[datetime, dict]:
@@ -1576,6 +2102,8 @@ def scalp_confluence_zones(symbol: str) -> list[dict]:
     (seules familles pour lesquelles `cluster_levels` a un seuil défini).
     Ne garde que les zones d'au moins 2 niveaux : un niveau seul n'est pas
     une confluence, juste un niveau — cf. docstring de confluence.py."""
+    if INDICATORS_REMOTE:
+        return _remote_value(_CONFLUENCE_CACHE, symbol, [])
     if _confluence is None or not _confluence.supported(symbol):
         return []
     now = time.time()
@@ -1626,6 +2154,10 @@ def scalp_confluence_zones(symbol: str) -> list[dict]:
     return out
 
 
+HVL_VOL_RATIO_FLOOR = 1.5        # contre iceberg.HVL_MIN_VOL_RATIO = 3
+HVL_DELTA_FLOOR = 0.15           # contre iceberg.HVL_MIN_DELTA_FRACTION = 0.35
+
+
 def scalp_order_flow_zones(symbol: str, day_ticks: pd.DataFrame) -> list[dict]:
     """Zones HVL (volume élevé + delta net marqué) de la séance — footprint
     simplifié, cf. gex/iceberg.py::hvl_levels pour la définition exacte et
@@ -1645,6 +2177,8 @@ def scalp_order_flow_zones(symbol: str, day_ticks: pd.DataFrame) -> list[dict]:
     vectorisé reste un travail non négligeable sur une séance pleine (des
     centaines de milliers de ticks, potentiellement des milliers de paliers
     de prix) — inutile de le refaire à chaque cycle de 1s."""
+    if INDICATORS_REMOTE:
+        return _remote_value(_ORDER_FLOW_CACHE, symbol, [])
     if day_ticks.empty:
         return []
     now = time.time()
@@ -1669,10 +2203,65 @@ def scalp_order_flow_zones(symbol: str, day_ticks: pd.DataFrame) -> list[dict]:
     levels = {float(price): {"vol": float(row["vol"]), "ask_vol": float(row["ask_vol"]),
                              "bid_vol": float(row["bid_vol"])}
              for price, row in g.iterrows()}
-    out = [{"price": h["price"], "vol": h["vol"], "side": h["side"]}
-          for h in ib.hvl_levels(levels)]
+    # Seuils ÉLARGIS (2026-10-16) : le graphique filtre selon les réglages
+    # /scalp (défaut = iceberg.HVL_MIN_VOL_RATIO / HVL_MIN_DELTA_FRACTION) ;
+    # chaque zone porte son multiple de la médiane et sa part de delta.
+    actifs = sorted(v["vol"] for v in levels.values() if v["vol"] > 0)
+    med = actifs[len(actifs) // 2] if actifs else 0.0
+    out = [{"price": h["price"], "vol": h["vol"], "side": h["side"],
+            "vol_ratio": round(h["vol"] / med, 2) if med else None,
+            "delta_frac": round(abs(h["delta"]) / h["vol"], 3) if h["vol"] else None}
+          for h in ib.hvl_levels(levels, min_vol_ratio=HVL_VOL_RATIO_FLOOR,
+                                 min_delta_fraction=HVL_DELTA_FLOOR)]
     _ORDER_FLOW_CACHE[symbol] = (now, out)
     return out
+
+
+_ABSORPTIONS_CACHE: dict[str, tuple[float, list[dict]]] = {}
+# planchers de la détection élargie (cf. scalp_absorptions)
+ABSORB_RATIO_FLOOR = 2.0          # contre iceberg.MIN_RATIO = 4
+ABSORB_TOTAL_FLOOR = 0.5          # × iceberg.MIN_TOTAL (40 NQ / 100 ES)
+
+
+def scalp_absorptions(symbol: str, raw_ticks: pd.DataFrame) -> list[dict]:
+    """Toutes les absorptions de la séance (cf. gex.iceberg.detect_absorptions,
+    mêmes règles que la fenêtre glissante de TickCapture mais sur la séance
+    entière) — pour les marquer sur le graphique. `raw_ticks` : ticks BRUTS
+    (un côté indéterminé coupe une salve). Calculé par le moteur planifié,
+    mis en cache 10 s ; vectorisé, ~0,2 s pour un million de ticks."""
+    if INDICATORS_REMOTE:
+        return _remote_value(_ABSORPTIONS_CACHE, symbol, [])
+    now = time.time()
+    hit = _ABSORPTIONS_CACHE.get(symbol)
+    if hit and now - hit[0] < SCALP_HEAVY_CACHE_S:
+        return hit[1]
+    from . import iceberg as ib
+    # Détection ÉLARGIE (moitié des seuils de volume et de ratio) : le
+    # graphique filtre ensuite selon les réglages /scalp (2026-10-16) ; la
+    # lecture du bandeau (_absorption_events) refiltre aux seuils par défaut.
+    flags = ib.detect_absorptions(raw_ticks, symbol, min_ratio=ABSORB_RATIO_FLOOR,
+                                  min_total=ib._min_total(symbol) * ABSORB_TOTAL_FLOOR)
+    out = [{"ts": float(r.end_ts), "price": float(r.price), "side": r.side,
+            "total": float(r.total_size), "ratio": round(float(r.ratio), 1),
+            "n_prints": int(r.n_prints)} for r in flags.itertuples()]
+    _ABSORPTIONS_CACHE[symbol] = (now, out)
+    return out
+
+
+def _absorption_marks(symbol: str, candle_times: list[int]) -> list[dict]:
+    """Absorptions de la séance + celles de la fenêtre live (plus fraîches que
+    le dernier calcul planifié), rattachées à la bougie qui les contient —
+    Lightweight Charts ne place un marqueur que sur le temps d'une bougie."""
+    if not candle_times:
+        return []
+    merged = _absorption_events(symbol, relaxed=True)
+    times = np.asarray(sorted(candle_times))
+    out = []
+    for e in merged:
+        i = int(np.searchsorted(times, e["ts"], side="right")) - 1
+        if i >= 0:
+            out.append(dict(e, time=int(times[i])))
+    return sorted(out, key=lambda e: e["time"])
 
 
 _GEX_PROFILE_CACHE: dict[str, tuple[float, list[dict]]] = {}
@@ -1697,6 +2286,8 @@ def scalp_gex_profile(symbol: str, spot: float, window: float = 0.04) -> list[di
     confluence/order-flow) : lit la chaîne enrichie complète à chaque appel,
     pas gratuit à chaque cycle de 1s."""
     now = time.time()
+    if INDICATORS_REMOTE:
+        return _remote_value(_GEX_PROFILE_CACHE, symbol, [])
     hit = _GEX_PROFILE_CACHE.get(symbol)
     if hit and now - hit[0] < SCALP_HEAVY_CACHE_S:
         return hit[1]
@@ -1776,6 +2367,22 @@ def _volume_profile(leg_ticks: pd.DataFrame, symbol: str) -> dict | None:
            "buckets": buckets}
 
 
+def _leg_poc_lvn(kidx: np.ndarray, vols: np.ndarray, size: float) -> tuple[float, float] | None:
+    """(POC, palier le moins traité) d'une jambe, à partir des paliers entiers
+    de ses ticks — mêmes résultats que `_volume_profile` (égalités tranchées
+    au premier prix croissant), sans groupby pandas par jambe."""
+    if len(kidx) == 0:
+        return None
+    base = int(kidx.min())
+    per = np.bincount(kidx - base, weights=vols)
+    present = np.bincount(kidx - base) > 0
+    if per.sum() <= 0:
+        return None
+    poc = int(np.argmax(per))
+    lvn = int(np.argmin(np.where(present, per, np.inf)))
+    return float((base + poc) * size), float((base + lvn) * size)
+
+
 def _scalp_swing_legs(day_ticks: pd.DataFrame, symbol: str) -> pd.DataFrame:
     """Pivots swing CONFIRMÉS (cf. gex/bars.py::zigzag), même moteur que le
     bandeau (bar_volume=60, min_move=`scalp.move_threshold * 0.6`) — factorisé
@@ -1787,7 +2394,7 @@ def _scalp_swing_legs(day_ticks: pd.DataFrame, symbol: str) -> pd.DataFrame:
     bars = volume_bars(day_ticks, bar_volume=60.0)
     if len(bars) < 5:
         return pd.DataFrame(columns=["ts", "price", "kind"])
-    swings = zigzag(bars, min_move=scalp.move_threshold(symbol) * 0.6)
+    swings = zigzag(bars, min_move=scalp.move_threshold(symbol) * 0.6, wicks=True)
     return swings[~swings["kind"].str.endswith("?")].reset_index(drop=True)
 
 
@@ -1814,6 +2421,8 @@ def scalp_orderflow_profile(symbol: str, day_ticks: pd.DataFrame) -> dict:
 
     Mis en cache 10s (cf. _ORDERFLOW_PROFILE_CACHE)."""
     empty = {"legs": [], "untested": []}
+    if INDICATORS_REMOTE:
+        return _remote_value(_ORDERFLOW_PROFILE_CACHE, symbol, {"legs": [], "untested": []})
     if day_ticks.empty:
         return empty
     now = time.time()
@@ -1851,6 +2460,7 @@ def scalp_orderflow_profile(symbol: str, day_ticks: pd.DataFrame) -> dict:
 _ORDERFLOW_UNTESTED_CACHE: dict[str, tuple[float, list[dict]]] = {}
 SCALP_FULLSCAN_CACHE_S = 60.0  # bien plus large que SCALP_HEAVY_CACHE_S (10s)
 SCALP_UNTESTED_MAX = 20  # zones HVN/LVN affichées, les plus récentes (cf. docstring)
+SCALP_UNTESTED_RAW_MAX = 60  # nœuds bruts envoyés, fusionnés en zones à l'affichage
 
 
 def scalp_orderflow_untested(symbol: str, day_ticks: pd.DataFrame) -> list[dict]:
@@ -1867,6 +2477,8 @@ def scalp_orderflow_untested(symbol: str, day_ticks: pd.DataFrame) -> list[dict]
     pour de vrai qu'une fois sur ~7-8 cycles — le reste du temps, simple
     lecture de cache, exactement comme les autres indicateurs. Un TTL plus
     large qu'un calcul plus lent, pas une exception à la règle."""
+    if INDICATORS_REMOTE:
+        return _remote_value(_ORDERFLOW_UNTESTED_CACHE, symbol, [])
     if day_ticks.empty:
         return []
     now = time.time()
@@ -1886,14 +2498,24 @@ def scalp_orderflow_untested(symbol: str, day_ticks: pd.DataFrame) -> list[dict]
     # à la dernière confirmée — plus de plafond à 4 jambes maintenant que ce
     # scan tourne à part, en arrière-plan, sur son propre cache 60s.
     untested = []
+    # tranches par recherche dichotomique sur les horodatages triés : chaque
+    # jambe coûte O(log N), au lieu d'un filtre sur toute la séance (O(N) par
+    # jambe, donc quadratique au fil de la journée)
+    sorted_ticks = day_ticks.sort_values("ts", kind="stable")
+    tss = sorted_ticks["ts"].to_numpy()
+    piv = confirmed["ts"].to_numpy(dtype=float)
+    # palier de chaque tick calculé une fois (même arrondi que _volume_profile)
+    size = _orderflow_vp_bucket(symbol)
+    kidx = np.round(sorted_ticks["price"].to_numpy(dtype=float) / size).astype(np.int64)
+    vols = sorted_ticks["volume"].to_numpy(dtype=float)
     for i in range(0, len(confirmed) - 2):
-        t0, t1 = float(confirmed.iloc[i]["ts"]), float(confirmed.iloc[i + 1]["ts"])
-        leg_ticks = day_ticks[(day_ticks["ts"] >= t0) & (day_ticks["ts"] <= t1)]
-        prof = _volume_profile(leg_ticks, symbol)
-        if not prof or not prof["buckets"]:
+        t0, t1 = float(piv[i]), float(piv[i + 1])
+        lo = int(np.searchsorted(tss, t0, side="left"))
+        hi = int(np.searchsorted(tss, t1, side="right"))
+        nodes = _leg_poc_lvn(kidx[lo:hi], vols[lo:hi], size)
+        if nodes is None:
             continue
-        lvn_price = min(prof["buckets"], key=lambda b: b["vol"])["price"]
-        for price, kind in ((prof["poc"], "hvn"), (lvn_price, "lvn")):
+        for price, kind in zip(nodes, ("hvn", "lvn")):
             revisited = (lo_touched is not None and lo_touched <= price <= hi_touched)
             if not revisited:
                 untested.append({"price": price, "kind": kind})
@@ -1907,35 +2529,72 @@ def scalp_orderflow_untested(symbol: str, day_ticks: pd.DataFrame) -> list[dict]
     # garde la plus RÉCENTE (construit en ordre chronologique, dédupliqué
     # en sens inverse).
     #
-    # Espacement minimum (2 paliers) entre deux zones gardées : des jambes
-    # courtes/serrées (consolidation) produisent des extrêmes sur des
-    # paliers ADJACENTS d'une jambe à l'autre — sans ce filtre, l'affichage
-    # devient un escalier dense (ex. 31040/31035/31030 à la suite) plutôt
-    # que quelques niveaux significatifs.
-    #
-    # Plafonné à SCALP_UNTESTED_MAX (20) : le scan lui-même porte sur la
-    # séance complète (pas de limite de jambes), mais 150+ lignes de prix
-    # rendraient le graphique illisible — seules les plus récentes (donc
-    # les plus proches de la structure actuelle) ont une vraie valeur de
-    # lecture pour un scalpeur. Demande explicite de l'utilisateur : scan
-    # complet en arrière-plan, affichage limité.
-    min_gap = _orderflow_vp_bucket(symbol) * 2
+    # (Jusqu'au 2026-10-16 : espacement minimum de 2 paliers entre deux nœuds
+    # gardés, contre l'« escalier » de paliers adjacents en consolidation, et
+    # plafond à SCALP_UNTESTED_MAX — ces deux règles s'appliquent maintenant
+    # APRÈS fusion, côté affichage.)
+    # (2026-10-16) Plus de filtre d'espacement minimum ici : les nœuds proches
+    # sont désormais FUSIONNÉS en zones à l'affichage (réglage « fusion
+    # HVN/LVN » de /scalp, cf. mergeUntested dans le script du graphique) au
+    # lieu de ne garder que le plus récent. Plafond relevé d'autant
+    # (SCALP_UNTESTED_RAW_MAX nœuds bruts, les plus récents).
     seen_price: set[float] = set()
-    kept_prices: list[float] = []
     out = []
     for u in reversed(untested):
         price = u["price"]
         if price in seen_price:
             continue
-        if any(abs(price - p) < min_gap for p in kept_prices):
-            continue
         seen_price.add(price)
-        kept_prices.append(price)
         out.append(u)
-        if len(out) >= SCALP_UNTESTED_MAX:
+        if len(out) >= SCALP_UNTESTED_RAW_MAX:
             break
     _ORDERFLOW_UNTESTED_CACHE[symbol] = (now, out)
     return out
+
+
+# Processus web en mode MOTEUR séparé (cf. gex/livestate.py) : les indicateurs
+# /scalp sont calculés par le moteur et publiés ; ici on ne fait que les lire,
+# sans jamais les recalculer, quel que soit leur âge.
+INDICATORS_REMOTE = False
+_INDICATOR_CACHES = {
+    "confluence": "_CONFLUENCE_CACHE", "order_flow": "_ORDER_FLOW_CACHE",
+    "gex_profile": "_GEX_PROFILE_CACHE", "orderflow_profile": "_ORDERFLOW_PROFILE_CACHE",
+    "untested": "_ORDERFLOW_UNTESTED_CACHE", "absorptions": "_ABSORPTIONS_CACHE",
+}
+
+
+def _remote_value(cache: dict, symbol: str, default):
+    hit = cache.get(symbol)
+    return hit[1] if hit else default
+
+
+def export_scalp_indicators(symbol: str) -> dict:
+    """Caches d'indicateurs déjà calculés pour `symbol`, à publier."""
+    out = {}
+    for name, var in _INDICATOR_CACHES.items():
+        hit = globals()[var].get(symbol)
+        if hit:
+            out[name] = hit[1]
+    return out
+
+
+def import_scalp_indicators(name: str, payload: dict) -> None:
+    """Gestionnaire du miroir : `scalp-<SYM>.json` -> caches locaux."""
+    symbol = name.split("-", 1)[1]
+    now = time.time()
+    for key, value in (payload.get("data") or {}).items():
+        var = _INDICATOR_CACHES.get(key)
+        if var:
+            globals()[var][symbol] = (now, value)
+
+
+def publish_scalp_indicators() -> None:
+    from . import livestate
+    for symbol in SCALP_SCHED_SYMBOLS:
+        try:
+            livestate.publish_json(f"scalp-{symbol}", export_scalp_indicators(symbol))
+        except Exception:  # noqa: BLE001
+            log.exception("Publication des indicateurs /scalp échouée (%s)", symbol)
 
 
 # Moteur planifié des indicateurs /scalp (2026-10-04) — demande explicite de
@@ -1949,6 +2608,10 @@ def scalp_orderflow_untested(symbol: str, day_ticks: pd.DataFrame) -> list[dict]
 # soit ouvert ou non : les requêtes ne font plus jamais que LIRE un cache
 # déjà chaud.
 SCALP_SCHED_SYMBOLS = ("NQ", "ES")  # les deux seuls symboles de /scalp
+SCALP_INDICATORS_EVERY_S = 20         # cadence du moteur d'indicateurs /scalp
+
+
+PUBLISH_INDICATORS = False
 
 
 def _refresh_scalp_indicators() -> None:
@@ -1975,6 +2638,10 @@ def _refresh_scalp_indicators() -> None:
         except Exception:  # noqa: BLE001
             log.exception("Rafraîchissement planifié order-flow échoué (%s)", symbol)
         try:
+            scalp_absorptions(symbol, _scalp_day_ticks(symbol, sides_only=False))
+        except Exception:  # noqa: BLE001
+            log.exception("Rafraîchissement planifié absorptions échoué (%s)", symbol)
+        try:
             scalp_confluence_zones(symbol)
         except Exception:  # noqa: BLE001
             log.exception("Rafraîchissement planifié confluence échoué (%s)", symbol)
@@ -1984,6 +2651,283 @@ def _refresh_scalp_indicators() -> None:
                 scalp_gex_profile(symbol, spot)
             except Exception:  # noqa: BLE001
                 log.exception("Rafraîchissement planifié profil gamma échoué (%s)", symbol)
+    if PUBLISH_INDICATORS:
+        publish_scalp_indicators()
+
+
+def scalp_indicators_channel(symbol: str, lang: str, swing: bool) -> broadcast.Channel:
+    """Canal du flux /scalp-indicators-stream, partagé par les serveurs WSGI
+    et asynchrone (cf. gex/asgi.py) : un seul producteur par clé."""
+    # Canal partagé par (symbole, langue, swing) — cf. gex/broadcast.py : le
+    # bandeau est calculé UNE fois par seconde pour tous les onglets
+    # abonnés, poussé seulement quand il change (signature spot +
+    # absorption), au lieu d'une boucle de calcul par connexion. Un cycle
+    # de calcul raté ne ferme jamais le flux (géré par le canal) ; une
+    # erreur d'écriture libère la connexion (générateur arrêté).
+    def factory():
+        last = {"banner_sig": None}
+
+        def produce():
+            ctx = scalp_context(symbol)
+            if ctx is None:
+                return None
+            spot = _scalp_live_spot(symbol, ctx)
+            absorb = scalp_absorption(symbol)
+            banner_sig = (round(spot, 2), json.dumps(absorb, sort_keys=True, default=str))
+            if banner_sig == last["banner_sig"]:
+                return None
+            last["banner_sig"] = banner_sig
+            # `default=` rappelle to_plotly_json() sur chaque composant Dash
+            # imbriqué (le niveau supérieur seul ne suffit pas)
+            snap = {"banner": scalp_banner(symbol, ctx, spot, lang, absorb, swing=swing,
+                                           edge=True)}
+            return ("data: " + json.dumps(
+                snap, default=lambda o: getattr(o, "to_plotly_json", lambda: str(o))())
+                + "\n\n")
+        return produce
+
+    return broadcast.channel(("scalp-ind", symbol, lang, swing), factory, 1.0)
+
+
+def swing_param(raw) -> float | None:
+    """Seuil du swing H/L choisi dans les réglages /scalp (points), borné et
+    arrondi au quart de point ; None = défaut du bandeau."""
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not v > 0:
+        return None
+    return round(min(max(v, 0.25), 1000.0) * 4) / 4
+
+
+def scalp_chart_channel(symbol: str, tf: str, swing: float | None = None) -> broadcast.Channel:
+    """Canal du flux /chart-stream (cf. scalp_indicators_channel) ; un canal
+    par (symbole, tf, seuil de swing)."""
+    # Canal partagé par (symbole, tf). Pré-filtre conservé : les bougies et
+    # niveaux ne changent pas sans que le spot bouge, sinon revérification
+    # toutes les 5 s ; poussé seulement si la signature change.
+    def factory():
+        last = {"sig": None, "spot": None, "check": 0.0}
+
+        def produce():
+            ctx = scalp_context(symbol)
+            if ctx is None:
+                return None
+            spot = _scalp_live_spot(symbol, ctx)
+            now_mono = time.monotonic()
+            if spot == last["spot"] and now_mono - last["check"] < 5.0:
+                return None
+            last["spot"], last["check"] = spot, now_mono
+            data = scalp_v2_chart_data(symbol, ctx, spot, tf=tf, swing_pts=swing)
+            candles = data.get("candles") or []
+            markers = data.get("markers") or []
+            tail = candles[-1] if candles else None
+            sig = (len(candles), len(markers), len(data.get("absorptions") or []),
+                   tail and (tail["time"], tail["close"]))
+            if sig == last["sig"]:
+                return None
+            last["sig"] = sig
+            return f"data: {json.dumps(data)}\n\n"
+        return produce
+
+    return broadcast.channel(("scalp-chart", symbol, tf, swing), factory, 1.0)
+
+
+SCALP_PANELS = ("head", "ladder", "prints", "hedge", "price")
+# bloc -> case « Masquer… » de Personnalisation qui le coupe
+SCALP_PANEL_HIDE = {"ladder": "hide_ladder", "prints": "hide_tape",
+                    "hedge": "hide_hedge_chart", "price": "hide_price_chart"}
+
+
+def scalp_panels_snapshot(symbol: str, lang: str, window: int, min_size: float,
+                          v1: bool, hide: frozenset) -> dict[str, str]:
+    """Blocs de la page scalp hors bandeau et graphique principal, chacun
+    sérialisé en JSON : composants Dash (en-tête, niveaux, gros prints) et
+    descriptions Lightweight Charts (couverture des dealers, et prix sur
+    /scalpv1 seulement — cf. gex/lwspec.py). Les blocs masqués par
+    l'utilisateur ne sont pas calculés."""
+    from plotly.utils import PlotlyJSONEncoder
+    from . import lwspec
+
+    def enc(o) -> str:
+        return json.dumps(o, cls=PlotlyJSONEncoder)
+
+    want = {b for b in SCALP_PANELS if SCALP_PANEL_HIDE.get(b) not in hide}
+    if not v1:
+        want.discard("price")              # /scalp : graphique LW (chart-stream)
+    out: dict[str, str] = {}
+    sctx = scalp_context(symbol)
+    if v1 and sctx is not None:
+        # /scalpv1 n'a pas le flux d'indicateurs : son bandeau (V1, sans
+        # lecture normalisée) passe par ce flux-ci
+        spot = _scalp_live_spot(symbol, sctx)
+        out["banner"] = enc(scalp_banner(symbol, sctx, spot, lang, scalp_absorption(symbol),
+                                         swing=False, edge=False))
+    if "hedge" in want:
+        spec = lwspec.fig_to_spec(cached_hedge_fig(symbol, lang, window), height=300)
+        spec["key"] = f"scalp-{symbol}-{window}"
+        spec["follow"] = True          # se recentre seul sur ses courbes
+        out["hedge"] = enc(spec)
+    if "prints" in want:
+        out["prints"] = enc(tape_table(symbol, lang, min_size=min_size, include_combos=False))
+    if sctx is None:
+        wait = enc(html.Div(t(lang, "waiting_native"), className="hint"))
+        out["head"] = wait
+        if "ladder" in want:
+            out["ladder"] = wait
+        return out
+    spot = _scalp_live_spot(symbol, sctx)
+    out["head"] = enc(scalp_head(symbol, lang, sctx, spot))
+    if "ladder" in want:
+        out["ladder"] = enc(scalp_ladder(symbol, sctx, spot, lang))
+    if "price" in want:
+        spec = lwspec.fig_to_spec(scalp_price_fig(symbol, sctx, spot))
+        spec["key"] = f"scalp-price-{symbol}"
+        out["price"] = enc(spec)
+    return out
+
+
+def scalp_panels_channel(symbol: str, lang: str, window: int, min_size: float,
+                         v1: bool, hide: frozenset) -> broadcast.Channel:
+    """Canal du flux /scalp-stream (même principe que les deux canaux
+    ci-dessus) : un calcul par seconde pour tous les onglets aux mêmes
+    réglages, poussé seulement si un bloc a changé. Le message porte TOUS
+    les blocs (un nouvel abonné reçoit un état complet) et une signature par
+    bloc : le navigateur ne remplace que ceux dont la signature a changé."""
+    def factory():
+        last = {"sig": None}
+
+        def produce():
+            blocks = scalp_panels_snapshot(symbol, lang, window, min_size, v1, hide)
+            sig = {k: format(hash(v) & 0xFFFFFFFF, "x") for k, v in blocks.items()}
+            if sig == last["sig"]:
+                return None
+            last["sig"] = sig
+            body = ",".join(f'"{k}":{v}' for k, v in blocks.items())
+            return f'data: {{"sig":{json.dumps(sig)},"blocks":{{{body}}}}}\n\n'
+        return produce
+
+    return broadcast.channel(("scalp-panels", symbol, lang, window, min_size, v1,
+                              tuple(sorted(hide))), factory, 1.0)
+
+
+def scalp_panels_params(args) -> tuple:
+    """(lang, window, min_size, v1, hide) depuis la requête du flux."""
+    def num(name, default, cast):
+        try:
+            return cast(args.get(name, default))
+        except (TypeError, ValueError):
+            return default
+    hide = frozenset(h for h in (args.get("hide") or "").split(",")
+                     if h in SCALP_PANEL_HIDE.values())
+    return (args.get("lang", "fr"), num("window", -1, int), num("min", 0.0, float),
+            args.get("v1") == "1", hide)
+
+
+# --- Graphiques Lightweight Charts poussés en SSE ---------------------------
+# Nom -> (constructeur de la description, cadence de recalcul en s). Les
+# constructeurs réutilisent les figures existantes (cf. gex/lwspec.py) : même
+# calcul que les PNG du bot. Un canal par (graphique, paramètres), partagé par
+# tous les onglets, poussé seulement quand la description change.
+def _lw_list(v: str | None) -> list[str]:
+    return [x for x in (v or "").split(",") if x]
+
+
+def _lw_hedge(a: dict) -> dict:
+    from . import lwspec
+    try:
+        window = int(a.get("window", 15))
+    except ValueError:
+        window = 15
+    return lwspec.fig_to_spec(cached_hedge_fig(a["symbol"], a["lang"], window),
+                              height=int(a.get("h") or 340))
+
+
+def _lw_fig(builder):
+    def build(a: dict) -> dict:
+        from . import lwspec
+        return lwspec.fig_to_spec(builder(a))
+    return build
+
+
+LW_CHARTS = {
+    # flux OPRA : minute en cours comprise (tape_day), d'où la cadence de 2 s
+    "flow": (_lw_fig(lambda a: flow_fig(a["symbol"], a["lang"], a.get("day") or None)), 2.0),
+    "gflow": (_lw_fig(lambda a: gamma_flow_fig(a["symbol"], a["lang"], a.get("day") or None,
+                                               _lw_list(a.get("series")))), 2.0),
+    "tape": (_lw_fig(lambda a: tape_fig(a["symbol"], a["lang"], a.get("day") or None,
+                                        _lw_list(a.get("series")))), 2.0),
+    "history": (_lw_fig(lambda a: history_fig(a["symbol"], a["lang"])), 30.0),
+    "spotzg": (_lw_fig(lambda a: spot_zg_fig(a["symbol"], a["lang"])), 30.0),
+    "hedge": (_lw_hedge, 1.0),
+    "heatmap": (lambda a: heatmap_spec(
+        a["symbol"], a["lang"], a.get("day") or None,
+        float(a.get("window") or 0.04), a.get("unit") or None,
+        _lw_list(a.get("levels")) if "levels" in a else None), 2.0),
+    # pas un graphique : la version de la chaîne affichée (cf. dcc.Store
+    # « chain-ver »), poussée à chaque changement
+    "chainver": (lambda a: {"v": chain_version(a["symbol"])}, 1.0),
+}
+LW_ARGS = ("symbol", "lang", "day", "series", "window", "unit", "levels", "h")
+
+
+def chain_version(symbol: str) -> str:
+    """Identifiant de la chaîne affichée pour `symbol` : change à chaque
+    réévaluation OPRA (gex/livechain.py) ou nouveau pull CBOE."""
+    st = chain_state(symbol)
+    with STATE.lock:
+        snap, df = st.snapshot, st.enriched
+    if snap is None or df is None:
+        return "none"
+    return f"{snap.feed_timestamp}|{id(df)}"
+
+
+def lw_params(args) -> tuple | None:
+    """Paramètres d'un flux de graphique, filtrés (clé du canal partagé)."""
+    a = {k: str(args.get(k)) for k in LW_ARGS if args.get(k) is not None}
+    if a.get("symbol") not in UNDERLYINGS:
+        return None
+    a.setdefault("lang", "fr")
+    return tuple(sorted(a.items()))
+
+
+LW_MULTI_MAX = 12
+
+
+def lw_multi_channels(raw: str | None) -> dict[str, broadcast.Channel]:
+    """Canaux d'un flux multiplexé : `raw` = JSON [{"id", "name", "args"}].
+    Entrées invalides ignorées ; au plus LW_MULTI_MAX graphiques."""
+    try:
+        items = json.loads(raw or "[]")
+    except ValueError:
+        return {}
+    out: dict[str, broadcast.Channel] = {}
+    for it in items[:LW_MULTI_MAX] if isinstance(items, list) else ():
+        if not isinstance(it, dict):
+            continue
+        name, tag = it.get("name"), it.get("id")
+        params = lw_params(it.get("args") or {})
+        if name in LW_CHARTS and isinstance(tag, str) and params is not None:
+            out[tag] = lw_channel(name, params)
+    return out
+
+
+def lw_channel(name: str, params: tuple) -> broadcast.Channel:
+    builder, interval = LW_CHARTS[name]
+
+    def factory():
+        last = {"j": None}
+
+        def produce():
+            j = json.dumps(builder(dict(params)), default=float)
+            if j == last["j"]:
+                return None
+            last["j"] = j
+            return f"data: {j}\n\n"
+        return produce
+
+    return broadcast.channel(("lw", name, params), factory, interval)
 
 
 _SCALP_INDICATOR_SCHED = None
@@ -2034,9 +2978,22 @@ def start_scalp_indicator_scheduler() -> None:
     # instant que flush_ticks/flush_optprints (aussi 60s, gex/scheduler.py)
     # et pull_all — repéré en direct le 2026-10-05, des pics de charge
     # ponctuels coïncidant avec plusieurs jobs 60s qui dérivent en phase.
-    sched.add_job(_refresh_scalp_indicators, "interval", seconds=60,
+    # Redescendu à 20 s le 2026-10-08 : le passage complet est désormais
+    # linéaire (volume_bars, zones non testées et absorptions vectorisés :
+    # 2,6 s à froid pour NQ + ES à 600 000 ticks chacun, mesuré le 2026-10-08,
+    # contre >20 s le 05) et tourne dans le processus moteur en mode GEX_ENGINE. max_instances/coalesce gardent la sécurité :
+    # un cycle trop long saute le suivant au lieu de s'empiler.
+    sched.add_job(_refresh_scalp_indicators, "interval", seconds=SCALP_INDICATORS_EVERY_S,
                  max_instances=1, coalesce=True,
                  next_run_time=datetime.now(ET) + timedelta(seconds=20))
+    # Replay de la heatmap (gex/replay.py) : une image par minute de ce que
+    # la heatmap affiche, pour NQ/ES/SPX/NDX — dans CE processus, celui qui
+    # tient les chaînes (moteur, sinon dashboard). Décalé de 35 s pour ne pas
+    # tomber avec les jobs à la minute.
+    from . import replay
+    sched.add_job(replay.record_all, "interval", seconds=replay.FRAME_EVERY_S,
+                  max_instances=1, coalesce=True,
+                  next_run_time=datetime.now(ET) + timedelta(seconds=35))
     sched.start()
     _SCALP_INDICATOR_SCHED = sched
 
@@ -2072,7 +3029,7 @@ def _resample_price_bars(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
     return out
 
 
-def _scalp_day_ticks(symbol: str) -> pd.DataFrame:
+def _scalp_day_ticks(symbol: str, sides_only: bool = True) -> pd.DataFrame:
     """Ticks BUY/SELL de la séance en cours, repli sur le dernier jour
     disponible si elle est encore vide (nuit, week-end) — factorisé le
     2026-10-04 : utilisé par `scalp_v2_chart_data` ET par le moteur planifié
@@ -2080,18 +3037,46 @@ def _scalp_day_ticks(symbol: str) -> pd.DataFrame:
     logique de repli qui pourraient diverger."""
     from .tickcapture import _session_day
     day = _session_day(time.time())
-    day_ticks = store.load_ticks(symbol, day)
-    if not day_ticks.empty:
-        day_ticks = day_ticks[day_ticks["side"].isin(("BUY", "SELL"))]
+    day_ticks = _ticks_cached(symbol, day, sides_only)
     if day_ticks.empty:
         # Repli : séance en cours encore vide — dernier jour avec des ticks,
         # même principe que `scalp_price_fig` pour les bougies Plotly.
         days = store.tick_days(symbol)
         if days:
-            day_ticks = store.load_ticks(symbol, days[-1])
-            if not day_ticks.empty:
-                day_ticks = day_ticks[day_ticks["side"].isin(("BUY", "SELL"))]
+            day_ticks = _ticks_cached(symbol, days[-1], sides_only)
     return day_ticks
+
+
+_TICKS_CACHE: dict[tuple[str, str, bool], tuple[tuple, pd.DataFrame]] = {}
+_TICKS_LOCK = threading.Lock()
+
+
+def _ticks_cached(symbol: str, day: str, sides_only: bool = True) -> pd.DataFrame:
+    """Ticks d'un jour (BUY/SELL seulement par défaut ; bruts avec
+    `sides_only=False`, pour la détection d'absorption où un côté indéterminé
+    coupe une salve), relus seulement quand le fichier change (le process
+    capture le réécrit ~1 fois/min) : tous les appelants partagent UNE
+    lecture par écriture au lieu d'une par appel. Lecture seule."""
+    path = store.SETTINGS.data_dir / "ticks" / symbol / f"{day}.parquet"
+    try:
+        st = path.stat()
+        sig = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        sig = None                 # pas de fichier : lecture directe, sans cache
+    def load():
+        df = store.load_ticks(symbol, day)
+        if sides_only and not df.empty:
+            df = df[df["side"].isin(("BUY", "SELL"))]
+        return df
+    if sig is None:
+        return load()
+    with _TICKS_LOCK:
+        hit = _TICKS_CACHE.get((symbol, day, sides_only))
+        if hit and hit[0] == sig:
+            return hit[1]
+        df = load()
+        _TICKS_CACHE[(symbol, day, sides_only)] = (sig, df)
+        return df
 
 
 def _scalp_indicator_snapshot(symbol: str, ctx: dict, spot: float,
@@ -2106,8 +3091,12 @@ def _scalp_indicator_snapshot(symbol: str, ctx: dict, spot: float,
     (pas recalculé ici) : les deux appelants en ont de toute façon besoin
     pour autre chose (bougies volume, boucle SSE), pas la peine de lire
     `store.load_ticks` deux fois pour le même instant."""
-    levels = [{"name": r.name, "price": r.price, "color": C[_SC_KIND_COLOR[r.kind]]}
-             for r in scalp.build_ladder(symbol, spot, ctx["zg"], ctx["hvl"], ctx["keys"], ctx["walls"])]
+    def ladder(keys, walls):
+        return [{"name": r.name, "price": r.price, "color": C[_SC_KIND_COLOR[r.kind]],
+                 "kind": r.kind}
+                for r in scalp.build_ladder(symbol, spot, ctx["zg"], ctx["hvl"], keys, walls)]
+    levels = ladder(ctx["keys"], ctx["walls"])
+    levels_0dte = ladder(ctx.get("keys_0dte") or {}, ctx.get("walls_0dte") or [])
     confluence = scalp_confluence_zones(symbol)
     try:
         gex_profile = scalp_gex_profile(symbol, spot)
@@ -2120,12 +3109,14 @@ def _scalp_indicator_snapshot(symbol: str, ctx: dict, spot: float,
     except Exception:  # noqa: BLE001 — un profil raté ne doit jamais casser le graphique
         log.exception("Profil order-flow par jambe /scalp v2 indisponible (%s)", symbol)
         orderflow_profile = {"legs": [], "untested": []}
-    return {"levels": levels, "confluence": confluence, "order_flow": order_flow,
-           "gex_profile": gex_profile, "orderflow_profile": orderflow_profile}
+    return {"levels": levels, "levels_0dte": levels_0dte, "confluence": confluence,
+            "order_flow": order_flow, "gex_profile": gex_profile,
+            "orderflow_profile": orderflow_profile}
 
 
 def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
-                        tf: str = CHART_TF_DEFAULT, lookback_min: int | None = None) -> dict:
+                        tf: str = CHART_TF_DEFAULT, lookback_min: int | None = None,
+                        swing_pts: float | None = None) -> dict:
     """Bougies (volume OU temps, cf. `tf`) + pivots swing (base volume
     seulement) + niveaux (GEX/HVL/Flip/murs) pour le graphique TradingView
     Lightweight Charts de `/scalp` v2 — remplace `scalp_price_fig` (Plotly,
@@ -2142,13 +3133,20 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
     day_ticks = _scalp_day_ticks(symbol)
     snap = _scalp_indicator_snapshot(symbol, ctx, spot, day_ticks)
     levels, confluence = snap["levels"], snap["confluence"]
+    levels_0dte = snap.get("levels_0dte") or []
     order_flow, gex_profile = snap["order_flow"], snap["gex_profile"]
     orderflow_profile = snap["orderflow_profile"]
-    empty = {"candles": [], "markers": [], "levels": levels, "confluence": confluence,
+    empty = {"candles": [], "markers": [], "absorptions": [], "levels": levels,
+            "levels_0dte": levels_0dte, "confluence": confluence,
             "order_flow": order_flow, "gex_profile": gex_profile,
             "orderflow_profile": orderflow_profile, "symbol": symbol}
 
     kind, size = tf[0], int(tf[1:])
+    # Swing H/L du graphique : sur les MÈCHES (plus hauts / plus bas, cf.
+    # bars.zigzag) ; seuil réglable dans les réglages /scalp, défaut = celui
+    # du bandeau (move_threshold × 0,6 : 15 pts NQ, 3,6 pts ES)
+    swing_pts = float(swing_pts) if swing_pts and swing_pts > 0 \
+        else scalp.move_threshold(symbol) * 0.6
 
     if kind == "t":
         # Indépendant de day_ticks à dessein : les bougies 1 min déjà
@@ -2173,58 +3171,9 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
         # direct quelques minutes après : "ça attend la clôture de bougie").
         # `today_cal` (date calendaire ET directe, même convention que
         # `scalp_price_fig`/le stockage) est la bonne référence ici.
-        today_cal = datetime.now(ET).strftime("%Y-%m-%d")
-        used_day = today_cal
-        bars = _load_prices_cached(symbol, today_cal)
-        if bars.empty:
-            days = store.price_days(symbol)
-            if days:
-                used_day = days[-1]
-                bars = _load_prices_cached(symbol, used_day)
+        bars, used_day = futures_session_bars(symbol, spot)
         if bars.empty:
             return empty
-        if used_day == today_cal:
-            # Séance CME, pas date calendaire ET (2026-10-05) : la séance en
-            # cours a commencé la veille (calendaire) à 18h ET = 00h Paris,
-            # bien avant minuit ET où bascule le fichier "aujourd'hui" (cf.
-            # commentaire au-dessus sur la convention de stockage). Sans ce
-            # complément, "depuis l'ouverture" démarrait à minuit ET (6h
-            # Paris) au lieu de 18h ET la veille (0h Paris) — repéré en
-            # direct juste après le retrait de la troncature par défaut.
-            now_et = datetime.now(ET)
-            session_start = now_et.replace(hour=18, minute=0, second=0, microsecond=0)
-            if now_et.hour < 18:
-                # avant 18h ET : la séance en cours a débordé sur la veille
-                # (calendaire) — préfixer le morceau manquant.
-                session_start -= timedelta(days=1)
-                prev_bars = _load_prices_cached(symbol, session_start.strftime("%Y-%m-%d"))
-                if not prev_bars.empty:
-                    prev_bars = prev_bars[pd.to_datetime(prev_bars["timestamp"])
-                                         >= session_start.replace(tzinfo=None)]
-                    if not prev_bars.empty:
-                        bars = pd.concat([prev_bars, bars], ignore_index=True)
-            else:
-                # à/après 18h ET : le fichier "aujourd'hui" contient encore
-                # la fin de la séance PRÉCÉDENTE (00h-17h ET) — la retirer,
-                # sinon "depuis l'ouverture" montre deux séances à la suite.
-                bars = bars[pd.to_datetime(bars["timestamp"])
-                           >= session_start.replace(tzinfo=None)]
-        # Bougie(s) en cours (2026-10-05) : sans ça, ce graphique n'affiche
-        # jamais rien de moins de 1-2 min (le temps que flush_prices écrive la
-        # minute achevée) — repéré en direct ("on dirait qu'il attend la
-        # clôture de bougie pour la dessiner"). Même mécanisme que
-        # `scalp_price_fig` (Plotly, /scalpv1) : `_update_live_bar` tient à
-        # jour les quelques dernières minutes à partir du spot vu par CE
-        # process, on ne complète que ce qui manque après le dernier point du
-        # disque. Seulement si on affiche la séance EN COURS — un repli sur un
-        # jour passé (`used_day != today_cal`) n'a pas de bougie "live" à ajouter.
-        if used_day == today_cal:
-            live_bars = _update_live_bar(symbol, spot, datetime.now(ET))
-            last_ts = bars["timestamp"].iloc[-1] if not bars.empty else None
-            manquantes = sorted(m for m in live_bars if last_ts is None or m > last_ts)
-            if manquantes:
-                bars = pd.concat([bars, pd.DataFrame([
-                    {"timestamp": m, **live_bars[m]} for m in manquantes])], ignore_index=True)
         if size > 1:
             bars = _resample_price_bars(bars, size)
         # Plus de troncature par défaut depuis le 2026-10-05 (demande
@@ -2254,11 +3203,13 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
         if len(bars) >= 5:
             zz_bars = bars.reset_index(drop=True).copy()
             zz_bars["ts_close"] = epoch.to_numpy()
-            swings = zigzag(zz_bars, min_move=scalp.move_threshold(symbol) * 0.6)
+            swings = zigzag(zz_bars, min_move=swing_pts, wicks=True)
             confirmed = swings[~swings["kind"].str.endswith("?")]
             markers = [{"time": int(r.ts), "price": r.price, "kind": r.kind}
                       for r in confirmed.itertuples()]
-        return {"candles": candles, "markers": markers, "levels": levels,
+        return {"candles": candles, "markers": markers,
+                "absorptions": _absorption_marks(symbol, [c["time"] for c in candles]),
+                "levels": levels, "levels_0dte": levels_0dte,
                 "confluence": confluence, "order_flow": order_flow,
                 "gex_profile": gex_profile, "orderflow_profile": orderflow_profile,
                 "symbol": symbol}
@@ -2289,11 +3240,15 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
                 "low": r.low, "close": r.close} for r in bars_df.itertuples()]
     markers = []
     if len(bars_df) >= 5:
-        swings = zigzag(bars_df, min_move=scalp.move_threshold(symbol) * 0.6)
+        # horodatés à l'OUVERTURE de la barre, comme les bougies affichées
+        # (sinon le marqueur ne tombe sur aucune bougie)
+        swings = zigzag(bars_df, min_move=swing_pts, ts_col="ts_open", wicks=True)
         confirmed = swings[~swings["kind"].str.endswith("?")]
         markers = [{"time": int(r.ts), "price": r.price, "kind": r.kind}
                    for r in confirmed.itertuples()]
-    return {"candles": candles, "markers": markers, "levels": levels, "confluence": confluence,
+    return {"candles": candles, "markers": markers,
+            "absorptions": _absorption_marks(symbol, [c["time"] for c in candles]),
+            "levels": levels, "levels_0dte": levels_0dte, "confluence": confluence,
             "order_flow": order_flow, "gex_profile": gex_profile,
             "orderflow_profile": orderflow_profile, "symbol": symbol}
 
@@ -2427,6 +3382,14 @@ def profile_fig(df: pd.DataFrame, spot: float, zg: float | None, lang: str,
                       annotation_font=dict(color=C["zg"], size=10),
                       annotation_position="top right", annotation_textangle=-90,
                       annotation_xshift=2)
+        # fourchette du flip si le smile suit le spot (sticky moneyness)
+        zg_m = metrics.zero_gamma_info(df, spot, sticky="moneyness")["level"]
+        if zg_m is not None and abs(zg_m - zg) > 1e-9:
+            lo, hi = sorted((xf(zg), xf(zg_m)))
+            fig.add_vrect(x0=lo, x1=hi, fillcolor=C["zg"], opacity=0.12, line_width=0,
+                          annotation_text=t(lang, "zg_band", v=f"{xf(zg_m):.0f}"),
+                          annotation_font=dict(color=C["zg"], size=9),
+                          annotation_position="bottom left")
     return fig
 
 
@@ -2438,8 +3401,9 @@ def profile_by_expiry_fig(df: pd.DataFrame, spot: float, lang: str,
     today = datetime.now(ET).date()
     fig = go.Figure()
     drawn = 0
-    for i, bucket in enumerate(EXPIRY_BUCKETS):
-        sub = df[metrics.bucket_mask(df, bucket, today)]
+    # décomposition en paliers : la vue pondérée n'en est pas un
+    for i, bucket in enumerate(b for b in EXPIRY_BUCKETS if b != "Pondéré"):
+        sub = metrics.select_bucket(df, bucket, today)
         res = metrics.gamma_profile(sub, spot, range_pct=window, steps=201)
         if res is None:
             continue
@@ -2578,6 +3542,17 @@ def _scale_note(lang: str, symbol: str, scale_key: str | None,
     return t(lang, key, scale=target.label, ratio=f"{ratio:.4f}")
 
 
+def callbacks_fingerprint(app) -> str:
+    """Empreinte des signatures de callbacks (sorties, entrées, états) :
+    change dès qu'un callback est ajouté, retiré ou change d'entrées."""
+    import hashlib
+    sig = sorted(
+        (out, [(i["id"], i["property"]) for i in cb.get("inputs", [])],
+         [(i["id"], i["property"]) for i in cb.get("state", [])])
+        for out, cb in app.callback_map.items())
+    return hashlib.sha1(json.dumps(sig, default=str).encode()).hexdigest()[:12]
+
+
 def card(label: str, value: str, sub: str = "", accent: str | None = None) -> html.Div:
     """Tuile d'indicateur : liseré coloré à gauche quand la valeur porte un signe."""
     return html.Div(
@@ -2684,11 +3659,9 @@ def chain_state(symbol: str):
 
     Quand un compte courtier est configuré, SPX et NDX ont une chaîne native
     dxFeed sans les 15 min de retard de CBOE (cf. gex/idxopt.py) : c'est elle
-    qui porte les niveaux, les tuiles et les graphes de structure. La chaîne
-    CBOE continue de tourner en parallèle à 60 s, mais seulement pour le flux
-    delta, qui a besoin d'une clé `contract` stable entre deux pulls et d'une
-    cadence qu'une collecte native ne tient pas — ces graphiques-là lisent le
-    disque, pas cet état, donc rien ne les perturbe.
+    qui porte les niveaux, les tuiles et les graphes de structure, réévaluée
+    au spot temps réel entre deux salves (gex/livechain.py). La chaîne CBOE
+    continue de tourner en parallèle à 60 s, en secours.
 
     Repli sur CBOE si le natif est absent ou dormant depuis plus de
     `NATIVE_STALE_S` : une donnée délayée mais vivante vaut mieux qu'une
@@ -2701,8 +3674,28 @@ def chain_state(symbol: str):
         if s is not None and ts is not None:
             age = (datetime.now(ET).replace(tzinfo=None) - ts).total_seconds()
             if 0 <= age < NATIVE_STALE_S:
-                return native
-    return STATE.get(symbol)
+                return livechain.view(scheduler_native_key(symbol), symbol, native,
+                                      STATE.lock)
+    st = STATE.get(symbol)
+    # NQ/ES : la chaîne native (CME via dxFeed) est rangée sous le symbole
+    # lui-même ; réévaluée au spot live comme les indices (cf. gex/livechain.py)
+    return livechain.view(symbol, symbol, st, STATE.lock)
+
+
+def _book_card(symbol: str, df, spot: float, lang: str) -> list:
+    """Tuile du GEX sur book estimé (OI + flux signé du jour, cf. positioning),
+    seulement quand des prints existent pour ce sous-jacent."""
+    if df is None or df.empty:
+        return []
+    from . import positioning
+    flow = positioning.daily_taker_flow(symbol, datetime.now(ET).date())
+    if flow.empty:
+        return []
+    b = positioning.book_summary(df, flow, spot)
+    v = b["net_gex_book"]
+    return [card(t(lang, "card_gex_book"), f"{v / 1e9:+.1f} $Bn",
+                 t(lang, "card_gex_book_sub", cov=f"{b['flow_coverage']:.0%}"),
+                 accent=C["pos"] if v >= 0 else C["neg"])]
 
 
 def build_cards(symbol: str, lang: str, xf=None, scale: str | None = None) -> list:
@@ -2742,6 +3735,9 @@ def build_cards(symbol: str, lang: str, xf=None, scale: str | None = None) -> li
 
     zg_txt = f"{xf(s.zero_gamma):.0f}" if s.zero_gamma else "n/a"
     zg_sub = ""
+    if s.zero_gamma is None and df is not None and \
+            metrics.zero_gamma_info(df, s.spot)["status"] == "no_flip":
+        zg_sub = t(lang, "card_zg_none")
     if s.zero_gamma:
         d = spot - s.zero_gamma  # écart natif, non transposé
         zg_sub = t(lang, "card_zg_sub", sign="+" if d >= 0 else "",
@@ -2767,6 +3763,7 @@ def build_cards(symbol: str, lang: str, xf=None, scale: str | None = None) -> li
              t(lang, "dex_long") if s.net_dex >= 0 else t(lang, "dex_short"),
              accent=C["pos"] if s.net_dex >= 0 else C["neg"]),
         card(t(lang, "card_zero_gamma"), zg_txt, zg_sub, accent=C["zg"]),
+        *_book_card(symbol, df, s.spot, lang),
         card(t(lang, "card_gex_0dte"), f"{s.net_gex_0dte / 1e9:+.1f} $Bn"),
         card(t(lang, "card_pc_oi"), f"{s.pc_oi:.2f}"),
         card(t(lang, "card_pc_vol"), f"{s.pc_volume:.2f}"),
@@ -2821,7 +3818,7 @@ def _figure_for(symbol: str, name: str, lang: str = "fr", bucket: str = "Tout",
         return None
     spot = snap.spot
     zg = metrics.zero_gamma(df, spot)
-    sel = df[metrics.bucket_mask(df, bucket, today_d)]
+    sel = metrics.select_bucket(df, bucket, today_d)
     b_lbl = t(lang, BUCKET_KEYS[bucket])
     # Mêmes murs que le dashboard : structural = clôture veille (magnitude),
     # live = spot courant en séance (côté), périmètre = bucket affiché.
@@ -2937,6 +3934,8 @@ def create_app() -> Dash:
                         value="fr", inline=True),
                     dcc.Link("⚡ Mode scalping", id="scalp-link", href="/scalp",
                              className="linkbtn scalp-link"),
+                    dcc.Link("🔔 Mode MOC", id="moc-link", href="/moc",
+                             className="linkbtn moc-link"),
                     dcc.Link("← Vue complète", id="full-link", href="/",
                              className="linkbtn full-link"),
                     # page statique servie depuis assets/ (nouvel onglet)
@@ -3011,13 +4010,13 @@ def create_app() -> Dash:
                                  style={"width": "160px"}),
                     html.Button(id="flow-today", n_clicks=0, className="btn"),
                 ], className="daybar"),
-                dcc.Graph(config=GRAPH_CONFIG, id="flow", style={"marginBottom": "12px"}),
+                html.Div(id="flow", className="lw-chart", style={"marginBottom": "12px"}),
                 html.Div([
                     html.Span(id="lbl-gflow-series", className="ctl-label"),
                     dcc.Checklist(id="gflow-series", className="check", inline=True,
                                  value=["calls", "puts", "net"]),
                 ], className="daybar"),
-                dcc.Graph(config=GRAPH_CONFIG, id="gflow", style={"marginBottom": "12px"}),
+                html.Div(id="gflow", className="lw-chart", style={"marginBottom": "12px"}),
                 # Order flow SIGNÉ : placé juste après les deux proxys non
                 # signés, pour que la différence saute aux yeux plutôt que de
                 # se deviner. Le bandeau porte la provenance et la licence.
@@ -3026,15 +4025,17 @@ def create_app() -> Dash:
                     dcc.Checklist(id="tape-series", className="check", inline=True,
                                  value=["net", "calls", "puts"]),
                 ], className="daybar"),
-                dcc.Graph(config=GRAPH_CONFIG, id="tape"),
+                html.Div(id="tape", className="lw-chart"),
                 html.Div(id="tape-note", className="hint",
                          style={"marginBottom": "12px"}),
                 html.Div([
-                    dcc.Graph(config=GRAPH_CONFIG, id="gex-history"),
-                    dcc.Graph(config=GRAPH_CONFIG, id="spot-zg"),
+                    html.Div(id="gex-history", className="lw-chart"),
+                    html.Div(id="spot-zg", className="lw-chart"),
                     dcc.Graph(config=GRAPH_CONFIG, id="smile"),
                 ], className="row"),
             ]),
+
+            mocpage.layout(),
 
             html.Div(id="pane-scalp", children=[
                 # Disposition verticale (/scalp v2 seulement) : demande de Noé
@@ -3062,12 +4063,12 @@ def create_app() -> Dash:
                         # cf. style.css ; persisté en localStorage (gex-scalp-ergo).
                         dcc.Checklist(
                             id="sc-ergo-options", className="sc-ergo-options",
-                            # Défaut 2026-10-06 (mesure d'urgence, "décoche tt par défaut
-                            # pour tt le monde") : tous les widgets masqués par défaut,
-                            # seul le bandeau reste visible tant que l'utilisateur ne les
-                            # réactive pas lui-même (préférence explicite, cf. clientside
-                            # callback ci-dessous, toujours respectée si déjà enregistrée).
-                            value=["hide_ladder", "hide_price_chart", "hide_hedge_chart", "hide_tape"],
+                            # Tout visible par défaut (2026-10-08) : la mesure
+                            # d'urgence du 06 masquait tout sauf le bandeau. Une
+                            # préférence enregistrée reste respectée, sauf si c'est
+                            # exactement ce défaut d'urgence (cf. callback de
+                            # restauration plus bas).
+                            value=[],
                             options=[
                                 {"label": "Masquer niveaux", "value": "hide_ladder"},
                                 {"label": "Masquer graphique prix", "value": "hide_price_chart"},
@@ -3138,7 +4139,7 @@ def create_app() -> Dash:
                        **{"data-gs-id": "ladder"}),
                     html.Div([html.Div([
                         html.Span("⠿ Graphique", className="sc-widget-handle"),
-                        html.Div([dcc.Graph(config=GRAPH_CONFIG, id="scalp-price")],
+                        html.Div([html.Div(id="scalp-price", className="lw-chart")],
                                  id="scalp-price-card", className="sc-card sc-underlying"),
                         # Carte v2 (Lightweight Charts) : masquée par défaut
                         # (CSS), affichée seulement sur /scalp EXACT (pas
@@ -3247,7 +4248,145 @@ def create_app() -> Dash:
                                             title="Afficher/masquer les zones HVN/LVN non "
                                                   "testées (indépendant du profil de volume "
                                                   "par jambe ci-dessus)"),
+                                html.Button("Absorptions", id="scalp-ind-absorb-toggle",
+                                            className="sc-draw-btn sc-ind-btn",
+                                            title="Afficher/masquer les absorptions de la "
+                                                  "séance (rond sous la bougie : vendeurs "
+                                                  "absorbés au bid = support ; au-dessus : "
+                                                  "acheteurs absorbés à l'ask = résistance)"),
+                                html.Button("Expected move", id="scalp-ind-em-toggle",
+                                            className="sc-draw-btn sc-ind-btn",
+                                            title="Cadre d'amplitude de l'open US et mouvement "
+                                                  "attendu du jour (vol implicite et straddle)"),
+                                html.Button("⚙ Réglages", id="scalp-settings-toggle",
+                                            className="sc-draw-btn sc-ind-btn",
+                                            title="Réglages fins des indicateurs du graphique"),
                             ], className="sc-ind-toolbar"),
+                            html.Div(id="scalp-em-info", className="sc-em-info",
+                                     style={"display": "none"}),
+                            # Réglages fins (2026-10-16) : cf. callbacks « scalp-settings »
+                            html.Div([
+                                html.Label(["Swing H/L (pts) ",
+                                            dcc.Input(id="scalp-set-swing", type="number", min=0.25,
+                                                      step=0.25, debounce=True,
+                                                      placeholder="défaut : 15 NQ / 3,6 ES",
+                                                      persistence=True, persistence_type="local",
+                                                      className="sc-set-num")],
+                                           title="Retracement minimum, de mèche à mèche, pour "
+                                                 "confirmer un sommet ou un creux"),
+                                html.Label(["Fusion HVN/LVN (pts) ",
+                                            dcc.Input(id="scalp-set-merge", type="number", min=0,
+                                                      step=0.25, value=2, debounce=True,
+                                                      persistence=True, persistence_type="local",
+                                                      className="sc-set-num")],
+                                           title="Nœuds de même nature à moins de cet écart "
+                                                 "fusionnés en une zone (0 : aucune fusion)"),
+                                html.Span("Niveaux GEX :", className="sc-set-lbl"),
+                                dcc.Checklist(id="scalp-set-levels", inline=True, className="check",
+                                              persistence=True, persistence_type="local",
+                                              value=["zg", "hvl", "cw", "ps", "d1", "gex"],
+                                              options=[{"label": "Flip", "value": "zg"},
+                                                       {"label": "HVL", "value": "hvl"},
+                                                       {"label": "Call Wall", "value": "cw"},
+                                                       {"label": "Put Support", "value": "ps"},
+                                                       {"label": "1D Min/Max", "value": "d1"},
+                                                       {"label": "Murs GEX", "value": "gex"}]),
+                                html.Span("Échéances :", className="sc-set-lbl"),
+                                dcc.RadioItems(id="scalp-set-expiry", inline=True, className="check",
+                                               persistence=True, persistence_type="local",
+                                               value="all",
+                                               options=[{"label": "Toutes", "value": "all"},
+                                                        {"label": "0DTE", "value": "0dte"}]),
+                                html.Label(["Absorptions : volume min ",
+                                            dcc.Input(id="scalp-set-abs-total", type="number", min=0,
+                                                      step=5, debounce=True,
+                                                      placeholder="40 NQ / 100 ES",
+                                                      persistence=True, persistence_type="local",
+                                                      className="sc-set-num")],
+                                           title="Volume minimum de la salve (contrats). Sous la "
+                                                 "moitié du défaut, rien n'est détecté."),
+                                html.Label(["ratio min ",
+                                            dcc.Input(id="scalp-set-abs-ratio", type="number", min=2,
+                                                      step=0.5, value=4, debounce=True,
+                                                      persistence=True, persistence_type="local",
+                                                      className="sc-set-num")],
+                                           title="Salve ≥ N × la taille affichée avant elle "
+                                                 "(défaut 4, minimum 2)"),
+                                html.Label(["Order flow HVL : × médiane ",
+                                            dcc.Input(id="scalp-set-hvl-ratio", type="number",
+                                                      min=1.5, step=0.5, value=3, debounce=True,
+                                                      persistence=True, persistence_type="local",
+                                                      className="sc-set-num")],
+                                           title="Volume du palier ≥ N × la médiane des paliers "
+                                                 "actifs (défaut 3, minimum 1,5)"),
+                                html.Label(["delta min (%) ",
+                                            dcc.Input(id="scalp-set-hvl-delta", type="number",
+                                                      min=15, max=100, step=5, value=35,
+                                                      debounce=True, persistence=True,
+                                                      persistence_type="local",
+                                                      className="sc-set-num")],
+                                           title="Delta net ≥ N % du volume du palier "
+                                                 "(défaut 35, minimum 15)"),
+                                html.Span("Cadre open US :", className="sc-set-lbl"),
+                                html.Label(["fenêtre (NY) ",
+                                            dcc.Input(id="scalp-set-of-window", type="text",
+                                                      value="0930-1030", debounce=True,
+                                                      persistence=True, persistence_type="local",
+                                                      className="sc-set-num",
+                                                      style={"width": "90px"})],
+                                           title="Fenêtre mesurée, heure de New York "
+                                                 "(0930-1030 = 15h30-16h30 à Paris)"),
+                                html.Label(["séances ",
+                                            dcc.Input(id="scalp-set-of-n", type="number", min=1,
+                                                      max=500, step=1, value=60, debounce=True,
+                                                      persistence=True, persistence_type="local",
+                                                      className="sc-set-num")]),
+                                dcc.RadioItems(id="scalp-set-of-mode", inline=True, className="check",
+                                               persistence=True, persistence_type="local",
+                                               value="center",
+                                               options=[{"label": "centré sur l'open",
+                                                         "value": "center"},
+                                                        {"label": "extensions moyennes haut/bas",
+                                                         "value": "ext"}]),
+                                dcc.Checklist(id="scalp-set-of-opts", inline=True, className="check",
+                                              persistence=True, persistence_type="local",
+                                              value=["fill", "ext50", "ext100", "base", "ivem",
+                                                     "stem"],
+                                              options=[{"label": "remplir", "value": "fill"},
+                                                       {"label": "ext. 50 %", "value": "ext50"},
+                                                       {"label": "ext. 100 %", "value": "ext100"},
+                                                       {"label": "jusqu'à 16h00",
+                                                        "value": "extend"},
+                                                       {"label": "ajusté par la vol implicite",
+                                                        "value": "ivadj"},
+                                                       {"label": "EM vol implicite",
+                                                        "value": "ivem"},
+                                                       {"label": "EM straddle", "value": "stem"},
+                                                       {"label": "prix de départ",
+                                                        "value": "base"}]),
+                                html.Label(["départ EM ",
+                                            dcc.Dropdown(id="scalp-set-em-anchor", clearable=False,
+                                                         persistence=True,
+                                                         persistence_type="local",
+                                                         value="close", searchable=False,
+                                                         style={"width": "200px"},
+                                                         options=[{"label": "clôture de la veille (16h00 NY)",
+                                                                   "value": "close"},
+                                                                  {"label": "ouverture Globex (18h00 NY)",
+                                                                   "value": "globex"},
+                                                                  {"label": "minuit NY",
+                                                                   "value": "midnight"},
+                                                                  {"label": "open 9h30 NY",
+                                                                   "value": "open"}])]),
+                                html.Label(["σ × ",
+                                            dcc.Input(id="scalp-set-em-mult", type="number",
+                                                      min=0.1, step=0.25, value=1, debounce=True,
+                                                      persistence=True, persistence_type="local",
+                                                      className="sc-set-num")],
+                                           title="1 = ±1σ ; 0,5 = demi-mouvement attendu"),
+                                html.Span(id="scalp-settings-sink", style={"display": "none"}),
+                            ], id="scalp-settings-panel", className="sc-settings",
+                               style={"display": "none"}),
                             html.Div(id="scalp-lw-chart", className="sc-lw-chart"),
                         ], id="scalp-lw-card", className="sc-card sc-underlying"),
                         dcc.Store(id="scalp-lw-data"),
@@ -3279,15 +4418,8 @@ def create_app() -> Dash:
                                                               {"label": "15 min", "value": 15},
                                                               {"label": "30 min", "value": 30}])],
                                      className="sc-cardhead"),
-                            html.Div([dcc.Graph(config=GRAPH_CONFIG, id="scalp-hedge")],
+                            html.Div([html.Div(id="scalp-hedge", className="lw-chart")],
                                      id="scalp-hedge-card"),
-                            # Carte v2 (Lightweight Charts, LineSeries) :
-                            # même bascule Plotly/LW que
-                            # scalp-price/scalp-lw-card — /scalpv1 garde
-                            # scalp-hedge (Plotly) inchangée.
-                            html.Div([html.Div(id="scalp-lw-hedge", className="sc-lw-chart")],
-                                     id="scalp-lw-hedge-card"),
-                            dcc.Store(id="scalp-lw-hedge-data"),
                         ], className="sc-card sc-hedge"),
                     ], className="grid-stack-item-content"),
                     ], className="grid-stack-item",
@@ -3322,7 +4454,22 @@ def create_app() -> Dash:
                     dcc.Checklist(id="heat-levels", className="check", inline=True,
                                  value=["zero_gamma", "call_wall", "put_support"]),
                 ], className="ctl", style={"flexWrap": "wrap"}),
-                dcc.Graph(config=GRAPH_CONFIG, id="heatmap"),
+                # Replay de la séance du jour (gex/replay.py + assets/gex-replay.js) :
+                # commandes lues directement par le script, pas de callback Dash
+                html.Div([
+                    html.Button("▶ Replay", id="heat-replay-play", className="lw-btn",
+                                title="Rejouer la séance du jour (depuis l'ouverture Globex)"),
+                    html.Select(id="heat-replay-speed", className="heat-replay-speed",
+                                title="Vitesse (×60 : une minute de séance par seconde)",
+                                children=[html.Option(f"×{v}", value=str(v), selected=v == 60)
+                                          for v in (1, 10, 30, 60, 120, 300)]),
+                    dcc.Input(id="heat-replay-pos", type="range", min=0, max=1000, step=1,
+                              value=0, className="heat-replay-pos", debounce=False),
+                    html.Span(id="heat-replay-time", className="ctl-label"),
+                    html.Button("● Direct", id="heat-replay-live", className="lw-btn",
+                                title="Revenir au direct"),
+                ], className="ctl heat-replay"),
+                html.Div(id="heatmap", className="lw-chart"),
             ]),
 
             html.Div(id="pane-pos", children=[
@@ -3343,8 +4490,7 @@ def create_app() -> Dash:
                                             {"label": "30 min", "value": 30},
                                             {"label": "Σ", "value": 0}]),
                 ], className="daybar"),
-                dcc.Graph(config=GRAPH_CONFIG, id="hedge-graph",
-                          style={"marginBottom": "12px"}),
+                html.Div(id="hedge-graph", className="lw-chart", style={"marginBottom": "12px"}),
                 html.Div([
                     html.Span(id="lbl-tape-size", className="ctl-label"),
                     dcc.RadioItems(id="tape-min-size", className="seg", inline=True,
@@ -3362,17 +4508,15 @@ def create_app() -> Dash:
             # explicite de l'utilisateur, "j'ai pas dit qu'il fallait
             # désactiver la page principale") — tick redevient normal.
             dcc.Interval(id="tick", interval=SETTINGS.flow_interval_s * 1000),
-            # Heatmap : intervalle DÉDIÉ à 5s (2026-10-05, demande explicite,
-            # "c'est une heatmap pas une photo figée") — séparé de `tick`
-            # (60s, partagé par 5 autres graphiques du dashboard principal :
-            # Gamma Profile, Vanna & Charm, Positionnement, Tape…) pour ne
-            # pas tous les accélérer alors que seule la Heatmap doit suivre
-            # le marché de près. `_chain_for_day` lit déjà l'état vivant pour
-            # "aujourd'hui" (cf. commentaire sur `heat_days`), donc ce
-            # rafraîchissement plus fréquent reflète réellement des données
-            # neuves, pas un recalcul à vide.
-            # Réactivé 2026-10-06, même raison que "tick" ci-dessus.
-            dcc.Interval(id="heatmap-tick", interval=5000),
+            # Heatmap, flux, gamma flow, tape, historique GEX, spot vs zero
+            # gamma, couverture des dealers : graphiques Lightweight Charts en
+            # flux poussé (SSE, /api/v1/lw/<nom>), cf. callback « lw-streams ».
+            html.Div(id="lw-stream-sink", style={"display": "none"}),
+            # Version de la chaîne affichée, poussée par le flux « chainver » :
+            # chaque changement (réévaluation OPRA au spot live toutes les ~2 s,
+            # ou nouveau pull CBOE chaque minute) relance les graphiques par
+            # strike, niveaux et tuiles — à la place du tick de 60 s.
+            dcc.Store(id="chain-ver", data=""),
             # 250 ms MESURÉ et ÉCARTÉ le 2026-10-01 : à l'époque le serveur de
             # dev Werkzeug (MONO-THREAD) saturait à ce rythme — curl direct sur
             # /api/v1/NQ/last (lecture triviale en mémoire) à 2-6 s au lieu de
@@ -3396,10 +4540,10 @@ def create_app() -> Dash:
             # onglet ne pardonne pas l'écart. Ne pas redescendre sous 1000 ms
             # sans re-mesurer SOUS CHARGE DE MARCHÉ RÉELLE, pas un test solo
             # hors séance — la leçon de cette nuit ne s'est pas généralisée.
-            # Désactivé 2026-10-05 (même mesure d'urgence) : hedge/ladder/
-            # tape/price (refresh_scalp, refresh_tape) ne se recalculent
-            # plus en boucle — seul le bandeau (SSE) reste live.
-            dcc.Interval(id="tape-tick", interval=1000, disabled=True),
+            # Onglet Tape de la page principale : rafraîchi à la seconde, et
+            # seulement quand il est ouvert (cf. callback qui pilote
+            # `disabled`). Les pages scalp, elles, sont en flux poussé (SSE).
+            dcc.Interval(id="tape-tab-tick", interval=1000, disabled=True),
             # Ticker de prix /scalp : vrai flux poussé (EventSource, cf.
             # clientside_callback plus bas), aucun sondage — donc pas de dcc.Interval
             # ici. Cible inerte requise par Dash pour un callback JS sans Output
@@ -3422,6 +4566,8 @@ def create_app() -> Dash:
             # au chargement malgré prevent_initial_call). Passé ces 5 s, tout
             # redevient réactif normalement pour une vraie interaction.
             dcc.Store(id="emergency-ready", data=False),
+            # cible inerte du contrôle de version (cf. callback « build »)
+            html.Div(id="build-sink", style={"display": "none"}),
             dcc.Store(id="lang-boot", data=0),
             dcc.Store(id="sc-layout-boot", data=0),
             dcc.Store(id="sc-ergo-boot", data=0),
@@ -3432,8 +4578,9 @@ def create_app() -> Dash:
         html.Div(id="native-overlay", className="native-overlay", style={"display": "none"}),
     ])
 
-    def _chip(children, accent):
-        return html.Span(children, className="chip", style={"--chip-accent": accent})
+    def _chip(children, accent, title=None):
+        return html.Span(children, className="chip", style={"--chip-accent": accent},
+                         title=title)
 
     def levels_strip(levels: pd.DataFrame | None, lang: str,
                      hvl: float | None = None, zg: float | None = None,
@@ -3456,6 +4603,10 @@ def create_app() -> Dash:
             items.append(_chip([html.B("HVL ", style={"color": C["hvl"]}),
                                 f"{xf(hvl):.0f}"], C["hvl"]))
         # niveaux directionnels (support/résistance) et bornes de move attendu
+        # info-bulle : ce que mesure chaque niveau (concentration call / put,
+        # ou GEX net pour GEX1-5)
+        tips = {"call_wall": t(lang, "lvl_tip_call_wall"),
+                "put_support": t(lang, "lvl_tip_put_support")}
         for key, color, label in (("call_wall", C["cw"], "Call Wall"),
                                   ("put_support", C["ps"], "Put Support"),
                                   ("d1_min", C["d1"], "1D Min"),
@@ -3463,17 +4614,92 @@ def create_app() -> Dash:
             v = (keys or {}).get(key)
             if v is not None:
                 items.append(_chip([html.B(f"{label} ", style={"color": color}),
-                                    f"{xf(v):.0f}"], color))
+                                    f"{xf(v):.0f}"], color, title=tips.get(key)))
         for lv in levels.itertuples():
             side = t(lang, "side_call") if lv.gex > 0 else t(lang, "side_put")
+            tip = (t(lang, "lvl_tip_gex_wall", calls=f"{lv.gex_calls / 1e9:+.1f}",
+                     puts=f"{lv.gex_puts / 1e9:+.1f}", gross=f"{lv.gex_gross / 1e9:.1f}")
+                   if hasattr(lv, "gex_gross") else t(lang, "lvl_tip_gex_wall_short"))
             items.append(_chip(
                 [html.B(f"{labels[lv.strike]} ", style={"color": C["lvl"]}),
                  f"{xf(lv.strike):.0f} ",
                  html.Span(f"({lv.gex / 1e9:+.1f} $Bn {side})",
                            style={"color": C["ink2"], "fontSize": "11px"})],
-                "rgba(255,255,255,0.10)",
+                "rgba(255,255,255,0.10)", title=tip,
             ))
         return items
+
+    # Page /moc : ses propres callbacks (cf. gex/mocpage.py)
+    mocpage.register(app)
+
+    # L'onglet Tape de la page principale n'est rafraîchi que lorsqu'il est
+    # ouvert : aucune requête périodique depuis une autre page (scalp, moc)
+    # ou un autre onglet.
+    app.clientside_callback(
+        """
+        function(path, tab) {
+            const p = path || '/';
+            const other = p.startsWith('/scalp') || p.startsWith('/moc');
+            return other || tab !== 'tape';
+        }
+        """,
+        Output("tape-tab-tick", "disabled"),
+        Input("url", "pathname"), Input("tab", "value"),
+    )
+
+    # « lw-streams » : graphiques Lightweight Charts de la page principale
+    # (LW_CHARTS), tous sur UNE connexion SSE multiplexée (/api/v1/lw-multi,
+    # cf. GexLW.streams). Un graphique n'y figure que si son onglet est
+    # affiché ; changer un réglage rouvre la connexion (même liste = rien à
+    # faire). Hors page principale : tout fermé.
+    app.clientside_callback(
+        """
+        function(path, tab, symbol, lang, unit, win, flowDay, gflow, tapeSeries,
+                 heatDay, heatLevels, hedgeWin) {
+            const G = window.GexLW;
+            if (!G) return window.dash_clientside.no_update;
+            const p = path || '/';
+            const main = !(p.startsWith('/scalp') || p.startsWith('/moc'));
+            const list = [];
+            const add = (id, name, on, extra) => {
+                if (!main || !on || !symbol) return;
+                list.push({id: id, name: name,
+                           args: Object.assign({symbol: symbol, lang: lang || 'fr'}, extra)});
+            };
+            const day = flowDay || '';
+            const onMain = tab === 'main';
+            add('flow', 'flow', onMain, {day: day});
+            add('gflow', 'gflow', onMain, {day: day, series: (gflow || []).join(',')});
+            add('tape', 'tape', onMain, {day: day, series: (tapeSeries || []).join(',')});
+            add('gex-history', 'history', onMain, {});
+            add('spot-zg', 'spotzg', onMain, {});
+            add('heatmap', 'heatmap', tab === 'heat', {
+                day: heatDay || '', window: String(win || 0.04), unit: unit || '',
+                levels: (heatLevels || []).join(',')});
+            // réglages transmis au replay de la heatmap (gex-replay.js)
+            if (window.GexReplay) window.GexReplay.context({
+                symbol: symbol || '', lang: lang || 'fr', window: String(win || 0.04),
+                day: heatDay || '',
+                unit: unit || '', levels: (heatLevels || []).join(',')});
+            add('hedge-graph', 'hedge', tab === 'tape',
+                {window: String(hedgeWin == null ? 15 : hedgeWin)});
+            // version de la chaîne -> dcc.Store « chain-ver » : relance les
+            // graphiques par strike, niveaux et tuiles à chaque changement
+            add('chain-ver', 'chainver', true, {});
+            if (list.length) list[list.length - 1].onData = function(m) {
+                window.dash_clientside.set_props('chain-ver', {data: m.v});
+            };
+            G.streams(list);
+            return '';
+        }
+        """,
+        Output("lw-stream-sink", "children"),
+        Input("url", "pathname"), Input("tab", "value"), Input("symbol", "value"),
+        Input("lang", "value"), Input("unit", "value"), Input("window", "value"),
+        Input("flow-day", "value"), Input("gflow-series", "value"),
+        Input("tape-series", "value"), Input("heat-day", "value"),
+        Input("heat-levels", "value"), Input("hedge-window", "value"),
+    )
 
     # "emergency-ready" (mesure d'urgence 2026-10-06, cf. commentaire sur le
     # Store dans le layout) : bascule à True au premier tick de "rt-tick"
@@ -3520,6 +4746,7 @@ def create_app() -> Dash:
             const isScalpV1 = p === '/scalpv1' || p.startsWith('/scalpv1/');
             document.body.classList.toggle('scalp-page', isScalpV2 || isScalpV1);
             document.body.classList.toggle('scalp-v2-page', isScalpV2);
+            document.body.classList.toggle('moc-page', p === '/moc' || p.startsWith('/moc/'));
             return window.dash_clientside.no_update;
         }
         """,
@@ -3765,10 +4992,13 @@ def create_app() -> Dash:
                         timeFormatter: (t) => new Date(t * 1000).toLocaleTimeString(),
                     },
                 });
-                const series = chart.addCandlestickSeries({
+                // API v5 : addSeries(type, options) ; les marqueurs passent
+                // par un plugin dédié (createSeriesMarkers), créé une fois.
+                const series = chart.addSeries(LightweightCharts.CandlestickSeries, {
                     upColor: '#199e70', downColor: '#e66767', borderVisible: false,
                     wickUpColor: '#199e70', wickDownColor: '#e66767',
                 });
+                const seriesMarkers = LightweightCharts.createSeriesMarkers(series, []);
                 // ResizeObserver sur le CONTENEUR, pas juste window.resize —
                 // la taille du conteneur change aussi sans redimensionner la
                 // fenêtre : masquer un bloc voisin (cases "Masquer..."),
@@ -3804,6 +5034,7 @@ def create_app() -> Dash:
                     series.attachPrimitive(ofProfile);
                 }
                 window._gexLwChart = { container: container, chart: chart, series: series,
+                                       markers: seriesMarkers,
                                        priceLines: [], fitted: false, profile: profile,
                                        ofProfile: ofProfile, lastData: null };
                 // Indicateurs du graphique (2026-10-04) — niveaux GEX/HVL/
@@ -3818,7 +5049,8 @@ def create_app() -> Dash:
                 // (callbacks séparés plus bas), jamais dupliquée.
                 let indicators = { levels: true, confluence: true, order_flow: true,
                                    gex_profile: true, markers: true, orderflow_profile: true,
-                                   orderflow_untested: true };
+                                   orderflow_untested: true, absorptions: true,
+                                   expected_move: true };
                 try {
                     const saved = JSON.parse(window.localStorage.getItem('gex-scalp-indicators') || 'null');
                     if (saved) indicators = Object.assign(indicators, saved);
@@ -3834,7 +5066,9 @@ def create_app() -> Dash:
                  ["scalp-gexprofile-toggle", "gex_profile"],
                  ["scalp-ind-markers-toggle", "markers"],
                  ["scalp-ind-ofprofile-toggle", "orderflow_profile"],
-                 ["scalp-ind-untested-toggle", "orderflow_untested"]].forEach(function(pair) {
+                 ["scalp-ind-untested-toggle", "orderflow_untested"],
+                 ["scalp-ind-absorb-toggle", "absorptions"],
+                 ["scalp-ind-em-toggle", "expected_move"]].forEach(function(pair) {
                     const btn = document.getElementById(pair[0]);
                     if (btn) btn.classList.toggle('sc-draw-active', indicators[pair[1]]);
                 });
@@ -3844,7 +5078,13 @@ def create_app() -> Dash:
                     if (!d) return;
                     const ind = window._gexIndicators;
                     for (const pl of st.priceLines) { st.series.removePriceLine(pl); }
-                    const simpleLines = ind.levels ? (d.levels || []).map(function(lv) {
+                    // réglages fins (panneau ⚙) : catégories de niveaux GEX affichées
+                    const gs = window._gexSettings || {};
+                    const kinds = gs.levelKinds;
+                    const levelSrc = (gs.expiry === '0dte' && d.levels_0dte) ? d.levels_0dte : d.levels;
+                    const simpleLines = ind.levels ? (levelSrc || []).filter(function(lv) {
+                        return !kinds || !lv.kind || kinds.includes(lv.kind);
+                    }).map(function(lv) {
                         return st.series.createPriceLine({
                             price: lv.price, color: lv.color, lineWidth: 1,
                             lineStyle: LightweightCharts.LineStyle.Dashed,
@@ -3873,7 +5113,14 @@ def create_app() -> Dash:
                     // scalp_order_flow_zones) : ligne pointillée cyan,
                     // étiquette volume+côté — distincte des niveaux GEX/HVL
                     // simples (tirets) et de la confluence (pleine dorée).
-                    const flowLines = ind.order_flow ? (d.order_flow || []).map(function(h) {
+                    // seuils réglables (panneau ⚙) : le serveur envoie une
+                    // détection élargie, filtrée ici (défauts = seuils d'origine)
+                    const hvlR = (gs.hvlRatio === undefined) ? 3 : gs.hvlRatio;
+                    const hvlD = (gs.hvlDelta === undefined) ? 0.35 : gs.hvlDelta;
+                    const flowLines = ind.order_flow ? (d.order_flow || []).filter(function(h) {
+                        return (h.vol_ratio == null || h.vol_ratio >= hvlR)
+                            && (h.delta_frac == null || h.delta_frac >= hvlD);
+                    }).map(function(h) {
                         return st.series.createPriceLine({
                             price: h.price, color: '#3987e5', lineWidth: 1,
                             lineStyle: LightweightCharts.LineStyle.Dotted,
@@ -3889,7 +5136,7 @@ def create_app() -> Dash:
                     // fine — demande explicite de l'utilisateur, "en général
                     // c'est une zone pas un prix fixe").
                     st.priceLines = simpleLines.concat(confluenceLines, flowLines);
-                    st.series.setMarkers(ind.markers ? (d.markers || []).map(function(m) {
+                    const swingMarks = ind.markers ? (d.markers || []).map(function(m) {
                         const isHigh = m.kind.startsWith('H');
                         return {
                             time: m.time, position: isHigh ? 'aboveBar' : 'belowBar',
@@ -3897,7 +5144,30 @@ def create_app() -> Dash:
                             shape: isHigh ? 'arrowDown' : 'arrowUp',
                             text: m.kind + ' ' + Math.round(m.price),
                         };
-                    }) : []);
+                    }) : [];
+                    // Absorptions (cf. gex/iceberg.py::detect_absorptions) :
+                    // vendeurs absorbés au bid (le niveau tient) = support,
+                    // rond sous la bougie ; acheteurs absorbés à l'ask =
+                    // résistance, rond au-dessus. Texte : prix, volume
+                    // absorbé et multiple de la taille affichée.
+                    const absDefault = d.symbol === 'ES' ? 100 : 40;
+                    const absT = (gs.absTotal == null) ? absDefault : gs.absTotal;
+                    const absR = (gs.absRatio === undefined) ? 4 : gs.absRatio;
+                    const absorbMarks = ind.absorptions ? (d.absorptions || []).filter(function(a) {
+                        return a.total >= absT && (a.ratio == null || a.ratio >= absR);
+                    }).map(function(a) {
+                        const support = a.side === 'SELL';
+                        return {
+                            time: a.time, position: support ? 'belowBar' : 'aboveBar',
+                            color: support ? '#14b8a6' : '#f59e0b', shape: 'circle',
+                            text: 'Abs ' + a.price + ' · ' + Math.round(a.total)
+                                  + (a.ratio ? ' ×' + a.ratio : ''),
+                        };
+                    }) : [];
+                    // Lightweight Charts exige des marqueurs triés par temps
+                    st.markers.setMarkers(swingMarks.concat(absorbMarks).sort(function(x, y) {
+                        return x.time - y.time;
+                    }));
                     if (st.profile) {
                         st.profile.setVisible(ind.gex_profile);
                         st.profile.setData(d.gex_profile || []);
@@ -3906,8 +5176,18 @@ def create_app() -> Dash:
                         st.ofProfile.setVisible(ind.orderflow_profile);
                         st.ofProfile.setUntestedVisible(ind.orderflow_untested);
                         st.ofProfile.setData(((d.orderflow_profile || {}).legs) || []);
-                        st.ofProfile.setUntested(((d.orderflow_profile || {}).untested) || [],
-                                                 (d.orderflow_profile || {}).bucket_size);
+                        // nœuds proches de même nature fusionnés en zones
+                        // (réglage « Fusion HVN/LVN », 2 pts par défaut)
+                        const rawNodes = ((d.orderflow_profile || {}).untested) || [];
+                        const gap = (gs.mergePts === undefined) ? 2 : gs.mergePts;
+                        const zones = window.GexMergeUntested
+                            ? window.GexMergeUntested(rawNodes, gap, 20) : rawNodes;
+                        st.ofProfile.setUntested(zones, (d.orderflow_profile || {}).bucket_size);
+                    }
+                    // Cadre de l'open US + mouvement attendu (assets/gex-openframe.js)
+                    if (window.GexOpenFrame) {
+                        try { window.GexOpenFrame.update(st, d, gs, ind.expected_move); }
+                        catch (e) { /* un indicateur raté ne casse pas le graphique */ }
                     }
                 };
                 setupDrawingTools(chart, series, container);
@@ -3933,7 +5213,16 @@ def create_app() -> Dash:
             // setData() seul préserve déjà la vue courante, c'est tout le
             // principe de Lightweight Charts. Signalé en direct le
             // 2026-10-03 : "pénible de zoomer et se faire dézoomer".
+            // Changement de symbole : recadrage complet (axe des prix
+            // déverrouillé s'il avait été déplacé à la main, comme le bouton
+            // « recentrer ») — sinon la vue restait sur les prix de l'autre
+            // sous-jacent (signalé le 2026-10-09).
+            if (data.symbol && state.symbol !== data.symbol) {
+                if (state.symbol !== undefined) state.fitted = false;
+                state.symbol = data.symbol;
+            }
             if (candles.length && !state.fitted) {
+                state.series.priceScale().applyOptions({autoScale: true});
                 state.chart.timeScale().fitContent();
                 state.fitted = true;
             }
@@ -3956,14 +5245,20 @@ def create_app() -> Dash:
     # (la route ne gère qu'un seul tf par connexion).
     app.clientside_callback(
         """
-        function(symbol, path, tf) {
+        function(symbol, path, tf, ergo, swing) {
             if (window._scChartStream) { window._scChartStream.close(); window._scChartStream = null; }
             if (window._scChartStreamTimer) { clearTimeout(window._scChartStreamTimer); window._scChartStreamTimer = null; }
-            // Désactivé 2026-10-06 (mesure d'urgence) : le graphique
-            // (bougies/niveaux/confluence) ne se connecte plus par défaut —
-            // seul le bandeau reste vivant. Retirer cette ligne pour
-            // réactiver.
-            return window.dash_clientside.no_update;
+            // Réactivé 2026-10-08 : la mesure d'urgence du 06 coupait ce flux
+            // parce que chaque connexion recalculait le graphique ; il passe
+            // désormais par un canal partagé (un calcul par symbole/tf, cf.
+            // gex/broadcast.py). Il ne se connecte que si le graphique est
+            // VISIBLE (case « Masquer graphique prix » décochée, masqué par
+            // défaut) : rien n'est calculé pour un graphique caché.
+            ergo = ergo || [];
+            if (ergo.includes('hide_price_chart') || ergo.includes('keywords_only')) {
+                window._scChartStreamToken = null;
+                return window.dash_clientside.no_update;
+            }
             if ((path || '/') !== '/scalp' || !['NQ', 'ES'].includes(symbol)) {
                 return window.dash_clientside.no_update;
             }
@@ -3972,7 +5267,9 @@ def create_app() -> Dash:
             const state = {delay: 3000};
             const connect = function() {
                 const qtf = encodeURIComponent(tf || '');
-                const es = new EventSource(`/api/v1/${symbol}/chart-stream?tf=${qtf}`);
+                // seuil du swing H/L (réglages /scalp) : vide = défaut du bandeau
+                const qsw = (swing && Number(swing) > 0) ? `&swing=${encodeURIComponent(swing)}` : '';
+                const es = new EventSource(`/api/v1/${symbol}/chart-stream?tf=${qtf}${qsw}`);
                 window._scChartStream = es;
                 es.onmessage = function(ev) {
                     state.delay = 3000;
@@ -3998,7 +5295,73 @@ def create_app() -> Dash:
         Input("symbol", "value"),
         Input("url", "pathname"),
         Input("scalp-chart-tf", "value"),
+        Input("sc-ergo-options", "value"),
+        Input("scalp-set-swing", "value"),
         prevent_initial_call="initial_duplicate",
+    )
+
+    # Réglages fins du graphique /scalp (2026-10-16, demande de l'utilisateur) :
+    # panneau ⚙ ouvert/fermé, puis fusion HVN/LVN et filtre des niveaux GEX
+    # appliqués côté navigateur (applyIndicators) ; le seuil du swing, lui,
+    # rouvre le flux du graphique (callback ci-dessus). Valeurs persistées
+    # par le navigateur (persistence locale des composants).
+    app.clientside_callback(
+        """
+        function(n, style) {
+            const open = (n || 0) % 2 === 1;
+            return Object.assign({}, style || {}, {display: open ? 'flex' : 'none'});
+        }
+        """,
+        Output("scalp-settings-panel", "style"),
+        Input("scalp-settings-toggle", "n_clicks"),
+        State("scalp-settings-panel", "style"),
+    )
+    app.clientside_callback(
+        """
+        function(merge, levels, expiry, absTotal, absRatio, hvlRatio, hvlDelta,
+                 ofWindow, ofN, ofMode, ofOpts, emAnchor, emMult) {
+            const num = function(v, dflt) {
+                return (v === null || v === undefined || v === '' || isNaN(Number(v)))
+                    ? dflt : Number(v);
+            };
+            window._gexSettings = {
+                mergePts: num(merge, 2),
+                levelKinds: levels || ['zg', 'hvl', 'cw', 'ps', 'd1', 'gex'],
+                expiry: expiry || 'all',
+                absTotal: num(absTotal, null),          // null : défaut du symbole
+                absRatio: num(absRatio, 4),
+                hvlRatio: num(hvlRatio, 3),
+                hvlDelta: num(hvlDelta, 35) / 100,
+            };
+            const o = ofOpts || [];
+            window._gexSettings.of = {
+                window: (ofWindow && /^\d{4}-\d{4}$/.test(ofWindow)) ? ofWindow : '0930-1030',
+                n: Math.max(1, Math.min(500, Math.round(num(ofN, 60)))),
+                mode: ofMode || 'center',
+                fill: o.includes('fill'), ext50: o.includes('ext50'), ext100: o.includes('ext100'),
+                extend: o.includes('extend'), ivadj: o.includes('ivadj'),
+                ivEm: o.includes('ivem'), straddleEm: o.includes('stem'), base: o.includes('base'),
+                anchor: emAnchor || 'close', mult: num(emMult, 1),
+            };
+            const st = window._gexLwChart;
+            if (st && st.applyIndicators) st.applyIndicators();
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("scalp-settings-sink", "children"),
+        Input("scalp-set-merge", "value"),
+        Input("scalp-set-levels", "value"),
+        Input("scalp-set-expiry", "value"),
+        Input("scalp-set-abs-total", "value"),
+        Input("scalp-set-abs-ratio", "value"),
+        Input("scalp-set-hvl-ratio", "value"),
+        Input("scalp-set-hvl-delta", "value"),
+        Input("scalp-set-of-window", "value"),
+        Input("scalp-set-of-n", "value"),
+        Input("scalp-set-of-mode", "value"),
+        Input("scalp-set-of-opts", "value"),
+        Input("scalp-set-em-anchor", "value"),
+        Input("scalp-set-em-mult", "value"),
     )
 
     # Bascule V1/V2 du bandeau (cf. commentaire sur scalp-banner-version dans
@@ -4052,6 +5415,8 @@ def create_app() -> Dash:
         ("markers", "scalp-ind-markers-toggle"),
         ("orderflow_profile", "scalp-ind-ofprofile-toggle"),
         ("orderflow_untested", "scalp-ind-untested-toggle"),
+        ("absorptions", "scalp-ind-absorb-toggle"),
+        ("expected_move", "scalp-ind-em-toggle"),
     ):
         app.clientside_callback(
             """
@@ -4103,79 +5468,6 @@ def create_app() -> Dash:
         prevent_initial_call=True,
     )
 
-    # Couverture des dealers (/scalp v2) — même principe que le graphique de
-    # prix : un LineSeries par catégorie, créés UNE fois (persistés dans
-    # window._gexLwHedge), seulement `setData` ensuite. Piège du canvas à
-    # largeur 0 déjà réglé pour le graphique de prix, même fix ici.
-    app.clientside_callback(
-        """
-        function(data) {
-            const container = document.getElementById('scalp-lw-hedge');
-            if (!container || !data || !window.LightweightCharts) {
-                return window.dash_clientside.no_update;
-            }
-            if (!window._gexLwHedge || window._gexLwHedge.container !== container) {
-                container.innerHTML = '';
-                const chart = LightweightCharts.createChart(container, {
-                    width: container.clientWidth, height: container.clientHeight,
-                    layout: { background: { color: 'transparent' }, textColor: '#cfd3da' },
-                    grid: { vertLines: { color: '#1e222a' }, horzLines: { color: '#1e222a' } },
-                    // Lightweight Charts n'utilise PAS le fuseau du navigateur
-                    // par défaut malgré ce que laissait croire sa doc — il
-                    // formate les UTCTimestamp en UTC pur sauf formateur
-                    // explicite. Bug réel vérifié en direct le 2026-10-04
-                    // (axe/étiquettes affichés en UTC, pas en heure locale).
-                    // `new Date(t*1000).toLocaleTimeString()` sans option
-                    // `timeZone` explicite utilise le fuseau LOCAL du
-                    // navigateur — cohérent avec le reste du dashboard
-                    // (to_local() côté Python) sans dépendre d'un fuseau
-                    // serveur codé en dur (Europe/Paris), utile si un
-                    // scalpeur ouvre la page depuis un autre fuseau.
-                    timeScale: {
-                        timeVisible: true, secondsVisible: true,
-                        tickMarkFormatter: (t, type) => {
-                            const d = new Date(t * 1000);
-                            return type <= 2
-                                ? d.toLocaleDateString([], { day: '2-digit', month: '2-digit' })
-                                : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                        },
-                    },
-                    localization: {
-                        timeFormatter: (t) => new Date(t * 1000).toLocaleTimeString(),
-                    },
-                });
-                // Même correctif que le graphique de prix : ResizeObserver
-                // sur le conteneur, pas juste window.resize (cf. commentaire
-                // détaillé là-bas).
-                const onResize = () => {
-                    const w = container.clientWidth, h = container.clientHeight;
-                    if (w > 0 && h > 0) chart.resize(w, h);
-                };
-                window.addEventListener('resize', onResize);
-                new ResizeObserver(onResize).observe(container);
-                window._gexLwHedge = { container: container, chart: chart, series: {}, fitted: false };
-            }
-            const state = window._gexLwHedge;
-            (data.series || []).forEach(function(s) {
-                if (!state.series[s.name]) {
-                    state.series[s.name] = state.chart.addLineSeries({
-                        color: s.color, lineWidth: s.width || 1, title: s.name,
-                    });
-                }
-                state.series[s.name].setData(s.points || []);
-            });
-            // fitContent() une seule fois — même correctif que le graphique
-            // de prix ci-dessus, même raison (zoom écrasé à chaque cycle).
-            if (!state.fitted && (data.series || []).length && (data.series[0].points || []).length) {
-                state.chart.timeScale().fitContent();
-                state.fitted = true;
-            }
-            return window.dash_clientside.no_update;
-        }
-        """,
-        Output("scalp-lw-hedge", "title"),
-        Input("scalp-lw-hedge-data", "data"),
-    )
 
     @app.callback(
         Output("symbol", "value", allow_duplicate=True),
@@ -4186,7 +5478,7 @@ def create_app() -> Dash:
     def scalp_symbol(path, symbol):
         """Sur /scalp ou /scalpv1, seuls NQ et ES existent : un autre
         sous-jacent retombe sur NQ."""
-        if is_scalp_path(path) and symbol not in ("NQ", "ES"):
+        if (is_scalp_path(path) or mocpage.is_moc_path(path)) and symbol not in ("NQ", "ES"):
             return "NQ"
         raise PreventUpdate
 
@@ -4262,18 +5554,28 @@ def create_app() -> Dash:
                 .catch(() => ({ email: null, prefs: {} }));
             const data = await window._gexPrefsReady;
             let saved = data.prefs['scalp-ergo'];
-            // Défaut 2026-10-06 (mesure d'urgence) : tt masqué sauf le bandeau,
-            // tant qu'aucune préférence n'a encore été enregistrée (serveur ou
-            // localStorage) — cf. valeur par défaut du Checklist côté Python.
-            const DEFAULT_ERGO = ["hide_ladder", "hide_price_chart", "hide_hedge_chart", "hide_tape"];
+            // Tout visible par défaut (2026-10-08). La mesure d'urgence du 06
+            // masquait tout sauf le bandeau, et ce défaut a été ENREGISTRÉ
+            // comme préférence de chaque visiteur (localStorage + serveur) :
+            // une préférence identique à ce masque d'urgence est donc remise
+            // à zéro une fois par navigateur (marqueur gex-scalp-ergo-v2) ;
+            // tout autre choix de l'utilisateur est respecté.
+            const EMERGENCY = ["hide_hedge_chart", "hide_ladder", "hide_price_chart", "hide_tape"];
             if (saved == null) {
                 try {
                     const raw = window.localStorage.getItem('gex-scalp-ergo');
-                    saved = raw == null ? DEFAULT_ERGO : JSON.parse(raw);
-                } catch (e) { saved = DEFAULT_ERGO; }
-            } else {
-                window.localStorage.setItem('gex-scalp-ergo', JSON.stringify(saved));
+                    saved = raw == null ? [] : JSON.parse(raw);
+                } catch (e) { saved = []; }
             }
+            let migrated = false;
+            try { migrated = window.localStorage.getItem('gex-scalp-ergo-v2') === '1'; } catch (e) {}
+            if (!migrated) {
+                const same = Array.isArray(saved) && saved.length === EMERGENCY.length
+                    && saved.slice().sort().every((v, i) => v === EMERGENCY[i]);
+                if (same) saved = [];
+                try { window.localStorage.setItem('gex-scalp-ergo-v2', '1'); } catch (e) {}
+            }
+            try { window.localStorage.setItem('gex-scalp-ergo', JSON.stringify(saved)); } catch (e) {}
             return saved;
         }
         """,
@@ -4538,7 +5840,7 @@ def create_app() -> Dash:
                     let snap;
                     try { snap = JSON.parse(ev.data); } catch (e) { return; }
                     // Mesure d'urgence 2026-10-05 : le bandeau (scalp-banner)
-                    // est maintenant poussé par CE flux (tape-tick désactivé,
+                    // est poussé par CE flux (aucun sondage à la seconde,
                     // cf. refresh_scalp) plutôt que recalculé par Dash.
                     if (snap.banner) {
                         window.dash_clientside.set_props('scalp-banner', {children: snap.banner});
@@ -4596,8 +5898,8 @@ def create_app() -> Dash:
                             {"label": t(lang, "legend_tape_puts"), "value": "puts"}]
         heat_levels_opts = [{"label": "Gamma Flip", "value": "zero_gamma"},
                            {"label": "HVL", "value": "hvl"},
-                           {"label": "Call Wall", "value": "call_wall"},
-                           {"label": "Put Support", "value": "put_support"},
+                           {"label": t(lang, "heat_lvl_call_wall"), "value": "call_wall"},
+                           {"label": t(lang, "heat_lvl_put_support"), "value": "put_support"},
                            {"label": "1D Min/Max", "value": "d1"},
                            {"label": t(lang, "heat_levels_gex_walls"), "value": "gex_walls"}]
         # échelles : le sous-jacent natif, puis les deux futures (la
@@ -4719,9 +6021,11 @@ def create_app() -> Dash:
         [Output("cards", "children"), Output("regime-banner", "children"),
          Output("pc-gauge", "children")],
         [Input("rt-tick", "n_intervals"), Input("symbol", "value"),
-         Input("lang", "value"), Input("unit", "value")],
+         Input("lang", "value"), Input("unit", "value"), Input("chain-ver", "data")],
+        State("url", "pathname"),
     )
-    def refresh_cards(_, symbol, lang, unit):
+    @broadcast.shared(ttl=2.0, skip=(0,))
+    def refresh_cards(_, symbol, lang, unit, ver=None, path=None):
         """Tuiles au rythme du flux (5 s) et non des pulls (60 s).
 
         Le GEX net y est recalculé au spot courant : c'est la valeur qui dit
@@ -4729,25 +6033,29 @@ def create_app() -> Dash:
         minutes. Le recalcul porte sur un seul point de spot, donc son coût
         est négligeable devant la grille de 161 points du Gamma Flip.
         """
+        p = path or "/"
+        if p.startswith("/scalp") or p.startswith("/moc"):
+            raise PreventUpdate            # tuiles masquées sur ces pages
         xf, _, _ = _transform_for(symbol, unit)
         return (build_cards(symbol, lang, xf, scale=unit), regime_banner(symbol, lang),
                 pc_gauge(symbol, lang))
 
     @app.callback(
         [Output("levels", "children"), Output("gex-strike", "figure"),
-         Output("dex-strike", "figure"), Output("flow", "figure"),
-         Output("gflow", "figure"), Output("tape", "figure"),
-         Output("gex-history", "figure"), Output("spot-zg", "figure"),
+         Output("dex-strike", "figure"),
          Output("smile", "figure"), Output("tv-copy", "content"),
          Output("tv-copy", "title")],
-        [Input("tick", "n_intervals"), Input("symbol", "value"),
+        [Input("chain-ver", "data"), Input("symbol", "value"),
          Input("bucket", "value"), Input("window", "value"),
-         Input("majors", "value"), Input("flow-day", "value"),
-         Input("lang", "value"), Input("unit", "value"),
-         Input("gflow-series", "value"), Input("tape-series", "value")],
+         Input("majors", "value"),
+         Input("lang", "value"), Input("unit", "value")],
     )
-    def refresh(_, symbol, bucket, window, majors, flow_day, lang, unit, gflow_series,
-                tape_series):
+    # recalcul à chaque nouvelle version de la chaîne (cf. « chain-ver ») ; la
+    # version fait partie de la clé : un calcul par version pour tous les onglets
+    @broadcast.shared(ttl=10.0, skip=())
+    def refresh(_, symbol, bucket, window, majors, lang, unit):
+        # Flux, gamma flow, tape, historique GEX et spot vs zero gamma : graphiques
+        # Lightweight Charts poussés en SSE (LW_CHARTS, cf. lw-streams plus bas).
         st = chain_state(symbol)
         with STATE.lock:
             df = st.enriched
@@ -4761,16 +6069,11 @@ def create_app() -> Dash:
 
                 empty_fig(wait, guided(t(lang, "gex_title", bucket=bucket_label), "gex_strike")),
                 empty_fig(wait, guided(t(lang, "dex_title", bucket=bucket_label), "dex_strike")),
-                empty_fig(wait, t(lang, "flow_title")),
-                empty_fig(wait, t(lang, "gflow_title")),
-                empty_fig(wait, t(lang, "tape_title")),
-                empty_fig(wait, t(lang, "hist_title")),
-                empty_fig(wait, t(lang, "spotzg_title")),
                 empty_fig(wait, t(lang, "smile_title")),
                 "", t(lang, "tv_copy_title", scale=unit),
             )
         today = datetime.now(ET).date()
-        sel = df[metrics.bucket_mask(df, bucket, today)]
+        sel = metrics.select_bucket(df, bucket, today)
         zg = summary.zero_gamma if summary else None
 
         # uirevision : tant que la révision ne change pas, Plotly conserve le
@@ -4808,13 +6111,6 @@ def create_app() -> Dash:
                               guided(t(lang, "dex_title", bucket=bucket_label), "dex_strike"), lang,
                               hvl=hvl, window=window, xf=xf, keys=keys,
                               level_set="regime"), rev),
-            _pin(flow_fig(symbol, lang, flow_day), f"{symbol}-{flow_day}"),
-            _pin(gamma_flow_fig(symbol, lang, flow_day, gflow_series),
-                f"g{symbol}-{flow_day}-{gflow_series}"),
-            _pin(tape_fig(symbol, lang, flow_day, tape_series),
-                f"t{symbol}-{flow_day}-{tape_series}"),
-            _pin(history_fig(symbol, lang), symbol),
-            _pin(spot_zg_fig(symbol, lang), symbol),
             _pin(smile_fig(sel, snap.spot, lang), rev),
             tv_levels_string(levels, hvl, zg, keys, xf),
             t(lang, "tv_copy_title", scale=unit),
@@ -4833,9 +6129,10 @@ def create_app() -> Dash:
     @app.callback(
         [Output("profile", "figure"), Output("profile-exp", "figure"),
          Output("profile-hint", "children")],
-        [Input("tick", "n_intervals"), Input("tab", "value"), Input("symbol", "value"),
+        [Input("chain-ver", "data"), Input("tab", "value"), Input("symbol", "value"),
          Input("window", "value"), Input("lang", "value"), Input("unit", "value")],
     )
+    @broadcast.shared(ttl=10.0, skip=())
     def refresh_profile(_, tab, symbol, window, lang, unit):
         if tab != "profile":   # onglet masqué : rien à recalculer
             raise PreventUpdate
@@ -4856,10 +6153,11 @@ def create_app() -> Dash:
     @app.callback(
         [Output("vex", "figure"), Output("cex", "figure"),
          Output("g2-cards", "children"), Output("g2-hint", "children")],
-        [Input("tick", "n_intervals"), Input("tab", "value"), Input("symbol", "value"),
+        [Input("chain-ver", "data"), Input("tab", "value"), Input("symbol", "value"),
          Input("bucket", "value"), Input("window", "value"),
          Input("lang", "value"), Input("unit", "value")],
     )
+    @broadcast.shared(ttl=10.0, skip=())
     def refresh_greeks2(_, tab, symbol, bucket, window, lang, unit):
         if tab != "greeks2":
             raise PreventUpdate
@@ -4871,7 +6169,7 @@ def create_app() -> Dash:
             return e, e, [], t(lang, "vex_hint")
         xf, _, _ = _transform_for(symbol, unit)
         today = datetime.now(ET).date()
-        sel = metrics.add_second_order(df[metrics.bucket_mask(df, bucket, today)], snap.spot)
+        sel = metrics.add_second_order(metrics.select_bucket(df, bucket, today), snap.spot)
         cards = [
             card(t(lang, "vex_card"), f"{sel['vex'].sum() / 1e9:+.2f} $Bn",
                  t(lang, "vex_title").split("(")[-1].rstrip(")")),
@@ -4910,32 +6208,18 @@ def create_app() -> Dash:
         value = current if current in days else today
         return opts, value, t(lang, "heat_day_label")
 
-    @app.callback(
-        [Output("heatmap", "figure"), Output("heat-hint", "children")],
-        [Input("heatmap-tick", "n_intervals"), Input("tab", "value"), Input("symbol", "value"),
-         Input("window", "value"), Input("lang", "value"), Input("unit", "value"),
-         Input("heat-day", "value"), Input("heat-levels", "value")],
-        State("heatmap", "relayoutData"),
-    )
-    def refresh_heatmap(_, tab, symbol, window, lang, unit, day, levels_shown, relayout):
-        # onglet masqué : ne pas relire une quarantaine de fichiers pour rien
-        if tab != "heat":
-            raise PreventUpdate
-        # Un zoom manuel n'est conservé que sur un simple rafraîchissement ou un
-        # changement de niveaux/langue. Dès que le CONTEXTE change (symbole,
-        # jour, échelle, fenêtre), le zoom d'avant n'a plus de sens — il portait
-        # sur une autre plage de prix — donc on repart de la vue complète.
-        reset = ctx.triggered_id in ("symbol", "window", "unit", "heat-day")
-        xf, _, _ = _transform_for(symbol, unit)
-        return (heatmap_fig(symbol, lang, day, window, xf, unit, levels_shown,
-                            relayout=None if reset else relayout),
-                t(lang, "heat_hint"))
+    # Heatmap : graphique Lightweight Charts (bougies + profil de gamma par
+    # strike, comme /scalp v2) poussé en SSE — cf. heatmap_spec et lw-streams.
+    @app.callback(Output("heat-hint", "children"), Input("lang", "value"))
+    def heat_hint(lang):
+        return t(lang, "heat_hint")
 
     @app.callback(
         [Output("oi-change", "figure"), Output("pos-hint", "children")],
         [Input("tick", "n_intervals"), Input("tab", "value"), Input("symbol", "value"),
          Input("window", "value"), Input("lang", "value"), Input("unit", "value")],
     )
+    @broadcast.shared(ttl=10.0, skip=(0,))
     def refresh_positioning(_, tab, symbol, window, lang, unit):
         if tab != "pos":
             raise PreventUpdate
@@ -4955,94 +6239,95 @@ def create_app() -> Dash:
         return (oi_change_fig(chg, snap.spot, lang, prev_day, window, xf),
                 t(lang, "pos_hint"))
 
+    # Page scalp en temps réel PAR FLUX POUSSÉ (2026-10-08) : plus aucun
+    # sondage à la seconde. Ce callback ne fait que le PREMIER rendu du
+    # bandeau (chargement, changement de symbole/langue/version) ; ensuite :
+    # - bandeau /scalp : flux /scalp-indicators-stream ;
+    # - graphique /scalp : flux /chart-stream ;
+    # - en-tête, niveaux, gros prints, couverture des dealers (et bandeau +
+    #   prix Plotly sur /scalpv1) : flux /scalp-stream (scalp_panels_channel).
     @app.callback(
-        Output("hedge-graph", "figure"),
-        [Input("tape-tick", "n_intervals"), Input("tab", "value"),
-         Input("symbol", "value"), Input("hedge-window", "value"),
-         Input("lang", "value")],
-    )
-    def refresh_hedge(_, tab, symbol, window, lang):
-        if tab != "tape":
-            raise PreventUpdate
-        return cached_hedge_fig(symbol, lang, int(window or 0))    # -1 = live à la seconde
-
-    @app.callback(
-        [Output("scalp-banner", "children"),
-         Output("scalp-head", "children"), Output("scalp-ladder", "children"),
-         Output("scalp-hedge", "figure"), Output("scalp-prints", "children"),
-         Output("scalp-price", "figure")],
-        [Input("tape-tick", "n_intervals"), Input("url", "pathname"),
-         Input("symbol", "value"), Input("lang", "value"),
-         Input("scalp-window", "value"), Input("scalp-min", "value"),
+        Output("scalp-banner", "children"),
+        [Input("url", "pathname"), Input("symbol", "value"), Input("lang", "value"),
          Input("scalp-banner-version", "data")],
-        State("emergency-ready", "data"),
     )
-    def refresh_scalp(_, path, symbol, lang, window, min_size, banner_version, ready):
+    @broadcast.shared(ttl=1.0, skip=())
+    def refresh_scalp(path, symbol, lang, banner_version):
         if not is_scalp_path(path) or symbol not in ("NQ", "ES"):
             raise PreventUpdate
-        # Mesure d'urgence 2026-10-06 : au chargement de page (et pendant
-        # les 5 s de `emergency-ready`, cf. commentaire sur le Store dans le
-        # layout), on calcule UNIQUEMENT le bandeau (déjà repris en direct
-        # par le flux SSE juste après) — hedge/ladder/tape/price restent
-        # no_update, donc jamais calculés "par défaut". Un `ctx.triggered_id
-        # is None` seul ne suffisait pas : dcc.Location + les boot callbacks
-        # (lang, scalp-banner-version…) redéclenchent ce callback juste
-        # après le montage avec un VRAI triggered_id, pas None (repéré en
-        # direct, "ça a quand même rechargé toutes les données").
-        if not ready:
-            sctx = scalp_context(symbol)
-            if sctx is None:
-                wait = html.Div(t(lang, "waiting_native" if symbol in ("NQ", "ES")
-                                  else "waiting_first_pull"), className="hint")
-                return wait, no_update, no_update, no_update, no_update, no_update
-            spot = _scalp_live_spot(symbol, sctx)
-            absorb = scalp_absorption(symbol)
-            is_v2_banner = (path or "/") == "/scalp" and (banner_version or "v2") != "v1"
-            banner = scalp_banner(symbol, sctx, spot, lang, absorb, swing=is_v2_banner)
-            return banner, no_update, no_update, no_update, no_update, no_update
-        # /scalp v2 affiche le graphique de PRIX en Lightweight Charts
-        # (scalp-lw-card) ; scalp-price (Plotly) reste dans le DOM mais
-        # CSS-hidden sur cette page (body.scalp-v2-page, style.css) — seul
-        # /scalpv1 l'affiche encore. Le construire quand même (go.Figure +
-        # sérialisation JSON : pas gratuit) doublait le travail par cycle en
-        # pure perte — no_update sur cet Output quand /scalp v2 est actif.
-        #
-        # "Couverture des dealers" (scalp-hedge) : repassé sur Plotly pour
-        # /scalp v2 AUSSI le 2026-10-05 (donc plus de no_update ici) — la
-        # version Lightweight Charts (scalp-lw-hedge) clignotait en mode Live
-        # (thread principal du navigateur saturé par les mises à jour trop
-        # fréquentes), deux tentatives de correctif ont chacune régressé
-        # (intervalle dédié -> page figée ; flux SSE poussé -> graphique
-        # vide), abandonnées cette nuit-là. Plotly n'a jamais eu ce problème
-        # sur /scalpv1 — plus simple de réutiliser ce qui marche déjà que de
-        # continuer à risquer une régression. cf. style.css pour le bascule
-        # d'affichage (scalp-hedge-card visible, scalp-lw-hedge-card masquée,
-        # y compris sur /scalp v2 désormais).
-        is_v2 = (path or "/") == "/scalp"
-        hedge = cached_hedge_fig(symbol, lang, int(window if window is not None else -1))
-        hedge.update_layout(height=300, uirevision=f"scalp-{symbol}-{window}")
-        prints = tape_table(symbol, lang, min_size=float(min_size or 0), include_combos=False)
         sctx = scalp_context(symbol)
         if sctx is None:
-            wait = html.Div(t(lang, "waiting_native" if symbol in ("NQ", "ES")
-                              else "waiting_first_pull"), className="hint")
-            price = no_update if is_v2 else empty_fig(t(lang, "sc_waiting_levels"), symbol)
-            return wait, wait, wait, hedge, prints, price
+            return html.Div(t(lang, "waiting_native"), className="hint")
         spot = _scalp_live_spot(symbol, sctx)
-        if is_v2:
-            price = no_update
-        else:
-            price = scalp_price_fig(symbol, sctx, spot)
-            price.update_layout(uirevision=f"scalp-price-{symbol}")
         absorb = scalp_absorption(symbol)
-        # swing=True SEULEMENT sur /scalp exact — même garde que scalp-lw-card/
-        # refresh_scalp_lw, /scalpv1 ne doit jamais recevoir swing=True quoi
-        # que vaille le store scalp-banner-version (bouton V1/V2, absent du
-        # DOM /scalpv1 de toute façon, mais la garde reste explicite ici).
+        # swing=True SEULEMENT sur /scalp exact : /scalpv1 ne doit jamais le
+        # recevoir, quoi que vaille le store scalp-banner-version
         is_v2_banner = (path or "/") == "/scalp" and (banner_version or "v2") != "v1"
-        return (scalp_banner(symbol, sctx, spot, lang, absorb, swing=is_v2_banner),
-                scalp_head(symbol, lang, sctx, spot),
-                scalp_ladder(symbol, sctx, spot), hedge, prints, price)
+        return scalp_banner(symbol, sctx, spot, lang, absorb, swing=is_v2_banner,
+                            edge=is_scalp_v2_page(path))
+
+    # Flux des blocs (cf. commentaire ci-dessus) : une connexion par onglet,
+    # rouverte quand un réglage change ; seuls les blocs dont la signature a
+    # changé sont remplacés (pas de clignotement des blocs immobiles).
+    app.clientside_callback(
+        """
+        function(symbol, path, lang, window_, minSize, ergo) {
+            if (window._scPanels) { window._scPanels.close(); window._scPanels = null; }
+            if (window._scPanelsTimer) { clearTimeout(window._scPanelsTimer); window._scPanelsTimer = null; }
+            const p = path || '/';
+            const v1 = p === '/scalpv1' || p.startsWith('/scalpv1/');
+            const v2 = p === '/scalp' || p.startsWith('/scalp/');
+            if (!(v1 || v2) || !['NQ', 'ES'].includes(symbol)) {
+                return window.dash_clientside.no_update;
+            }
+            const hide = (ergo || []).filter(h => h.startsWith('hide_')).sort().join(',');
+            const qs = new URLSearchParams({lang: lang || 'fr',
+                window: window_ == null ? -1 : window_, min: minSize || 0,
+                v1: v1 ? '1' : '0', hide: hide});
+            const target = {head: ['scalp-head', 'children'], ladder: ['scalp-ladder', 'children'],
+                            prints: ['scalp-prints', 'children'], banner: ['scalp-banner', 'children']};
+            // graphiques Lightweight Charts (description, cf. gex/lwspec.py)
+            const charts = {hedge: 'scalp-hedge', price: 'scalp-price'};
+            const token = {};
+            window._scPanelsToken = token;
+            window._scPanelsSig = {};
+            const state = {delay: 3000};
+            const connect = function() {
+                const es = new EventSource(`/api/v1/${symbol}/scalp-stream?${qs}`);
+                window._scPanels = es;
+                es.onmessage = function(ev) {
+                    state.delay = 3000;
+                    let m;
+                    try { m = JSON.parse(ev.data); } catch (e) { return; }
+                    const seen = window._scPanelsSig;
+                    Object.keys(m.blocks || {}).forEach(function(k) {
+                        if (!(target[k] || charts[k]) || seen[k] === m.sig[k]) return;
+                        seen[k] = m.sig[k];
+                        if (charts[k]) {
+                            if (window.GexLW) window.GexLW.render(charts[k], m.blocks[k]);
+                            return;
+                        }
+                        const prop = {};
+                        prop[target[k][1]] = m.blocks[k];
+                        window.dash_clientside.set_props(target[k][0], prop);
+                    });
+                };
+                es.onerror = function() {
+                    es.close();
+                    if (window._scPanelsToken !== token || window._scPanels !== es) return;
+                    window._scPanelsTimer = setTimeout(connect, state.delay + Math.random() * 2000);
+                    state.delay = Math.min(state.delay * 2, 30000);
+                };
+            };
+            connect();
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("scalp-stream-sink", "title"),
+        Input("symbol", "value"), Input("url", "pathname"), Input("lang", "value"),
+        Input("scalp-window", "value"), Input("scalp-min", "value"),
+        Input("sc-ergo-options", "value"),
+    )
 
     # scalp-lw-data : migré du poll tape-tick vers un flux SSE poussé
     # (2026-10-05, ~10h ET lundi, urgence serveur en pleine séance — demande
@@ -5058,18 +6343,18 @@ def create_app() -> Dash:
     # indicateurs) n'a PAS bougé, elle continue de réagir au même Store,
     # juste alimenté autrement.
     #
-    # scalp-lw-hedge-data (hedge LW) retiré entièrement : la carte
-    # correspondante est masquée inconditionnellement depuis que
-    # "Couverture des dealers" est repassée sur Plotly (cf. style.css,
-    # confirmé non prioritaire par l'utilisateur) — ce callback ne servait
-    # plus à rien, pur gaspillage de requêtes.
+    # Couverture des dealers (scalp-hedge) : graphique Lightweight Charts
+    # générique (gex-lw.js) alimenté par le flux /scalp-stream, sur /scalp
+    # comme sur /scalpv1. L'ancienne carte LW dédiée (scalp-lw-hedge, qui
+    # clignotait en Live en octobre) est supprimée.
 
     @app.callback(
         Output("tape-table", "children"),
-        [Input("tape-tick", "n_intervals"), Input("tab", "value"),
+        [Input("tape-tab-tick", "n_intervals"), Input("tab", "value"),
          Input("symbol", "value"), Input("tape-min-size", "value"),
          Input("tape-combos", "value"), Input("lang", "value")],
     )
+    @broadcast.shared(ttl=1.0, skip=(0,))
     def refresh_tape(_, tab, symbol, min_size, combos, lang):
         # ne se recalcule que lorsque l'onglet est ouvert : inutile de
         # reconstruire 60 lignes toutes les 2 s en arrière-plan
@@ -5083,6 +6368,7 @@ def create_app() -> Dash:
         [Input("symbol", "value"), Input("tick", "n_intervals")],
         State("flow-day", "value"),
     )
+    @broadcast.shared(ttl=10.0, skip=(1,))
     def update_flow_days(symbol, _, current):
         days = available_flow_days(symbol)
         opts = [{"label": d, "value": d} for d in days]
@@ -5105,6 +6391,32 @@ def create_app() -> Dash:
         return today if today in days else (days[-1] if days else None)
 
     register_api(app)
+
+    # Version des callbacks : un onglet resté ouvert pendant une mise à jour
+    # envoie l'ANCIENNE liste d'entrées de callbacks, que le serveur ne sait
+    # plus lire (IndexError dans Dash, blocs figés). La page compare chaque
+    # minute cette empreinte à celle de son chargement et se recharge seule si
+    # elle a changé. Un simple redémarrage sans changement de code ne
+    # recharge rien (même empreinte).
+    @app.server.route("/api/v1/build")
+    def _build_id():
+        from flask import jsonify
+        return jsonify({"build": callbacks_fingerprint(app)})
+
+    app.clientside_callback(
+        """
+        function(n) {
+            if (!n || n % 12 !== 1) { return window.dash_clientside.no_update; }
+            fetch('/api/v1/build', {cache: 'no-store'}).then(r => r.json()).then(d => {
+                if (!window._gexBuild) { window._gexBuild = d.build; return; }
+                if (d.build && d.build !== window._gexBuild) { window.location.reload(); }
+            }).catch(() => {});
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("build-sink", "title"),
+        Input("rt-tick", "n_intervals"),
+    )
     register_oauth(app)
 
     @app.server.route("/api/v1/<symbol>/chart/<name>.png")
@@ -5193,80 +6505,8 @@ def create_app() -> Dash:
         lang = request.args.get("lang", "fr")
         swing = request.args.get("swing") == "1"
 
-        def gen():
-            last_sig = None
-            last_banner_sig = None
-            last_heartbeat = time.monotonic()
-            # Mesure d'urgence 2026-10-05 (tape-tick désactivé) : le bandeau
-            # (scalp_banner) est maintenant poussé PAR CE FLUX plutôt que
-            # recalculé à chaque cycle `tape-tick` côté Dash — seule partie
-            # du calcul qui doit vraiment rester "live" (1 Hz) pendant que le
-            # reste (hedge/ladder/tape/price) est figé. `.to_plotly_json()`
-            # sérialise le composant Dash tel quel : `set_props` côté client
-            # l'assigne directement à `children`, sans round-trip Dash.
-            # Bug corrigé (2026-10-05) : le yield était à l'intérieur du
-            # try/except ci-dessous — une erreur d'ÉCRITURE (client parti,
-            # connexion morte) était donc AVALÉE comme un simple échec de
-            # calcul, et la boucle continuait pour toujours. Le thread
-            # waitress qui sert cette connexion ne se libérait alors JAMAIS,
-            # même après la déconnexion réelle du client — cause probable des
-            # threads orphelins observés ce soir. Le calcul reste protégé
-            # (un cycle raté ne doit pas fermer le flux), mais le yield est
-            # maintenant HORS du try : une erreur d'écriture doit pouvoir
-            # arrêter le générateur et libérer le thread.
-            #
-            # Heartbeat toutes les ~15s si rien de neuf : même raison que
-            # _last_trade_stream (cf. gex/api.py) — force une écriture
-            # régulière pour détecter vite une connexion morte, et éviter que
-            # channel_timeout (waitress) coupe à tort une connexion vivante
-            # mais silencieuse (rien ne change sur l'indicateur).
-            while True:
-                payload = None
-                try:
-                    ctx = scalp_context(symbol)
-                    if ctx is not None:
-                        spot = _scalp_live_spot(symbol, ctx)
-                        snap = {}
-                        # Bloc confluence/gex_profile/order_flow/orderflow_profile
-                        # désactivé 2026-10-06 (mesure d'urgence) : ne sert qu'au
-                        # graphique /scalp v2, lui-même désactivé par défaut (cf.
-                        # clientside_callback chart-stream ci-dessus) — inutile de
-                        # le recalculer tant que rien ne le consomme. Remettre ce
-                        # bloc en place en même temps que le chart-stream.
-                        # if sig != last_sig: ...
-                        absorb = scalp_absorption(symbol)
-                        banner_sig = (round(spot, 2), json.dumps(absorb, sort_keys=True, default=str))
-                        if banner_sig != last_banner_sig:
-                            last_banner_sig = banner_sig
-                            # Bug corrigé (2026-10-06) : `.to_plotly_json()` ne
-                            # sérialise que le NIVEAU SUPÉRIEUR du composant —
-                            # ses enfants (sc-banner-main, sc-banner-side…)
-                            # restent des objets Dash (html.Div, html.Span…),
-                            # que `json.dumps` seul ne sait pas encoder
-                            # (TypeError "Object of type Div is not JSON
-                            # serializable", EN BOUCLE, chaque seconde — le
-                            # flux repartait toujours en erreur avant le
-                            # moindre yield, bandeau jamais mis à jour côté
-                            # client). `default=` ci-dessous rappelle
-                            # `to_plotly_json()` sur CHAQUE objet non
-                            # sérialisable rencontré, y compris imbriqué —
-                            # exactement ce que fait le sérialiseur interne
-                            # de Dash.
-                            snap["banner"] = scalp_banner(symbol, ctx, spot, lang, absorb, swing=swing)
-                        if snap:
-                            payload = f"data: {json.dumps(snap, default=lambda o: getattr(o, 'to_plotly_json', lambda: str(o))())}\n\n"
-                except Exception:  # noqa: BLE001 — un cycle de CALCUL raté ne doit jamais fermer le flux
-                    log.exception("Flux SSE indicateurs /scalp échoué (%s)", symbol)
-                now = time.monotonic()
-                if payload is not None:
-                    yield payload
-                    last_heartbeat = now
-                elif now - last_heartbeat >= 15.0:
-                    yield ": keepalive\n\n"
-                    last_heartbeat = now
-                time.sleep(1.0)
-
-        return Response(gen(), mimetype="text/event-stream",
+        ch = scalp_indicators_channel(symbol, lang, swing)
+        return Response(broadcast.sse_events(ch), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     # Graphique /scalp v2 (bougies + niveaux + indicateurs) — flux poussé,
@@ -5276,6 +6516,69 @@ def create_app() -> Dash:
     # le nouveau `tf` (même principe que symbole/page sur les deux flux
     # ci-dessus) — le serveur ne gère donc qu'UN SEUL tf par connexion,
     # jamais un mélange.
+    @app.server.route("/api/v1/lw/<name>")
+    def _lw_stream(name):
+        from flask import Response, request
+        params = lw_params(request.args)
+        if name not in LW_CHARTS or params is None:
+            return Response("graphique ou symbole inconnu", status=404)
+        return Response(broadcast.sse_events(lw_channel(name, params)),
+                        mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    # Cadre d'amplitude de l'open US + mouvement attendu (gex/openframe.py,
+    # portage du Pine de l'utilisateur) : ingrédients pour le graphique
+    # /scalp, les lignes sont construites par assets/gex-openframe.js
+    @app.server.route("/api/v1/<symbol>/open-frame")
+    def _open_frame(symbol):
+        from flask import jsonify, request
+        from . import openframe
+        symbol = symbol.upper()
+        if symbol not in SCALP_SCHED_SYMBOLS:
+            return jsonify({"error": "symbole non couvert (NQ/ES seulement)"}), 404
+        a = request.args
+        ctx = scalp_context(symbol) or {}
+        try:
+            n = int(a.get("n") or 60)
+        except ValueError:
+            n = 60
+        return jsonify(openframe.compute(symbol, a.get("window"), n, a.get("anchor") or "close",
+                                         straddle_em=ctx.get("em")))
+
+    @app.server.route("/api/v1/heatmap-replay")
+    def _heatmap_replay():
+        from flask import jsonify, request
+        a = request.args
+        symbol = a.get("symbol")
+        if symbol not in UNDERLYINGS:
+            return jsonify({"error": "symbole inconnu"}), 404
+        day = a.get("day") or None
+        if day and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+            day = None
+        return jsonify(heatmap_replay(symbol, a.get("lang") or "fr",
+                                      float(a.get("window") or 0.04), a.get("unit") or None,
+                                      _lw_list(a.get("levels")) if "levels" in a else None,
+                                      day=day))
+
+    @app.server.route("/api/v1/lw-multi")
+    def _lw_multi_stream():
+        from flask import Response, request
+        chs = lw_multi_channels(request.args.get("q"))
+        if not chs:
+            return Response("aucun graphique valide", status=404)
+        return Response(broadcast.multi_events(chs), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    @app.server.route("/api/v1/<symbol>/scalp-stream")
+    def _scalp_panels_stream(symbol):
+        from flask import Response, request
+        symbol = symbol.upper()
+        if symbol not in SCALP_SCHED_SYMBOLS:
+            return Response("symbole non couvert (NQ/ES seulement)", status=404)
+        ch = scalp_panels_channel(symbol, *scalp_panels_params(request.args))
+        return Response(broadcast.sse_events(ch), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
     @app.server.route("/api/v1/<symbol>/chart-stream")
     def _scalp_chart_stream(symbol):
         from flask import Response, request
@@ -5284,57 +6587,8 @@ def create_app() -> Dash:
             return Response("symbole non couvert (NQ/ES seulement)", status=404)
         tf = request.args.get("tf") or CHART_TF_DEFAULT
 
-        def gen():
-            last_sig = None
-            last_spot = None
-            last_full_check = 0.0
-            last_heartbeat = time.monotonic()
-            # scalp_v2_chart_data (bougies + zigzag + niveaux) est la plus
-            # chère des 3 fonctions poussées par SSE — contrairement au flux
-            # indicateurs ci-dessus (qui compare les horodatages des caches
-            # AVANT de recalculer), cette boucle appelait la fonction complète
-            # à CHAQUE itération, résultat jeté ensuite si inchangé (repéré
-            # en direct, 2026-10-05 ~16h40 ET, contention GIL généralisée —
-            # même les jobs planifiés sans rapport sautaient leur cycle).
-            # Pré-filtre bon marché : les bougies/niveaux ne peuvent pas
-            # changer sans que `spot` bouge — ne recalculer que si le spot a
-            # changé, ou au pire toutes les 5s (changement de minute, niveaux
-            # recalculés par le moteur planifié, etc., qui ne bougent pas
-            # forcément le spot).
-            while True:
-                payload = None
-                try:
-                    ctx = scalp_context(symbol)
-                    if ctx is not None:
-                        spot = _scalp_live_spot(symbol, ctx)
-                        now_mono = time.monotonic()
-                        if spot != last_spot or now_mono - last_full_check >= 5.0:
-                            last_spot = spot
-                            last_full_check = now_mono
-                            data = scalp_v2_chart_data(symbol, ctx, spot, tf=tf)
-                            candles = data.get("candles") or []
-                            markers = data.get("markers") or []
-                            # signature bon marché : nombre de bougies/marqueurs +
-                            # OHLC de la dernière bougie (la seule qui bouge entre
-                            # deux clôtures) — pas tout le payload à chaque cycle
-                            last = candles[-1] if candles else None
-                            sig = (len(candles), len(markers),
-                                  last and (last["time"], last["close"]))
-                            if sig != last_sig:
-                                last_sig = sig
-                                payload = f"data: {json.dumps(data)}\n\n"
-                except Exception:  # noqa: BLE001 — un cycle de CALCUL raté ne doit jamais fermer le flux
-                    log.exception("Flux SSE graphique /scalp échoué (%s, tf=%s)", symbol, tf)
-                now = time.monotonic()
-                if payload is not None:
-                    yield payload
-                    last_heartbeat = now
-                elif now - last_heartbeat >= 15.0:
-                    yield ": keepalive\n\n"
-                    last_heartbeat = now
-                time.sleep(1.0)
-
-        return Response(gen(), mimetype="text/event-stream",
+        ch = scalp_chart_channel(symbol, tf, swing_param(request.args.get("swing")))
+        return Response(broadcast.sse_events(ch), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     return app

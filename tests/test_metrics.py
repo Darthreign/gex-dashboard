@@ -12,7 +12,9 @@ from gex.metrics import ET
 
 def make_chain(spot: float, rows: list[dict]) -> ChainSnapshot:
     defaults = {
-        "bid": 1.0, "ask": 1.2, "iv": 0.20, "open_interest": 100.0,
+        # pas de cotation par défaut : l'IV vient alors du champ "iv" (repli
+        # de calibrate_chain) ; un test qui veut des prix les fixe lui-même
+        "bid": 0.0, "ask": 0.0, "iv": 0.20, "open_interest": 100.0,
         "volume": 0.0, "delta_cboe": 0.0, "gamma_cboe": 0.0,
         "last_trade_price": 0.0,
     }
@@ -539,3 +541,117 @@ def test_compute_levels_cote_suit_le_live_spot():
     # live AU-DESSUS du strike → plus de résistance au-dessus
     sur = metrics.compute_levels(df, spot, 101.0, bucket="0DTE")
     assert sur["keys"]["call_wall"] is None
+
+
+def test_series_am_reglee_a_l_ouverture_le_jour_de_l_opex():
+    """SPX mensuel (racine SPX) réglé sur la SOQ : expiré dès 9:30 ET ;
+    SPXW de même échéance vit jusqu'à 16:00."""
+    opex = date(2026, 9, 18)
+    rows = [{"expiry": opex, "type": "C", "strike": 100.0, "root": r} for r in ("SPX", "SPXW")]
+    snap = make_chain(100.0, rows)
+    apres_ouverture = datetime(2026, 9, 18, 10, 0, tzinfo=ET)
+    df = metrics.enrich(snap, now_et=apres_ouverture)
+    assert list(df["root"]) == ["SPXW"]
+
+    avant = datetime(2026, 9, 18, 9, 0, tzinfo=ET)
+    df = metrics.enrich(snap, now_et=avant).set_index("root")
+    assert df.loc["SPX", "t_years"] == pytest.approx(1800 / metrics.YEAR_SECONDS)
+    assert df.loc["SPXW", "t_years"] == pytest.approx(7 * 3600 / metrics.YEAR_SECONDS)
+
+
+def test_settle_am_explicite_prime_sur_la_racine():
+    df = pd.DataFrame({"root": ["SPX", "SPXW"], "settle_am": [False, True]})
+    assert list(metrics.am_settled(df)) == [False, True]
+    assert list(metrics.am_settled(pd.DataFrame({"underlying_symbol": ["NDX", "NDXP"]}))) == [True, False]
+
+
+def test_zero_gamma_info_statut_et_pente():
+    exp = far_expiry()
+    snap = make_chain(100.0, [
+        {"expiry": exp, "type": "C", "strike": 93.0, "open_interest": 100.0},
+        {"expiry": exp, "type": "P", "strike": 107.0, "open_interest": 100.0},
+    ])
+    info = metrics.zero_gamma_info(metrics.enrich(snap), 100.0)
+    assert info["status"] == "ok"
+    assert info["level"] == pytest.approx(metrics.zero_gamma(metrics.enrich(snap), 100.0))
+    assert info["slope"] < 0   # GEX positif sous le flip, négatif au-dessus
+
+    seul = make_chain(100.0, [{"expiry": exp, "type": "C", "strike": 100.0}])
+    assert metrics.zero_gamma_info(metrics.enrich(seul), 100.0)["status"] == "no_flip"
+    vide = metrics.enrich(make_chain(100.0, [{"expiry": exp, "type": "C", "strike": 100.0,
+                                              "open_interest": 0.0}]))
+    assert metrics.zero_gamma_info(vide, 100.0)["status"] == "no_data"
+
+
+def test_zero_gamma_elargit_la_fenetre_si_le_flip_est_loin():
+    """Flip vers ~112 : hors de ±8 %, retrouvé dans la fenêtre élargie."""
+    exp = far_expiry()
+    snap = make_chain(100.0, [
+        {"expiry": exp, "type": "C", "strike": 104.0, "open_interest": 100.0},
+        {"expiry": exp, "type": "P", "strike": 120.0, "open_interest": 100.0},
+    ])
+    df = metrics.enrich(snap)
+    info = metrics.zero_gamma_info(df, 100.0)
+    assert info["status"] == "ok" and info["range"] > 0.08
+    assert info["level"] > 108.0
+
+
+def test_futures_basis_aberrant_renvoie_none_sans_lever():
+    exp = metrics.front_futures_expiry(datetime.now(ET).date())
+    rows = []
+    for k in np.arange(97.0, 103.5, 0.5):
+        rows += [{"expiry": exp, "type": "C", "strike": float(k), "bid": 20.0, "ask": 20.2},
+                 {"expiry": exp, "type": "P", "strike": float(k), "bid": 1.0, "ask": 1.2}]
+    df = metrics.enrich(make_chain(100.0, rows))
+    assert metrics.futures_basis(df, 100.0) is None
+
+
+def test_bucket_pondere_decroit_avec_l_echeance():
+    now = datetime.now(ET)
+    proche = (now + timedelta(days=1)).date()
+    loin = (now + timedelta(days=40)).date()
+    snap = make_chain(100.0, [
+        {"expiry": proche, "type": "C", "strike": 101.0},
+        {"expiry": loin, "type": "C", "strike": 101.0},
+    ])
+    df = metrics.enrich(snap)
+    w = metrics.select_bucket(df, "Pondéré", now.date())
+    assert len(w) == 2   # toutes les échéances restent
+    ratio = (w["open_interest"] / df["open_interest"]).to_numpy()
+    assert ratio[0] > 0.5 and ratio[1] < 0.05
+    assert w["gex"].to_numpy() == pytest.approx(df["gex"].to_numpy() * ratio)
+    res = metrics.compute_levels(df, 100.0, 100.0, bucket="Pondéré", today=now.date())
+    assert not res["levels"].empty
+
+
+def test_sticky_moneyness_deplace_le_flip_avec_un_skew():
+    """Smile plat : les deux hypothèses donnent le même flip. Avec un skew,
+    le flip sticky moneyness s'écarte."""
+    exp = far_expiry()
+    plat = [{"expiry": exp, "type": "C", "strike": 93.0, "iv": 0.2},
+            {"expiry": exp, "type": "P", "strike": 107.0, "iv": 0.2},
+            {"expiry": exp, "type": "C", "strike": 100.0, "iv": 0.2, "open_interest": 0.0}]
+    df = metrics.enrich(make_chain(100.0, plat))
+    a, b = metrics.zero_gamma_band(df, 100.0)
+    assert a == pytest.approx(b, abs=0.05)
+
+    skew = [{"expiry": exp, "type": "C", "strike": 93.0, "iv": 0.30},
+            {"expiry": exp, "type": "P", "strike": 107.0, "iv": 0.12},
+            {"expiry": exp, "type": "C", "strike": 100.0, "iv": 0.20, "open_interest": 0.0}]
+    df = metrics.enrich(make_chain(100.0, skew))
+    a, b = metrics.zero_gamma_band(df, 100.0)
+    assert a is not None and b is not None and abs(a - b) > 0.1
+
+
+def test_max_pain_minimise_la_valeur_versee():
+    exp = far_expiry()
+    snap = make_chain(100.0, [
+        {"expiry": exp, "type": "C", "strike": 95.0, "open_interest": 500.0},
+        {"expiry": exp, "type": "C", "strike": 100.0, "open_interest": 100.0},
+        {"expiry": exp, "type": "P", "strike": 105.0, "open_interest": 500.0},
+        {"expiry": exp, "type": "P", "strike": 100.0, "open_interest": 100.0},
+    ])
+    df = metrics.enrich(snap)
+    assert metrics.max_pain(df) == 100.0
+    res = metrics.compute_levels(df, 100.0, 100.0, bucket="Tout")
+    assert res["keys"]["max_pain"] == 100.0

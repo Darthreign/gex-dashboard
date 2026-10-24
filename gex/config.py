@@ -122,6 +122,10 @@ UNDERLYINGS: dict[str, Underlying] = {
         # (cf. role="context" et scheduler.pull_vix, qui utilise directement
         # le symbole CBOE "_VIX").
         Underlying("VIX", "VIX", "VIX", family="SP", role="context"),
+        # Équivalent VIX pour le Nasdaq-100 — demande explicite du 2026-10-11 :
+        # journalisation live dxFeed seule (bougies 1 min, data/prices/VXN/),
+        # pas de pull CBOE ni de chaîne d'options comme VIX en a un.
+        Underlying("VXN", "VXN", "VXN", family="ND", role="context"),
         # Axes intermarket, en spot seul (aucune chaîne d'options collectée).
         # Résolus en contrat front par resolve_symbols et abonnés au flux dxFeed
         # comme n'importe quel future — c'est la seule source gratuite et
@@ -187,6 +191,8 @@ class Settings:
     # Grille de recherche du zero gamma autour du spot (fraction, pas).
     zg_range: float = 0.08
     zg_steps: int = 161
+    # Horizon (en séances) du bucket "Pondéré" : poids exp(-séances / τ).
+    weighted_tau_sessions: float = 5.0
     # Ne puller que pendant les heures de marché US (ET).
     market_hours_only: bool = True
     # Commit+push automatique du repo git data/ (historique+flux) après la
