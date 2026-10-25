@@ -15,7 +15,7 @@ from datetime import UTC, datetime, time, timedelta
 import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from . import backup, flowtape, idxopt, metrics, rates, roll, store
+from . import backup, flowtape, idxopt, metrics, rates, roll, store, vxn
 from .config import SETTINGS, UNDERLYINGS
 from .ingest import ChainSnapshot, fetch_chain, fetch_index_spot
 from .metrics import ET, SummaryMetrics
@@ -414,6 +414,24 @@ def pull_native_index() -> None:
             log.exception("%s : échec de la chaîne d'indice native", symbol)
 
 
+def pull_vxn_live() -> None:
+    """Un point de VXN maison (gex/vxn.py), seulement en séance cash : les
+    options NDX ne cotent pas en dehors."""
+    if not credentials_present() or not market_is_open():
+        return
+    try:
+        vxn.update_live()
+    except Exception:  # noqa: BLE001 — un échec ne doit rien casser d'autre
+        log.exception("VXN maison : échec")
+
+
+def refresh_vxn_daily() -> None:
+    try:
+        vxn.refresh_cboe_daily()
+    except Exception:  # noqa: BLE001
+        log.exception("VXN officiel CBOE : échec du rafraîchissement")
+
+
 def _flush_bars(bars: list, source: str) -> None:
     """Écrit sur disque les bougies 1 min achevées, quelle que soit la
     source (compte courtier ou repli public délayé — cf. flush_prices)."""
@@ -715,6 +733,14 @@ def add_ingest_jobs(sched: BackgroundScheduler) -> None:
     # donc une cadence bien plus serrée — supprimer un retard de 15 min pour
     # rafraîchir toutes les 15 min n'aurait aucun sens.
     sched.add_job(pull_native_index, "interval", minutes=3,
+                  max_instances=1, coalesce=True)
+    # VXN maison : chaîne NDX COMPLÈTE toutes les 15 min (~3-4 min de collecte,
+    # la ±8 % à 3 min ci-dessus est trop étroite pour 30 jours). Les options
+    # NDX n'ont pas de séance étendue : 9h30-16h15 ET (cf. market_is_open).
+    sched.add_job(pull_vxn_live, "cron", day_of_week="mon-fri", hour="9-16",
+                  minute="0,15,30,45", max_instances=1, coalesce=True)
+    # VXN officiel CBOE (quotidien, gratuit) : après la clôture.
+    sched.add_job(refresh_vxn_daily, "cron", day_of_week="mon-fri", hour=17, minute=0,
                   max_instances=1, coalesce=True)
     sched.add_job(push_data_repo, "cron", day_of_week="mon-fri", hour=16, minute=20)
     # Sauvegarde distante après le push git : elle porte ce que GitHub refuse
