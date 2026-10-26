@@ -28,9 +28,9 @@ def data(tmp_path, monkeypatch):
     for k, (day, rise) in enumerate((("2026-10-13", 40), ("2026-10-14", 60),
                                      ("2026-10-15", 80))):
         _day("NQ", day, "09:30", "16:00", lambda i, r=rise: 30000 + min(i, 59) * r / 59)
-        _day("VXN", day, "09:30", "16:15", lambda i, k=k: 20.0 + k)
+        _day("VXN_CALC", day, "09:30", "16:15", lambda i, k=k: 20.0 + k)
     _day("NQ", "2026-10-16", "09:30", "11:00", lambda i: 31000 + i)
-    _day("VXN", "2026-10-16", "09:30", "11:00", lambda i: 25.0)
+    _day("VXN_CALC", "2026-10-16", "09:30", "11:00", lambda i: 25.0)
     return tmp_path
 
 
@@ -87,3 +87,20 @@ def test_pas_de_cadre_avant_l_open(data):
     # clôture de la veille) est déjà là, comme dans le script Pine
     assert r["frame"] is None
     assert r["em"] is not None and r["em"]["base"] == 30080.0
+
+
+def test_vxn_officiel_prioritaire_a_la_cloture(data):
+    """Clôtures officielles CBOE (history/vxn_daily.parquet, gex/vxn.py) : la
+    moyenne et la clôture de la veille en viennent ; à 16h00, l'officiel prime
+    sur le calcul maison ; en séance, le point maison du jour."""
+    from datetime import date
+    from gex.config import SETTINGS
+    (SETTINGS.data_dir / "history").mkdir()
+    pd.DataFrame({"date": [date(2026, 10, 14), date(2026, 10, 15)],
+                  "open": 0.0, "high": 0.0, "low": 0.0, "close": [30.0, 31.0]}).to_parquet(
+        SETTINGS.data_dir / "history" / "vxn_daily.parquet", index=False)
+    ctx = openframe.iv_context("VXN", "2026-10-16", 60)
+    assert ctx["iv_prev"] == 31.0 and ctx["iv_avg"] == pytest.approx(30.5) and ctx["iv_days"] == 2
+    assert openframe.iv_at("VXN", datetime(2026, 10, 15, 16, 0)) == 31.0
+    assert openframe.iv_at("VXN", datetime(2026, 10, 16, 10, 0)) == 25.0     # maison, en séance
+    assert openframe.iv_at("VXN", datetime(2026, 10, 16, 9, 0)) == 31.0      # avant l'open

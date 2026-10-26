@@ -10,7 +10,8 @@ ajustement par la vol implicite), comme les entrées du script Pine :
   fenêtre mesurée (9h30-10h30 NY par défaut) des `n` séances précédentes,
   open du jour (premier prix de la fenêtre) ;
 - vol implicite : VXN (NQ) ou VIX (ES), clôture de la veille, sa moyenne sur
-  les `n` séances, et la dernière valeur connue au point de départ ;
+  les `n` séances, et la dernière valeur connue au point de départ — pour le
+  VXN, clôtures officielles CBOE et VXN recalculé en séance (gex/vxn.py) ;
 - mouvement attendu : point de départ (clôture de la veille 16h00 NY par
   défaut, ouverture Globex 18h00, minuit, open 9h30), son prix, et deux
   amplitudes à 1σ : vol implicite (prix × IV / 100 / √252) et straddle de
@@ -113,16 +114,63 @@ def _last_at_or_before(symbol: str, when: datetime, lookback_days: int = 5) -> f
     return None
 
 
+# VXN : le flux du courtier ne le sert pas (cf. gex/vxn.py). En séance, VXN
+# recalculé maison toutes les 15 min (bougies `VXN_CALC`) ; clôtures
+# quotidiennes OFFICIELLES CBOE (history/vxn_daily.parquet, depuis 2009).
+IV_INTRADAY = {"VXN": "VXN_CALC"}
+
+
+def _official_daily(iv_symbol: str) -> pd.DataFrame:
+    """Clôtures officielles quotidiennes (date, close) ; vide si absentes."""
+    if iv_symbol != "VXN":
+        return pd.DataFrame()
+    from .config import SETTINGS
+    from .vxn import DAILY_KEY
+    path = SETTINGS.data_dir / "history" / f"{DAILY_KEY}.parquet"
+    if not path.exists():
+        return pd.DataFrame()
+    d = pd.read_parquet(path)[["date", "close"]]
+    d["date"] = pd.to_datetime(d["date"]).dt.date
+    return d.sort_values("date")
+
+
+def iv_at(iv_symbol: str, when: datetime) -> float | None:
+    """Vol implicite connue à `when` (heure NY naïve). VXN : point maison du
+    même jour s'il existe (en séance), sinon dernière clôture officielle
+    publiée ; à la clôture de 16h00, la clôture OFFICIELLE du jour si elle
+    est connue (définition du mouvement attendu « clôture à clôture »)."""
+    intraday = IV_INTRADAY.get(iv_symbol, iv_symbol)
+    official = _official_daily(iv_symbol)
+    if not official.empty:
+        known = official[(official["date"] < when.date())
+                         | ((official["date"] == when.date()) & (when.time() >= time(16, 0)))]
+        off = known.iloc[-1] if not known.empty else None
+        if off is not None and off["date"] == when.date() and when.time() == time(16, 0):
+            return float(off["close"])
+        same_day = _last_at_or_before(intraday, when, lookback_days=0)
+        if same_day is not None:
+            return same_day
+        return float(off["close"]) if off is not None else None
+    return _last_at_or_before(intraday, when)
+
+
 def iv_context(iv_symbol: str, today: str, n: int) -> dict:
     """Clôture de la veille de l'indice de vol et sa moyenne sur `n` séances
-    (clôtures quotidiennes avant `today`)."""
-    closes = []
-    for day in reversed([d for d in store.price_days(iv_symbol) if d < today]):
-        b = _bars(iv_symbol, day)
-        if not b.empty:
-            closes.append(float(b["close"].iloc[-1]))
-        if len(closes) >= n:
-            break
+    (clôtures quotidiennes avant `today` : officielles pour le VXN, dernière
+    bougie du jour sinon)."""
+    official = _official_daily(iv_symbol)
+    if not official.empty:
+        closes = [float(c) for c in official.loc[
+            official["date"] < date.fromisoformat(today), "close"].tail(n)][::-1]
+    else:
+        closes = []
+        key = IV_INTRADAY.get(iv_symbol, iv_symbol)
+        for day in reversed([d for d in store.price_days(key) if d < today]):
+            b = _bars(key, day)
+            if not b.empty:
+                closes.append(float(b["close"].iloc[-1]))
+            if len(closes) >= n:
+                break
     return {"iv_prev": closes[0] if closes else None,
             "iv_avg": sum(closes) / len(closes) if closes else None,
             "iv_days": len(closes)}
@@ -205,7 +253,7 @@ def compute(symbol: str, window: str | None = None, n: int = 60, anchor: str = "
     if span is not None:
         start, end = span
         px = _anchor_price(symbol, anchor, start)
-        iv_now = _last_at_or_before(out["iv_symbol"], start) if out["iv_symbol"] else None
+        iv_now = iv_at(out["iv_symbol"], start) if out["iv_symbol"] else None
         if px is not None:
             out["em"] = {"anchor": anchor, "start": _epoch(start), "end": _epoch(end),
                          "base": px, "iv": iv_now,
