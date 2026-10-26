@@ -34,12 +34,9 @@ from .rtquote import PUBLIC_QUOTES, QUOTES, credentials_present
 from .scheduler import STATE, market_is_open
 
 try:
-    # gex/confluence.py est délibérément HORS GIT (.git/info/exclude, choix
-    # de l'utilisateur) — jamais partagé entre machines. Import défensif :
-    # app.py (suivi par git) ne doit jamais planter au démarrage sur une
-    # machine où ce fichier n'existe pas (ex. un autre clone du dépôt). La
-    # piste "niveaux combinés multi-familles" (roadmap /scalp v2) se dégrade
-    # silencieusement en absence plutôt que de casser toute la page /scalp.
+    # gex/confluence.py : versionné depuis le 2026-10-26 (il était gardé hors
+    # git jusque-là). Import défensif conservé : une erreur dans ce module ne
+    # doit jamais empêcher le démarrage, /scalp perd seulement la confluence.
     from . import confluence as _confluence
 except ImportError:
     _confluence = None
@@ -2086,6 +2083,9 @@ _CONFLUENCE_FAMILIES = ("SPX", "NDX", "QQQ", "SPY", "NQ", "ES")
 # bandeau resté vide plusieurs dizaines de secondes). Ces niveaux ne
 # bougent pas à la seconde près, un cache de 10s est largement suffisant.
 _CONFLUENCE_CACHE: dict[str, tuple[float, list[dict]]] = {}
+# niveaux transposés AVANT regroupement (réglages /scalp : le navigateur
+# regroupe selon l'écart, le minimum de niveaux et les indices choisis)
+_CONFLUENCE_LEVELS_CACHE: dict[str, tuple[float, dict]] = {}
 _ORDER_FLOW_CACHE: dict[str, tuple[float, list[dict]]] = {}
 SCALP_HEAVY_CACHE_S = 10.0
 
@@ -2097,8 +2097,8 @@ def scalp_confluence_zones(symbol: str) -> list[dict]:
     (déjà utilisée ailleurs dans ce fichier pour l'échelle d'affichage) pour
     la transposition : même infrastructure, pas une conversion réinventée.
 
-    Renvoie [] si `gex/confluence.py` est absent (machine différente — cf.
-    l'import défensif en tête de fichier) ou si `symbol` n'est pas NQ/ES
+    Renvoie [] si `gex/confluence.py` ne s'importe pas (cf. l'import
+    défensif en tête de fichier) ou si `symbol` n'est pas NQ/ES
     (seules familles pour lesquelles `cluster_levels` a un seuil défini).
     Ne garde que les zones d'au moins 2 niveaux : un niveau seul n'est pas
     une confluence, juste un niveau — cf. docstring de confluence.py."""
@@ -2129,6 +2129,10 @@ def scalp_confluence_zones(symbol: str) -> list[dict]:
             continue  # transposition impossible (spot cible absent) -> écarté plutôt que faux
         for name, price in own_levels.items():
             combined[f"{src}:{name}"] = xf(price)
+    _CONFLUENCE_LEVELS_CACHE[symbol] = (now, {
+        "gap": _confluence.CLUSTER_POINTS[symbol],
+        "levels": [{"name": k, "family": k.split(":", 1)[0], "price": float(v)}
+                   for k, v in sorted(combined.items(), key=lambda kv: kv[1])]})
     zones = _confluence.cluster_levels(combined, symbol)
     # Vérifié en live le 2026-10-03 : avec 6 familles, le chaînage de
     # cluster_levels (documenté dans confluence.py — une grappe dense peut
@@ -2156,6 +2160,15 @@ def scalp_confluence_zones(symbol: str) -> list[dict]:
 
 HVL_VOL_RATIO_FLOOR = 1.5        # contre iceberg.HVL_MIN_VOL_RATIO = 3
 HVL_DELTA_FLOOR = 0.15           # contre iceberg.HVL_MIN_DELTA_FRACTION = 0.35
+
+
+def scalp_confluence_levels(symbol: str) -> dict | None:
+    """Niveaux transposés de toutes les familles (avant regroupement) et
+    écart par défaut, pour le regroupement réglable côté navigateur ; calculés
+    avec les zones (`scalp_confluence_zones`), même cache, même cadence."""
+    if not INDICATORS_REMOTE and symbol not in _CONFLUENCE_LEVELS_CACHE:
+        scalp_confluence_zones(symbol)
+    return _remote_value(_CONFLUENCE_LEVELS_CACHE, symbol, None)
 
 
 def scalp_order_flow_zones(symbol: str, day_ticks: pd.DataFrame) -> list[dict]:
@@ -2560,6 +2573,7 @@ _INDICATOR_CACHES = {
     "confluence": "_CONFLUENCE_CACHE", "order_flow": "_ORDER_FLOW_CACHE",
     "gex_profile": "_GEX_PROFILE_CACHE", "orderflow_profile": "_ORDERFLOW_PROFILE_CACHE",
     "untested": "_ORDERFLOW_UNTESTED_CACHE", "absorptions": "_ABSORPTIONS_CACHE",
+    "confluence_levels": "_CONFLUENCE_LEVELS_CACHE",
 }
 
 
@@ -3099,6 +3113,10 @@ def _scalp_indicator_snapshot(symbol: str, ctx: dict, spot: float,
     levels_0dte = ladder(ctx.get("keys_0dte") or {}, ctx.get("walls_0dte") or [])
     confluence = scalp_confluence_zones(symbol)
     try:
+        confluence_levels = scalp_confluence_levels(symbol)
+    except Exception:  # noqa: BLE001
+        confluence_levels = None
+    try:
         gex_profile = scalp_gex_profile(symbol, spot)
     except Exception:  # noqa: BLE001 — un profil raté ne doit jamais casser le graphique
         log.exception("Profil gamma /scalp v2 indisponible (%s)", symbol)
@@ -3110,6 +3128,7 @@ def _scalp_indicator_snapshot(symbol: str, ctx: dict, spot: float,
         log.exception("Profil order-flow par jambe /scalp v2 indisponible (%s)", symbol)
         orderflow_profile = {"legs": [], "untested": []}
     return {"levels": levels, "levels_0dte": levels_0dte, "confluence": confluence,
+            "confluence_levels": confluence_levels,
             "order_flow": order_flow, "gex_profile": gex_profile,
             "orderflow_profile": orderflow_profile}
 
@@ -3134,10 +3153,12 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
     snap = _scalp_indicator_snapshot(symbol, ctx, spot, day_ticks)
     levels, confluence = snap["levels"], snap["confluence"]
     levels_0dte = snap.get("levels_0dte") or []
+    confluence_levels = snap.get("confluence_levels")
     order_flow, gex_profile = snap["order_flow"], snap["gex_profile"]
     orderflow_profile = snap["orderflow_profile"]
     empty = {"candles": [], "markers": [], "absorptions": [], "levels": levels,
             "levels_0dte": levels_0dte, "confluence": confluence,
+            "confluence_levels": confluence_levels,
             "order_flow": order_flow, "gex_profile": gex_profile,
             "orderflow_profile": orderflow_profile, "symbol": symbol}
 
@@ -3210,7 +3231,8 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
         return {"candles": candles, "markers": markers,
                 "absorptions": _absorption_marks(symbol, [c["time"] for c in candles]),
                 "levels": levels, "levels_0dte": levels_0dte,
-                "confluence": confluence, "order_flow": order_flow,
+                "confluence": confluence, "confluence_levels": confluence_levels,
+                "order_flow": order_flow,
                 "gex_profile": gex_profile, "orderflow_profile": orderflow_profile,
                 "symbol": symbol}
 
@@ -3249,6 +3271,7 @@ def scalp_v2_chart_data(symbol: str, ctx: dict, spot: float,
     return {"candles": candles, "markers": markers,
             "absorptions": _absorption_marks(symbol, [c["time"] for c in candles]),
             "levels": levels, "levels_0dte": levels_0dte, "confluence": confluence,
+            "confluence_levels": confluence_levels,
             "order_flow": order_flow, "gex_profile": gex_profile,
             "orderflow_profile": orderflow_profile, "symbol": symbol}
 
@@ -4327,6 +4350,27 @@ def create_app() -> Dash:
                                                       className="sc-set-num")],
                                            title="Delta net ≥ N % du volume du palier "
                                                  "(défaut 35, minimum 15)"),
+                                html.Span("Confluence :", className="sc-set-lbl"),
+                                html.Label(["écart (pts) ",
+                                            dcc.Input(id="scalp-set-conf-gap", type="number",
+                                                      min=1, step=1, debounce=True,
+                                                      placeholder="50 NQ / 15 ES",
+                                                      persistence=True, persistence_type="local",
+                                                      className="sc-set-num")],
+                                           title="Deux niveaux voisins à au plus cet écart "
+                                                 "forment une même zone (de proche en proche)"),
+                                html.Label(["min. niveaux ",
+                                            dcc.Input(id="scalp-set-conf-min", type="number",
+                                                      min=2, step=1, value=2, debounce=True,
+                                                      persistence=True, persistence_type="local",
+                                                      className="sc-set-num")]),
+                                dcc.Checklist(id="scalp-set-conf-fams", inline=True,
+                                              className="check", persistence=True,
+                                              persistence_type="local",
+                                              value=["SPX", "NDX", "QQQ", "SPY", "NQ", "ES"],
+                                              options=[{"label": k, "value": k}
+                                                       for k in ("SPX", "NDX", "QQQ", "SPY",
+                                                                 "NQ", "ES")]),
                                 html.Span("Cadre open US :", className="sc-set-lbl"),
                                 html.Label(["fenêtre (NY) ",
                                             dcc.Input(id="scalp-set-of-window", type="text",
@@ -5101,7 +5145,15 @@ def create_app() -> Dash:
                     // visible, CL10 la plus discrète) plutôt qu'un aplat
                     // uniforme — la force relative se lit d'un coup d'œil
                     // sans que rien ne crie sur le graphique.
-                    const confluenceLines = ind.confluence ? (d.confluence || []).map(function(z) {
+                    // regroupement réglable (panneau ⚙, assets/gex-confluence.js)
+                    // sur les niveaux transposés ; repli : zones du serveur
+                    const cl = d.confluence_levels;
+                    const cg = (gs.confGap > 0) ? gs.confGap : (cl && cl.gap);
+                    const confZones = (cl && cl.levels && window.GexClusterConfluence && cg)
+                        ? window.GexClusterConfluence(cl.levels, cg, gs.confMin || 2,
+                                                       gs.confFamilies, 10)
+                        : (d.confluence || []);
+                    const confluenceLines = ind.confluence ? confZones.map(function(z) {
                         const alpha = Math.max(0.3, 0.9 - (z.rank - 1) * (0.6 / 9));
                         return st.series.createPriceLine({
                             price: z.price, color: 'rgba(201, 133, 0, ' + alpha + ')', lineWidth: 1,
@@ -5319,7 +5371,8 @@ def create_app() -> Dash:
     app.clientside_callback(
         """
         function(merge, levels, expiry, absTotal, absRatio, hvlRatio, hvlDelta,
-                 ofWindow, ofN, ofMode, ofOpts, emAnchor, emMult) {
+                 ofWindow, ofN, ofMode, ofOpts, emAnchor, emMult,
+                 confGap, confMin, confFams) {
             const num = function(v, dflt) {
                 return (v === null || v === undefined || v === '' || isNaN(Number(v)))
                     ? dflt : Number(v);
@@ -5333,9 +5386,12 @@ def create_app() -> Dash:
                 hvlRatio: num(hvlRatio, 3),
                 hvlDelta: num(hvlDelta, 35) / 100,
             };
+            window._gexSettings.confGap = num(confGap, null);
+            window._gexSettings.confMin = Math.max(2, Math.round(num(confMin, 2)));
+            window._gexSettings.confFamilies = confFams || null;
             const o = ofOpts || [];
             window._gexSettings.of = {
-                window: (ofWindow && /^\d{4}-\d{4}$/.test(ofWindow)) ? ofWindow : '0930-1030',
+                window: (ofWindow && /^\\d{4}-\\d{4}$/.test(ofWindow)) ? ofWindow : '0930-1030',
                 n: Math.max(1, Math.min(500, Math.round(num(ofN, 60)))),
                 mode: ofMode || 'center',
                 fill: o.includes('fill'), ext50: o.includes('ext50'), ext100: o.includes('ext100'),
@@ -5362,6 +5418,9 @@ def create_app() -> Dash:
         Input("scalp-set-of-opts", "value"),
         Input("scalp-set-em-anchor", "value"),
         Input("scalp-set-em-mult", "value"),
+        Input("scalp-set-conf-gap", "value"),
+        Input("scalp-set-conf-min", "value"),
+        Input("scalp-set-conf-fams", "value"),
     )
 
     # Bascule V1/V2 du bandeau (cf. commentaire sur scalp-banner-version dans
