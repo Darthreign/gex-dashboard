@@ -133,8 +133,17 @@ volatilité réalisée. Trie **toujours** avec `kind="stable"`.
 ## Conversions horaires
 
 Toutes les heures affichées sont en **heure de Paris**. Les `time_et` des
-calendriers sont en heure de New York : convertis-les explicitement. La séance
-CME va de 18:00 ET à 16:59 ET (00:00 → 23:00 Paris en été).
+calendriers sont en heure de New York : convertis-les explicitement, avec le
+**vrai fuseau**, jamais un « +6 h » fixe. L'écart vaut 6 h en temps normal mais
+**5 h** les semaines où un seul des deux pays a changé d'heure (fin mars, fin
+octobre) : l'open US tombe alors à 14h30 Paris, pas 15h30. PowerShell :
+`[System.TimeZoneInfo]::ConvertTime([datetime]'AAAA-MM-JJ HH:mm', [System.TimeZoneInfo]::FindSystemTimeZoneById('Eastern Standard Time'), [System.TimeZoneInfo]::FindSystemTimeZoneById('Romance Standard Time'))`.
+La séance CME va de 18:00 ET à 16:59 ET (00:00 → 23:00 Paris en temps normal).
+
+Les créneaux de publication des modes `prebrief`, `ajustement` et
+`ajustement2` sont fixés en **heure de New York** (9h15, 9h45, 10h15-10h45
+ET) ; les heures de Paris citées ci-dessous (15h15, 15h40…) sont celles du
+temps normal, à décaler d'une heure les semaines d'écart de 5 h.
 
 ---
 

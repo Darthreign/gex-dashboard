@@ -72,9 +72,31 @@ DASHBOARD = os.environ.get("DASHBOARD_URL", "http://127.0.0.1:8050").rstrip("/")
 # le délai de dispatch de la routine, variable et non désactivable, laisse
 # sinon trop peu de marge pour finir la rédaction avant le post). Ancien
 # schéma : 15h25/15h35.
-SCHEDULE = {(8, 30), (15, 15), (15, 45)}
-# Message de « clôture » (Paris) : stop contrarien + sens des MM + bonne soirée.
-CLOSE_POST = (16, 0)
+#
+# ⚠️ Horaires liés à la séance US : définis en heure de NEW YORK (suffixe _ET)
+# et convertis en heure de Paris JOUR PAR JOUR (`_paris_slot`). L'écart Paris -
+# New York n'est pas toujours de 6 h : 5 h pendant les semaines où un seul des
+# deux pays a changé d'heure (fin mars, fin octobre). En dur en heure de Paris,
+# tout se décalait d'une heure ces semaines-là (constaté le 26/10/2026).
+NY = ZoneInfo("America/New_York")
+SCHEDULE_PARIS = {(8, 30)}                    # brief du matin : heure de Paris
+SCHEDULE_ET = {(9, 15), (9, 45)}              # préparation de l'open, ajustement
+# Message de « clôture » : stop contrarien + sens des MM + bonne soirée.
+CLOSE_POST_ET = (10, 0)
+
+
+def _paris_slot(et: tuple[int, int], day: dt.date) -> tuple[int, int]:
+    """(h, min) Paris correspondant à `et` (h, min New York) le jour `day`."""
+    p = dt.datetime.combine(day, dt.time(*et), NY).astimezone(PARIS)
+    return (p.hour, p.minute)
+
+
+def _paris_time(et: tuple[int, int], day: dt.date) -> dt.time:
+    return dt.time(*_paris_slot(et, day))
+
+
+def _schedule(day: dt.date) -> set[tuple[int, int]]:
+    return SCHEDULE_PARIS | {_paris_slot(t, day) for t in SCHEDULE_ET}
 # Post Discord à chaque CHANGEMENT DE RÉGIME : désactivé le 2026-09-24 (trop
 # imprécis, ça spamait). Le journal, lui, continue d'enregistrer chaque changement
 # (statistiques / backtest) ; les digests à heure fixe (SCHEDULE) restent actifs.
@@ -95,8 +117,13 @@ BRIEF_MAX_AGE_S = 900          # 15 min : la routine tourne 5 min avant le post
 #   Sans risque de republier celui de la veille : la fenetre du matin ne s'ouvre
 #   qu'a 8h30, donc un fichier de moins de 90 min a forcement ete ecrit apres 7h.
 BRIEF_MAX_AGE_PAR_NOM = {"matin": 5400, "ajustement2": 2400}
-BRIEF_SLOTS = {(8, 30): "matin", (10, 0): "matin", (15, 15): "prebrief",
-              (15, 45): "ajustement"}
+BRIEF_SLOTS_PARIS = {(8, 30): "matin", (10, 0): "matin"}
+BRIEF_SLOTS_ET = {(9, 15): "prebrief", (9, 45): "ajustement"}
+
+
+def _brief_slots(day: dt.date) -> dict[tuple[int, int], str]:
+    return {**BRIEF_SLOTS_PARIS,
+            **{_paris_slot(t, day): nom for t, nom in BRIEF_SLOTS_ET.items()}}
 # (10, 0) partage le meme nom "matin" que (8, 30) : la publication est idempotente
 # par jour (cf. _post_brief). C est le filet de secours — la routine
 # premarket-nq-matin (une SEULE tache) retente elle-meme plusieurs fois dans la
@@ -116,30 +143,37 @@ BRIEF_SLOTS = {(8, 30): "matin", (10, 0): "matin", (15, 15): "prebrief",
 # desactivable (« deterministic delay … to balance server load »). Le brief peut
 # donc arriver APRES son creneau : chaque brief a une fenetre de rattrapage
 # pendant laquelle le bot le poste des qu'il apparait, plutot que de le perdre.
-BRIEF_FENETRES = {
-    # Le brief du matin se perime vite : lu a 8h30 il planifie la journee, lu a
-    # 11h il ne sert plus a rien. Fenetre courte, quitte a le sauter.
-    # Fenetre etendue jusqu a 10h15 pour couvrir LES DEUX tentatives (8h30 et le
-    # filet de secours ~10h00), chacune avec sa propre marge de rattrapage.
-    "matin":       (dt.time(8, 30), dt.time(10, 15)),
-    "prebrief":    (dt.time(15, 15), dt.time(15, 24)),
-    # Post par défaut a 15h45 ; fenetre jusqu'a 16h00 car le delai de dispatch
-    # de la routine (jusqu'a ~12 min) peut la faire demarrer vers 15h48.
-    "ajustement":  (dt.time(15, 45), dt.time(16, 0)),
-    # Poste a partir de 16h15 (decale de 15h50 le 2026-09-24, cote bot SEUL : la
-    # routine, elle, ecrit quand son delai de dispatch le lui permet — variable
-    # et non desactivable — donc le bot attend 16h15 pour laisser le temps aux
-    # verifications d'actualite). Fenetre jusqu'a 16h45 : couvre aussi un
-    # decalage du calendrier (ex. 10h00 ET -> reaction ~16h05) et la marge du
-    # dernier creneau de verification (16h20). Le fichier doit encore avoir
-    # moins de 15 min (BRIEF_MAX_AGE_S) au moment ou le bot le lit.
-    "ajustement2": (dt.time(16, 15), dt.time(16, 45)),
+#
+# Le brief du matin se perime vite : lu a 8h30 il planifie la journee, lu a
+# 11h il ne sert plus a rien. Fenetre courte, quitte a le sauter. Etendue
+# jusqu a 10h15 pour couvrir LES DEUX tentatives (8h30 et le filet ~10h00).
+BRIEF_FENETRES_PARIS = {"matin": ((8, 30), (10, 15))}
+BRIEF_FENETRES_ET = {
+    "prebrief":    ((9, 15), (9, 24)),
+    # Post par défaut a 9h45 ET ; fenetre jusqu'a 10h00 car le delai de dispatch
+    # de la routine (jusqu'a ~12 min) peut la faire demarrer vers 9h48.
+    "ajustement":  ((9, 45), (10, 0)),
+    # Poste a partir de 10h15 ET (cote bot SEUL : la routine ecrit quand son
+    # delai de dispatch le lui permet), jusqu'a 10h45 ET : couvre un decalage
+    # du calendrier (ex. 10h00 ET -> reaction ~10h05) et la marge du dernier
+    # creneau de verification. Le fichier doit encore avoir moins de 15 min
+    # (BRIEF_MAX_AGE_S) au moment ou le bot le lit.
+    "ajustement2": ((10, 15), (10, 45)),
 }
+
+
+def _brief_fenetres(day: dt.date) -> dict[str, tuple[dt.time, dt.time]]:
+    out = {nom: (dt.time(*a), dt.time(*b)) for nom, (a, b) in BRIEF_FENETRES_PARIS.items()}
+    out.update({nom: (_paris_time(a, day), _paris_time(b, day))
+                for nom, (a, b) in BRIEF_FENETRES_ET.items()})
+    return out
+
+
 # Limite Discord d'une description d'embed (4096) ; marge pour le titre.
 EMBED_MAX = 3900
 
-# Session US en heure de Paris (15h30 = 9h30 ET open ; ~22h = 16h ET close).
-SESSION_START, SESSION_END = dt.time(15, 30), dt.time(22, 0)
+# Séance cash US, en heure de New York (convertie en heure de Paris au jour dit).
+SESSION_START_ET, SESSION_END_ET = (9, 30), (16, 0)
 
 # --- Journal de recherche (backtest) ----------------------------------------
 # Base et images rangées avec le reste des données du dashboard (D:\Gex\data),
@@ -147,8 +181,14 @@ SESSION_START, SESSION_END = dt.time(15, 30), dt.time(22, 0)
 JOURNAL_DB = os.environ.get("JOURNAL_DB") or str(
     Path(__file__).resolve().parent.parent / "data" / "journal" / "journal.sqlite")
 HEATMAP_DIR = Path(JOURNAL_DB).parent / "heatmaps"
-# Créneaux de capture heatmap (h, min) -> libellé de slot.
-HEATMAP_SLOTS = {(15, 30): "15h30", (16, 0): "16h00", (18, 0): "18h00", (22, 0): "22h00"}
+# Créneaux de capture heatmap, en heure de New York -> libellé de slot. Les
+# libellés gardent leur nom historique (heure de Paris en temps normal : open,
+# open + 30 min, mi-séance, clôture) pour ne pas casser les fichiers existants.
+HEATMAP_SLOTS_ET = {(9, 30): "15h30", (10, 0): "16h00", (12, 0): "18h00", (16, 0): "22h00"}
+
+
+def _heatmap_slots(day: dt.date) -> dict[tuple[int, int], str]:
+    return {_paris_slot(t, day): lab for t, lab in HEATMAP_SLOTS_ET.items()}
 HEATMAP_SYMBOLS = ("SPX", "SPY", "NDX", "QQQ", "ES", "NQ")
 CONTEXT_SYMBOLS = ("NQ", "ES", "SPX", "NDX")   # vérité-marché pour daily_metrics
 POLL_POST = (23, 5)                            # heure de post du sondage (Lun-Ven)
@@ -246,7 +286,7 @@ def _embed(d: dict) -> discord.Embed:
     return discord.Embed(description=d["text"], color=d.get("discord_color", 0x95A5A6))
 
 
-NIVEAUX_SLOT = (15, 15)     # photo des niveaux NQ juste avant l'open (bilan de fin de séance)
+NIVEAUX_SLOT_ET = (9, 15)   # photo des niveaux NQ juste avant l'open (bilan de fin de séance)
 
 
 def _snapshot_niveaux(jour: str, ts: str) -> None:
@@ -388,7 +428,10 @@ async def _post_close(d: dict) -> None:
 
 
 def _en_session(now: dt.datetime) -> bool:
-    return now.weekday() < 5 and SESSION_START <= now.timetz().replace(tzinfo=None) <= SESSION_END
+    day = now.date()
+    t = now.timetz().replace(tzinfo=None)
+    return (now.weekday() < 5
+            and _paris_time(SESSION_START_ET, day) <= t <= _paris_time(SESSION_END_ET, day))
 
 
 # --------------------------------------------------------------------------
@@ -526,7 +569,8 @@ def _build_daily_metrics(date: str) -> None:
     if jc is None:
         return
     tl = journal.regime_timeline(jc, date)
-    fin = dt.datetime.combine(dt.date.fromisoformat(date), dt.time(22, 0), PARIS).isoformat()
+    fin = dt.datetime.combine(dt.date.fromisoformat(date), dt.time(*SESSION_END_ET),
+                              NY).astimezone(PARIS).isoformat()
     for col, val in journal.minutes_par_couleur(tl, fin).items():
         journal.set_metric(jc, date=date, name=f"minutes_{col}", value_num=round(val, 1))
     journal.set_metric(jc, date=date, name="n_changes",
@@ -577,9 +621,10 @@ async def _journal_tick(now, d) -> None:
     if now.weekday() >= 5:
         return
     date, slot = now.date().isoformat(), (now.hour, now.minute)
-    if slot in HEATMAP_SLOTS:
-        await _capture_heatmaps(date, HEATMAP_SLOTS[slot], now)
-    if slot == (15, 30) and not journal.regime_open_done(jc, date):
+    heatmaps = _heatmap_slots(now.date())
+    if slot in heatmaps:
+        await _capture_heatmaps(date, heatmaps[slot], now)
+    if slot == _paris_slot(SESSION_START_ET, now.date()) and not journal.regime_open_done(jc, date):
         await _record_regime(now, "open", d)
     elif _en_session(now) and now.minute % 10 == 0:
         await _record_regime(now, "heartbeat", d, with_market=False)
@@ -609,25 +654,26 @@ async def tick() -> None:
     signature = tuple(tuple(x) for x in d.get("signature", []))
 
     slot = (now.hour, now.minute)
-    jour = now.date().isoformat()
+    day = now.date()
+    jour = day.isoformat()
     deja = _posted.setdefault(jour, set())
-    if slot == CLOSE_POST and slot not in deja:      # message de clôture (16h)
+    if slot == _paris_slot(CLOSE_POST_ET, day) and slot not in deja:   # clôture (10h ET)
         deja.add(slot)
         await _post_close(d)
         log.info("Message de clôture posté (%02dh%02d)", slot[0], slot[1])
         _last_signature, _last_digest = signature, d
         return
-    if slot in SCHEDULE and slot not in deja:
+    if slot in _schedule(day) and slot not in deja:
         deja.add(slot)
         await _post(d)
         log.info("Post fixe %02dh%02d (%s)", slot[0], slot[1], d["color"])
-        if slot == NIVEAUX_SLOT:
+        if slot == _paris_slot(NIVEAUX_SLOT_ET, day):
             try:
                 _snapshot_niveaux(jour, now.isoformat())
             except Exception:  # noqa: BLE001 — la photo est un bonus, jamais bloquante
                 log.exception("Photo des niveaux 15h15")
         # Brief prémarket en complément, s'il a été rédigé et qu'il est frais.
-        nom = BRIEF_SLOTS.get(slot)
+        nom = _brief_slots(day).get(slot)
         if nom:
             try:
                 await _post_brief(nom, jour)
@@ -638,7 +684,7 @@ async def tick() -> None:
 
     # Rattrapage : la routine a pu rendre son brief APRES le créneau (délai de
     # dispatch). Tant qu'on est dans sa fenêtre, on le poste dès qu'il paraît.
-    for nom, (debut, fin) in BRIEF_FENETRES.items():
+    for nom, (debut, fin) in _brief_fenetres(day).items():
         if debut <= now.time() <= fin:
             try:
                 if await _post_brief(nom, jour):
