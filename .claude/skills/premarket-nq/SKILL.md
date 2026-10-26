@@ -71,9 +71,9 @@ hausse/baisse global.
 >   Un timeout qui se déclenche = source « Non disponible », PAS une
 >   erreur qui bloque le brief.
 > - **Journalise chaque étape** en ajoutant une ligne à
->   `D:\Gex\logs\premarket-nq.log` (créer le dossier `logs/` s'il n'existe
+>   `D:/Gex/logs/premarket-nq.log` (créer le dossier `logs/` s'il n'existe
 >   pas) via Bash, par exemple :
->   `echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) matin debut-dashboard" >> D:\Gex\logs\premarket-nq.log`
+>   `echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) matin debut-dashboard" >> D:/Gex/logs/premarket-nq.log`
 >   Une ligne avant et après CHAQUE source consultée (dashboard, calendriers,
 >   ticks, MCP gex-data), plus une au tout début et une à l'écriture finale
 >   du fichier. Si une exécution se bloque à nouveau, ce log dira exactement
@@ -92,12 +92,12 @@ continue avec ce que tu as :
 du jour). ⚠️ PAS `/summary` — ces 5 axes n'ont pas de chaîne d'options
 (`role="context"` dans `gex/config.py`), `/summary` renvoie systématiquement
 404 pour eux (confirmé le 2026-09-23). Repli si l'endpoint ne répond pas : les
-bougies 1 min dans `D:\Gex\data\prices\<cle>\<jour>.parquet`.
+bougies 1 min dans `D:/Gex/data/prices/<cle>/<jour>.parquet`.
 
 **MCP `gex-data`** : `get_market_context`, `get_gex_summary`, `get_gex_by_strike`,
 `get_flow_delta`, `get_history`.
 
-**Calendriers** (`D:\Outils de backtest\data\`) — dossier EXTERNE au projet,
+**Calendriers** (`D:/Outils de backtest/data/`) — dossier EXTERNE au projet,
 autorisé via `permissions.additionalDirectories` dans `.claude/settings.local.json`.
 
 > ⚠️ **Ne bloque JAMAIS sur cet accès.** Tu tournes sans personne devant
@@ -126,7 +126,7 @@ autorisé via `permissions.additionalDirectories` dans `.claude/settings.local.j
 - `us_market_holidays.json` — vérifie toujours si le jour est férié ou une
   demi-séance.
 
-**Ticks NQ** (`D:\Gex\data\ticks\NQ\<jour>.parquet`, colonnes `ts` epoch UTC,
+**Ticks NQ** (`D:/Gex/data/ticks/NQ/<jour>.parquet`, colonnes `ts` epoch UTC,
 `price`, `volume`, `bid`, `ask`, `side`) — pour le range overnight et la
 volatilité réalisée. Trie **toujours** avec `kind="stable"`.
 
@@ -149,7 +149,7 @@ temps normal, à décaler d'une heure les semaines d'écart de 5 h.
 
 ## Mode `matin` — publié à 8h30, le plan de la journée
 
-Écris dans `D:\Gex\data\briefs\matin.md`. **1200 mots maximum.**
+Écris dans `D:/Gex/data/briefs/matin.md`. **1200 mots maximum.**
 
 C'est le brief qu'on lit avec le café : il sert à **planifier la journée**, pas
 à lire le marché en direct. À 8h30 Paris il est 2h30 à New York — le cash
@@ -181,7 +181,7 @@ américain dort, seuls les futures et les chaînes natives tournent.
 
 ## Mode `prebrief` — publié à 15h15, avant l'open
 
-Écris dans `D:\Gex\data\briefs\prebrief.md`. Format Markdown, **1500 mots
+Écris dans `D:/Gex/data/briefs/prebrief.md`. Format Markdown, **1500 mots
 maximum**, lisible en 90 secondes sur mobile.
 
 1. **Régime en 20 secondes** — 3 à 5 phrases.
@@ -213,7 +213,7 @@ maximum**, lisible en 90 secondes sur mobile.
 
 Lis d'abord `prebrief.md` : c'est ta **mémoire** du créneau précédent, car
 chaque exécution démarre sans contexte. Écris dans
-`D:\Gex\data\briefs\ajustement.md`. **600 mots maximum.**
+`D:/Gex/data/briefs/ajustement.md`. **600 mots maximum.**
 
 N'écris **que ce qui a changé**. Ne reconstruis pas le brief.
 
@@ -250,7 +250,7 @@ dans `econ_calendar.json`, la seule confirmation fiable qu'il est publié) et
 te le passe en argument : nom, heure Paris, et les trois chiffres
 `forecast`/`previous`/`actual` tels quels.
 
-Écris dans `D:\Gex\data\briefs\ajustement2.md`. **400 mots maximum** — plus
+Écris dans `D:/Gex/data/briefs/ajustement2.md`. **400 mots maximum** — plus
 court que l'ajustement standard : une réaction ciblée à UN événement, pas un
 état complet. Lis `ajustement.md` (le point précédent) comme mémoire.
 
