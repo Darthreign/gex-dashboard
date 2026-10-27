@@ -246,9 +246,9 @@ def latest(now_et: datetime | None = None) -> dict:
         if not d.empty:
             official = {"value": float(d["close"].iloc[-1]), "date": str(d["date"].iloc[-1])}
     out: dict = {"available": bool(calc or official), "calc": calc, "officiel": official}
-    if calc and calc["ts"][:10] == now_et.date().isoformat():
-        out.update(value=calc["value"], source="calc", asof=calc["ts"])
-    elif official:
+    # L'officiel prime dès qu'il couvre la date du dernier point recalculé :
+    # le calcul maison ne sert qu'à combler l'attente de la publication CBOE.
+    if official and (calc is None or official["date"] >= calc["ts"][:10]):
         out.update(value=official["value"], source="officiel", asof=official["date"])
     elif calc:
         out.update(value=calc["value"], source="calc", asof=calc["ts"])

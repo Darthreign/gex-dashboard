@@ -109,3 +109,13 @@ def test_latest_le_lendemain_matin_sert_la_cloture_officielle(tmp_path, monkeypa
 def test_latest_sans_donnee(tmp_path, monkeypatch):
     _store_vxn(tmp_path, monkeypatch, [], [])
     assert vxn.latest(datetime(2026, 10, 27, 10, 0, tzinfo=ET))["available"] is False
+
+
+def test_latest_l_officiel_du_jour_remplace_le_calcul(tmp_path, monkeypatch):
+    _store_vxn(tmp_path, monkeypatch,
+               [{"timestamp": datetime(2026, 10, 27, 16, 0), "open": 25.3, "high": 25.3,
+                 "low": 25.3, "close": 25.3}],
+               [{"date": date(2026, 10, 27), "open": 26.0, "high": 26.5, "low": 25.0, "close": 25.4}])
+    out = vxn.latest(datetime(2026, 10, 27, 19, 30, tzinfo=ET))
+    assert out["source"] == "officiel" and out["value"] == 25.4
+    assert "variation_vs_cloture" not in out

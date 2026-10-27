@@ -739,11 +739,13 @@ def add_ingest_jobs(sched: BackgroundScheduler) -> None:
     # NDX n'ont pas de séance étendue : 9h30-16h15 ET (cf. market_is_open).
     sched.add_job(pull_vxn_live, "cron", day_of_week="mon-fri", hour="9-16",
                   minute="0,15,30,45", max_instances=1, coalesce=True)
-    # VXN officiel CBOE (quotidien, gratuit). 19h ET : à 17h ET le CBOE n'avait
-    # pas encore publié la séance du jour (constaté le 26/10/2026, ligne
-    # présente à 18h17 ET).
-    sched.add_job(refresh_vxn_daily, "cron", day_of_week="mon-fri", hour=19, minute=0,
-                  max_instances=1, coalesce=True)
+    # VXN officiel CBOE (quotidien, gratuit). L'heure de publication de la
+    # séance du jour varie (26/10 : présente à 18h17 ET ; 27/10 : absente à
+    # 18h29 ET) : trois tentatives, le fichier étant réécrit en entier.
+    sched.add_job(refresh_vxn_daily, "cron", day_of_week="mon-fri", hour="19,21",
+                  minute=0, max_instances=1, coalesce=True)
+    sched.add_job(refresh_vxn_daily, "cron", day_of_week="tue-sat", hour=7, minute=0,
+                  max_instances=1, coalesce=True, id="vxn_daily_lendemain")
     sched.add_job(push_data_repo, "cron", day_of_week="mon-fri", hour=16, minute=20)
     # Sauvegarde distante après le push git : elle porte ce que GitHub refuse
     # (archives Databento de plus de 100 Mo). Sans rclone configuré, l'appel
