@@ -178,9 +178,16 @@
           // le 2026-10-05, jusque-là identiques (seule l'opacité différait).
           const rgb = isHvn ? "156, 106, 222" : "57, 135, 229";
           const grad = ctx.createLinearGradient(0, yTop, 0, yBottom);
+          const frac = (y) => Math.min(1, Math.max(0, (y * vpr - yTop) / Math.max(1, yBottom - yTop)));
           grad.addColorStop(0, `rgba(${rgb}, 0)`);
-          grad.addColorStop(Math.min(1, Math.max(0, (yCenter - yTop) / (yBottom - yTop))),
-                            `rgba(${rgb}, ${peakAlpha})`);
+          if (z.yHi !== null && z.yLo !== null && z.yHi !== undefined && z.yHi !== z.yLo) {
+            const a = frac(Math.min(z.yHi, z.yLo)), b = frac(Math.max(z.yHi, z.yLo));
+            grad.addColorStop(a, `rgba(${rgb}, ${peakAlpha})`);
+            grad.addColorStop(b, `rgba(${rgb}, ${peakAlpha})`);
+          } else {
+            grad.addColorStop(Math.min(1, Math.max(0, (yCenter - yTop) / (yBottom - yTop))),
+                              `rgba(${rgb}, ${peakAlpha})`);
+          }
           grad.addColorStop(1, `rgba(${rgb}, 0)`);
           ctx.fillStyle = grad;
           ctx.fillRect(0, yTop, paneW, Math.max(1, yBottom - yTop));
@@ -196,12 +203,20 @@
             bucket = this._source._bucketSize, visible = this._source._untestedVisible;
       if (!series || !visible || !zones.length) { this._zones = []; return; }
       const spread = (bucket || 0) * UNTESTED_SPREAD;
-      this._zones = zones.map((z) => ({
-        kind: z.kind,
-        yTop: series.priceToCoordinate(z.price + spread),
-        yBottom: series.priceToCoordinate(z.price - spread),
-        yCenter: series.priceToCoordinate(z.price),
-      }));
+      // zone fusionnée (low/high, cf. GexMergeUntested) : plateau d'intensité
+      // de low à high, dégradé au-delà ; nœud seul : pic au centre
+      this._zones = zones.map((z) => {
+        const hi = z.high !== undefined ? z.high : z.price;
+        const lo = z.low !== undefined ? z.low : z.price;
+        return {
+          kind: z.kind,
+          yTop: series.priceToCoordinate(hi + spread),
+          yBottom: series.priceToCoordinate(lo - spread),
+          yCenter: series.priceToCoordinate(z.price),
+          yHi: series.priceToCoordinate(hi),
+          yLo: series.priceToCoordinate(lo),
+        };
+      });
     }
     renderer() { return new UntestedZoneRenderer(this._zones); }
   }
@@ -212,7 +227,11 @@
     coordinate() { return this._y ?? -1; }
     visible() { return this._y !== null; }
     tickVisible() { return true; }
-    text() { return (this._zone.kind === "hvn" ? "HVN" : "LVN") + " " + Math.round(this._zone.price); }
+    text() {
+      const z = this._zone, tag = z.kind === "hvn" ? "HVN" : "LVN";
+      return z.n > 1 ? `${tag} ${Math.round(z.low)}–${Math.round(z.high)} (${z.n})`
+                     : `${tag} ${Math.round(z.price)}`;
+    }
     textColor() { return "#ffffff"; }
     backColor() { return this._zone.kind === "hvn" ? "#9c6ade" : "#3987e5"; }
   }
@@ -262,4 +281,29 @@
   }
 
   window.OrderFlowProfilePrimitive = OrderFlowProfilePrimitive;
+
+  // Fusion des nœuds HVN/LVN non testés en ZONES (2026-10-16, demande de
+  // l'utilisateur) : deux nœuds de MÊME nature distants d'au plus `gap`
+  // points sont réunis (de proche en proche) ; jamais un HVN avec un LVN.
+  // `nodes` arrive du plus récent au plus ancien (cf. scalp_orderflow_untested) :
+  // une zone prend le rang de son nœud le plus récent, et seules les `max`
+  // zones les plus récentes sont gardées. gap = 0 : aucune fusion.
+  window.GexMergeUntested = function (nodes, gap, max) {
+    const ranked = (nodes || []).map((n, i) => Object.assign({ rank: i }, n));
+    const out = [];
+    ["hvn", "lvn"].forEach((kind) => {
+      const list = ranked.filter((n) => n.kind === kind).sort((a, b) => a.price - b.price);
+      let cur = null;
+      list.forEach((n) => {
+        if (cur && gap > 0 && n.price - cur.high <= gap + 1e-9) {
+          cur.high = n.price; cur.n += 1; cur.rank = Math.min(cur.rank, n.rank);
+        } else {
+          cur = { kind, low: n.price, high: n.price, n: 1, rank: n.rank };
+          out.push(cur);
+        }
+      });
+    });
+    out.forEach((z) => { z.price = (z.low + z.high) / 2; });
+    return out.sort((a, b) => a.rank - b.rank).slice(0, max || out.length);
+  };
 })();

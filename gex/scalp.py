@@ -10,7 +10,7 @@ donc où est le spot PAR RAPPORT à chaque niveau, et si un niveau est au contac
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 
 from . import i18n
 
@@ -35,6 +35,8 @@ def round_to_tick(symbol: str, price: float) -> float:
 
 OPEN_ET = time(9, 30)
 CLOSE_ET = time(16, 0)
+# Réouverture Globex (séance ETH des futures NQ/ES) : 18h00 New York
+ETH_OPEN_ET = time(18, 0)
 CONTRARIAN_CUT_ET = time(10, 15)      # 16h15 Paris : le contrarien devient risqué
 
 
@@ -104,6 +106,19 @@ def session_state(now_et: datetime, lang: str = "fr") -> tuple[str, str]:
     return "late", i18n.t(lang, "sc_session_late", minutes=minutes)
 
 
+def session_start(now_et: datetime, futures: bool) -> datetime:
+    """Début (naïf, heure de New York) de la séance en cours, référence de
+    « pts depuis l'open » : ouverture RTH 9h30 en journée ; pour les futures,
+    ouverture ETH 18h00 dès la réouverture Globex et jusqu'à 9h30 le
+    lendemain matin (sinon on comparerait au 9h30 de la veille)."""
+    now = now_et.replace(tzinfo=None)
+    t = now.time()
+    if not futures or OPEN_ET <= t < ETH_OPEN_ET:
+        return datetime.combine(now.date(), OPEN_ET)
+    day = now.date() if t >= ETH_OPEN_ET else now.date() - timedelta(days=1)
+    return datetime.combine(day, ETH_OPEN_ET)
+
+
 def extension_pts(spot: float | None, open_: float | None) -> float | None:
     """Écart du spot à l'ouverture de la séance, en points."""
     if spot is None or open_ is None:
@@ -126,15 +141,44 @@ def move_threshold(symbol: str) -> float:
     return MOVE_MIN_PTS.get(symbol.upper(), DEFAULT_MOVE_MIN)
 
 
+def _age_txt(age_s: float) -> str:
+    m, sec = divmod(int(round(max(age_s, 0.0))), 60)
+    return f"{m} min {sec:02d} s" if m else f"{sec} s"
+
+
+def flux_text(net_musd: float, gross_musd: float, ratio: float, lang: str = "fr", *,
+              last_print_age_s: float | None = None, hors_seance: bool = False) -> str:
+    """Partie « flux » du détail du bandeau. Au-dessus de GROSS_MIN_MUSD : le
+    flux net et sa part à sens unique (inchangé). En dessous, on dit que le
+    flux est trop faible pour être lu — et, s'il est nul, depuis quand aucune
+    option ne s'est échangée — au lieu d'un « aucun flux » qui fait croire à
+    une panne avant l'ouverture (demande explicite, 2026-10-12). Texte seul :
+    aucun seuil ni aucune lecture du flux ne change."""
+    if gross_musd >= GROSS_MIN_MUSD:
+        return i18n.t(lang, "sc_flux_net", net=net_musd, ratio=ratio)
+    if gross_musd > 0:
+        txt = i18n.t(lang, "sc_flux_faible", gross=gross_musd, seuil=GROSS_MIN_MUSD)
+    else:
+        last = (i18n.t(lang, "sc_flux_last", age=_age_txt(last_print_age_s))
+                if last_print_age_s is not None else i18n.t(lang, "sc_flux_none_long"))
+        txt = f"{i18n.t(lang, 'sc_flux_none')} · {last}"
+    return txt + (i18n.t(lang, "sc_flux_hors_seance") if hors_seance else "")
+
+
 def assess(symbol: str, move_pts: float | None, net_musd: float, gross_musd: float,
            gamma_negative: bool, dist_to_flip: float | None, lang: str = "fr",
-           *, swing: bool = False) -> dict:
+           *, swing: bool = False, last_print_age_s: float | None = None,
+           hors_seance: bool = False) -> dict:
     """État d'amplification sur la fenêtre de 5 min.
 
     move_pts   : variation du prix sur la fenêtre (None si données insuffisantes)
     net_musd   : pression de couverture nette (M$ ; + = les dealers doivent ACHETER)
     gross_musd : somme des |pressions| (M$), pour juger si le flux est significatif
     dist_to_flip : niveau du Gamma Flip - spot, en points (None si inconnu)
+    last_print_age_s : âge (s) de la dernière transaction d'options connue
+                   (None : aucune dans la mémoire du tape, 10 min) — sert
+                   seulement au texte quand le flux est sous GROSS_MIN_MUSD
+    hors_seance : hors séance cash (9h30-16h00 ET), précisé dans ce même texte
 
     États (`state`) : insufficient | calm | amplification | unsupported | brake.
     `tone` : alert (amplification) ; ok (favorable au contrarien — seulement
@@ -159,8 +203,8 @@ def assess(symbol: str, move_pts: float | None, net_musd: float, gross_musd: flo
               "gamma": gamma_light}
     side = i18n._SIDE_WORD[lang][direction] if direction else ""     # accorde avec « amplification »
     side_m = i18n._SIDE_WORD_M[lang][direction] if direction else "" # accorde avec « mouvement »
-    flux_txt = (i18n.t(lang, "sc_flux_net", net=net_musd, ratio=ratio) if gross_musd > 0
-                else i18n.t(lang, "sc_flux_none"))
+    flux_txt = flux_text(net_musd, gross_musd, ratio, lang,
+                         last_print_age_s=last_print_age_s, hors_seance=hors_seance)
     gamma_txt = i18n.t(lang, "sc_gamma_negatif" if gamma_negative else "sc_gamma_positif")
     toward_flip_txt = i18n.t(lang, "sc_toward_flip") if toward_flip else ""
     # V2 (swing) : pas de fenêtre fixe de 5 min, "sc_detail_swing" omet la

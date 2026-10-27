@@ -27,15 +27,18 @@ def _chain(spot: float = 28700.0) -> pd.DataFrame:
 
 
 def _raw(chain: pd.DataFrame, iv: float = 0.15, oi_call: float = 80.0,
-         oi_put: float = 120.0, spread: float = 1.0) -> dict:
+         oi_put: float = 120.0, spread: float | None = None) -> dict:
     """OI asymétrique call/put : à parts égales, le net s'annule exactement à
     chaque strike (même |gamma| des deux côtés) et le classement n'a plus de
     sens — c'est le cas dégénéré rencontré sur les tests de metrics.py."""
     out = {}
     for _, r in chain.iterrows():
         oi = oi_call if r["type"] == "C" else oi_put
-        out[r["streamer_symbol"]] = {"iv": iv, "oi": oi, "volume": 50.0,
-                                     "bidPrice": 10.0, "askPrice": 10.0 + spread}
+        out[r["streamer_symbol"]] = {"iv": iv, "oi": oi, "volume": 50.0}
+        # sans `spread`, pas de fourchette : l'IV du flux fait foi (une
+        # fourchette identique à tous les strikes donnerait des IV absurdes)
+        if spread is not None:
+            out[r["streamer_symbol"]].update(bidPrice=10.0, askPrice=10.0 + spread)
     return out
 
 
@@ -139,7 +142,7 @@ def test_iv_manquante_traitee_comme_gamma_nul():
     gamma indéfini qui polluerait la somme."""
     chain = _chain(28700.0).iloc[:4].reset_index(drop=True)
     raw = _raw(chain)
-    # une IV manquante sur un contrat
+    # une IV manquante sur un contrat sans fourchette
     raw[chain["streamer_symbol"].iloc[0]].pop("iv")
     now = datetime(2026, 7, 27, 10, 0, tzinfo=ET)
     df = futopt.enrich_native(chain, raw, 28700.0, 20.0, now_et=now)
@@ -209,3 +212,40 @@ def test_gex_lineaire_avec_le_spot_a_structure_egale():
     c2 = chain_at(2000.0)
     b = futopt.enrich_native(c2, _raw(c2, iv=0.20), 2000.0, 20.0, now_et=now)["gex"].abs().sum()
     assert b / a == pytest.approx(2.0, rel=0.1)
+
+
+def test_recalculs_utilisent_le_multiplicateur_du_future():
+    """GEX net recalculé au spot = somme de la colonne gex (multiplicateur 20,
+    pas 100) ; idem pour les murs recalculés à un spot de référence."""
+    from gex import metrics
+    chain = _chain(28700.0)
+    now = datetime(2026, 7, 27, 10, 0, tzinfo=ET)
+    df = futopt.enrich_native(chain, _raw(chain), 28700.0, 20.0, now_et=now)
+    assert (df["multiplier"] == 20.0).all()
+    assert metrics.net_gex_at(df, 28700.0) == pytest.approx(df["gex"].sum(), rel=1e-6)
+    assert metrics.gex_at_spot(df, 28700.0).sum() == pytest.approx(df["gex"].sum(), rel=1e-6)
+
+
+# --- Archive quotidienne de l'open interest (chaîne complète) -----------------
+
+def test_oi_frame_garde_nan_sans_summary_et_horodate():
+    chain = _chain().head(4)
+    syms = chain["streamer_symbol"].tolist()
+    raw = {syms[0]: {"oi": 150.0}, syms[1]: {"oi": 0.0}, syms[2]: {"iv": 0.2}}
+    ts = datetime(2026, 10, 12, 11, 15, tzinfo=ET)
+    out = futopt.oi_frame(chain, raw, ts)
+    oi = out["open_interest"].tolist()
+    assert oi[:2] == [150.0, 0.0]
+    assert np.isnan(oi[2]) and np.isnan(oi[3])
+    assert (out["collected_at"] == pd.Timestamp(ts)).all()
+    assert len(out) == 4 and {"strike", "type", "expiry"} <= set(out.columns)
+
+
+def test_save_open_interest_un_fichier_par_jour(tmp_path, monkeypatch):
+    from gex import store
+    from gex.config import SETTINGS
+    monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
+    df = futopt.oi_frame(_chain().head(2), {}, datetime(2026, 10, 12, 11, 15, tzinfo=ET))
+    p = store.save_open_interest("NQ", df, datetime(2026, 10, 12, 11, 15, tzinfo=ET))
+    assert p == tmp_path / "oi" / "NQ" / "2026-10-12.parquet"
+    assert len(pd.read_parquet(p)) == 2

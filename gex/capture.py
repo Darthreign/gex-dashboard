@@ -12,6 +12,10 @@ Ce process porte :
 Lancement (tâche planifiée « GEX capture », sans fenêtre) :
     pythonw.exe -m gex.capture
 
+Avec GEX_ENGINE=1 (à définir aussi pour le dashboard), ce process devient le
+MOTEUR : il porte en plus la récupération des chaînes, leurs calculs et les
+indicateurs /scalp, publiés dans data/live/ (cf. gex/livestate.py).
+
 Le dashboard s'y branche si `GEX_CAPTURE_URL` est défini (cf. gex/run.py).
 Le redémarrer, ou l'arrêter, n'interrompt ni la capture ni les écritures.
 """
@@ -23,6 +27,7 @@ import time
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
+from . import capturebus, livestate, scheduler
 from .capturebus import DEFAULT_PORT, bind_hosts, serve
 from .flowtape import TAPE
 from .logsetup import setup_logging
@@ -55,14 +60,27 @@ def attendre_spot(quotes=QUOTES, symboles=("SPX", "NDX", "SPY", "QQQ"),
 
 def main(host=None, port: int = DEFAULT_PORT) -> None:
     setup_logging(filename="capture.log")
-    log.info("Process capture : démarrage")
+    capturebus.IS_CAPTURE_PROCESS = True
+    engine = livestate.enabled()
+    log.info("Process capture : démarrage%s", " (mode MOTEUR)" if engine else "")
     sched = BackgroundScheduler(timezone="America/New_York")
     add_flush_jobs(sched)
+    if engine:
+        # Mode moteur : ce process récupère et calcule AUSSI les chaînes et les
+        # indicateurs /scalp, et les publie (gex/livestate.py) ; le dashboard
+        # ne fait plus que les lire.
+        scheduler.PUBLISH_STATE = True
+        scheduler.add_ingest_jobs(sched)
     sched.start()
     QUOTES.start()          # requis par la construction de l'univers du tape (spots)
     CAPTURE.start()         # les ticks ne dépendent pas du spot : on ne les fait pas attendre
     attendre_spot()         # le tape, lui, a besoin du premier prix pour son univers
     TAPE.start()
+    if engine:
+        scheduler.start_initial_pulls()
+        from . import app as app_mod
+        app_mod.PUBLISH_INDICATORS = True
+        app_mod.start_scalp_indicator_scheduler()
     threading.current_thread().name = "capture-main"
     # bloque : c'est ce qui garde le process en vie. `ticks=CAPTURE` fait relayer
     # le dernier prix réellement échangé NQ/ES au dashboard (cf. capturebus).

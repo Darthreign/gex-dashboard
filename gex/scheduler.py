@@ -15,7 +15,7 @@ from datetime import UTC, datetime, time, timedelta
 import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from . import backup, flowtape, idxopt, metrics, rates, roll, store
+from . import backup, flowtape, idxopt, metrics, rates, roll, store, vxn
 from .config import SETTINGS, UNDERLYINGS
 from .ingest import ChainSnapshot, fetch_chain, fetch_index_spot
 from .metrics import ET, SummaryMetrics
@@ -56,6 +56,28 @@ class GlobalState:
 
 STATE = GlobalState()
 
+# Processus MOTEUR (cf. gex/livestate.py) : chaque mise à jour de STATE est
+# aussi publiée pour le(s) processus web. Activé par gex.capture en mode moteur.
+PUBLISH_STATE = False
+
+
+def set_state(key: str, snap: ChainSnapshot, enriched: pd.DataFrame,
+              summary: SummaryMetrics) -> None:
+    """Seul point d'écriture d'une chaîne dans STATE (et de sa publication)."""
+    st = STATE.get(key)
+    with STATE.lock:
+        st.snapshot = snap
+        st.enriched = enriched
+        st.summary = summary
+        st.last_feed_ts = snap.feed_timestamp
+        STATE.last_error = None
+    if PUBLISH_STATE:
+        from . import livestate
+        try:
+            livestate.publish_state(key, snap, enriched, summary)
+        except Exception:  # noqa: BLE001 — la publication ne doit pas casser l'ingestion
+            log.exception("Publication de l'état %s échouée", key)
+
 
 def pull_symbol(symbol: str, persist_snapshot: bool) -> None:
     u = UNDERLYINGS[symbol]
@@ -82,12 +104,7 @@ def pull_symbol(symbol: str, persist_snapshot: bool) -> None:
         store.save_snapshot(symbol, enriched, now)
         store.append_history(summary.as_row())
 
-    with STATE.lock:
-        st.snapshot = snap
-        st.enriched = enriched
-        st.summary = summary
-        st.last_feed_ts = snap.feed_timestamp
-        STATE.last_error = None
+    set_state(symbol, snap, enriched, summary)
     log.info(
         "%s pull ok — spot=%.2f netGEX=%.2f Bn zeroG=%s basis=%s",
         symbol, snap.spot, summary.net_gex / 1e9,
@@ -245,12 +262,7 @@ def _seed_native_state(code: str, df: pd.DataFrame, ts: datetime) -> SummaryMetr
     """Construit (ChainSnapshot, SummaryMetrics) depuis `df`/`ts` et peuple
     STATE — factorisé entre le chemin cache et le chemin collecte live."""
     snap, summary = build_native_summary(code, df, ts)
-    st = STATE.get(code)
-    with STATE.lock:
-        st.snapshot = snap
-        st.enriched = df
-        st.summary = summary
-        st.last_feed_ts = snap.feed_timestamp
+    set_state(code, snap, df, summary)
     return summary
 
 
@@ -306,7 +318,25 @@ def pull_native_options() -> None:
             log.exception("%s : échec de la collecte native", code)
 
 
-def pull_native_options_fast() -> None:
+def archive_open_interest() -> None:
+    """Archive quotidienne de l'open interest NQ sur la chaîne COMPLÈTE
+    (data/oi/NQ/<jour>.parquet). Les snapshots ne gardent que la fenêtre
+    filtrée (~3 échéances, ±8 % du spot) : sans cette archive, l'OI des
+    trimestrielles, fins de mois et hebdos lointaines n'était conservé nulle
+    part — et son historique ne s'achète qu'au prix du schéma `statistics`
+    Databento (34 $ l'année, devis du 2026-10-10)."""
+    if not credentials_present():
+        return
+    try:
+        df = futopt.collect_open_interest("NQ")
+        if df is not None and not df.empty:
+            path = store.save_open_interest("NQ", df, datetime.now(ET))
+            log.info("OI NQ archivé : %s", path.name)
+    except Exception:  # noqa: BLE001 — un échec ne doit rien casser d'autre
+        log.exception("NQ : échec de l'archivage de l'open interest")
+
+
+def pull_native_options_fast(persist: bool = False) -> None:
     """Chaînes d'options natives NQ et ES — FENÊTRE RESSERRÉE (0DTE/1DTE,
     `futopt.FAST_TRADING_DAYS` jours de BOURSE) : moins de contrats à
     souscrire que la fenêtre large, donc une salve dxFeed nettement plus
@@ -334,9 +364,12 @@ def pull_native_options_fast() -> None:
             if df is None or df.empty:
                 continue
             now = datetime.now(ET)
+            if persist:
+                store.save_snapshot(code, df, now)
             summary = _seed_native_state(code, df, now)
-            log.info("%s (natif, rapide) pull ok — spot=%.2f netGEX=%.2f Bn",
-                     code, summary.spot, summary.net_gex / 1e9)
+            log.info("%s (natif, rapide%s) pull ok — spot=%.2f netGEX=%.2f Bn",
+                     code, ", enregistré" if persist else "", summary.spot,
+                     summary.net_gex / 1e9)
         except Exception:  # noqa: BLE001 — un échec ne doit rien casser d'autre
             log.exception("%s : échec de la collecte native rapide", code)
 
@@ -379,6 +412,24 @@ def pull_native_index() -> None:
                      f"{summary.zero_gamma:.0f}" if summary.zero_gamma else "n/a")
         except Exception:  # noqa: BLE001 — un échec ne doit rien casser d'autre
             log.exception("%s : échec de la chaîne d'indice native", symbol)
+
+
+def pull_vxn_live() -> None:
+    """Un point de VXN maison (gex/vxn.py), seulement en séance cash : les
+    options NDX ne cotent pas en dehors."""
+    if not credentials_present() or not market_is_open():
+        return
+    try:
+        vxn.update_live()
+    except Exception:  # noqa: BLE001 — un échec ne doit rien casser d'autre
+        log.exception("VXN maison : échec")
+
+
+def refresh_vxn_daily() -> None:
+    try:
+        vxn.refresh_cboe_daily()
+    except Exception:  # noqa: BLE001
+        log.exception("VXN officiel CBOE : échec du rafraîchissement")
 
 
 def _flush_bars(bars: list, source: str) -> None:
@@ -583,10 +634,52 @@ def resolve_scalp_signals(now: datetime | None = None) -> None:
         log.exception("Résolution des signaux /scalp échouée")
 
 
-def start_scheduler(embedded_capture: bool = True) -> BackgroundScheduler:
+def start_scheduler(embedded_capture: bool = True, ingest: bool = True) -> BackgroundScheduler:
     """`embedded_capture=False` : la capture (ticks, tape, bougies) vit dans un
-    autre process, le dashboard n'écrit donc AUCUN de ces flux."""
+    autre process, le dashboard n'écrit donc AUCUN de ces flux.
+    `ingest=False` : un processus MOTEUR séparé récupère et calcule les
+    chaînes (cf. gex/livestate.py) ; ce processus web ne garde que le taux du
+    jour (recalculs de greeks) et la vidange du tampon de bougies."""
     sched = BackgroundScheduler(timezone="America/New_York")
+    if embedded_capture:
+        add_flush_jobs(sched)
+    else:
+        sched.add_job(discard_bars, "interval", seconds=30, max_instances=1,
+                      coalesce=True)
+    if not ingest:
+        sched.add_job(rates.refresh, "cron", day_of_week="mon-fri", hour=8, minute=15)
+        sched.start()
+        threading.Thread(target=rates.refresh, daemon=True).start()
+        return sched
+    add_ingest_jobs(sched)
+    sched.start()
+    start_initial_pulls()
+    return sched
+
+
+def add_ingest_jobs(sched: BackgroundScheduler) -> None:
+    """Récupération des chaînes et tâches qui en dépendent : portées par le
+    dashboard en mode autonome, par le processus moteur sinon."""
+    # Encours des ETF à levier (page /moc, cf. gex/letf_aum.py) : chaque soir
+    # de semaine, après la publication des valeurs liquidatives, et au
+    # démarrage si le fichier est absent ou périmé.
+    from . import letf_aum
+    sched.add_job(letf_aum.update, "cron", day_of_week="mon-fri", hour=18, minute=10,
+                  max_instances=1, coalesce=True, misfire_grace_time=6 * 3600)
+    # Historique de validation de la page /moc (gex/moc_report.py) : complété
+    # chaque soir de semaine, après la clôture et le vidage des ticks de 16h00,
+    # au lieu d'attendre un lancement manuel du rapport (demande de
+    # l'utilisateur, 2026-10-24). Séances manquantes seulement.
+    from . import moc_report
+    sched.add_job(moc_report.update_all, "cron", day_of_week="mon-fri", hour=16, minute=30,
+                  max_instances=1, coalesce=True, misfire_grace_time=6 * 3600,
+                  id="moc_history")
+    # rattrapage au démarrage (séances manquées pendant un arrêt)
+    sched.add_job(moc_report.update_all, "date",
+                  run_date=datetime.now(ET) + timedelta(seconds=150))
+    if letf_aum.is_stale():
+        sched.add_job(letf_aum.update, "date",
+                      run_date=datetime.now(ET) + timedelta(seconds=90))
     sched.add_job(
         pull_all,
         "interval",
@@ -594,11 +687,6 @@ def start_scheduler(embedded_capture: bool = True) -> BackgroundScheduler:
         max_instances=1,
         coalesce=True,
     )
-    if embedded_capture:
-        add_flush_jobs(sched)
-    else:
-        sched.add_job(discard_bars, "interval", seconds=30, max_instances=1,
-                      coalesce=True)
     # Options natives NQ/ES — fenêtre LARGE (14 j) : 2 fois/jour seulement
     # depuis le 2026-09-23 (cf. pull_native_options), la fraîcheur intraday
     # étant désormais du ressort de pull_native_options_fast ci-dessous.
@@ -607,6 +695,10 @@ def start_scheduler(embedded_capture: bool = True) -> BackgroundScheduler:
     # au rythme rapide.
     sched.add_job(pull_native_options, "cron", day_of_week="mon-fri",
                   hour="10,14", minute=0, max_instances=1, coalesce=True)
+    # OI de la chaîne NQ complète, une fois par jour : après le Daily Bulletin
+    # FINAL de CME (10h CT = 11h ET), qui fixe l'OI de règlement de la veille.
+    sched.add_job(archive_open_interest, "cron", day_of_week="mon-fri",
+                  hour=11, minute=15, max_instances=1, coalesce=True)
     # Ouverture de la séance CME du dimanche soir (~18h ET = 00h Paris,
     # cf. MARKET_OPEN/market_is_open ci-dessus pour la distinction avec les
     # heures de marché CASH) : les 0DTE du lundi commencent à se négocier dès
@@ -628,11 +720,32 @@ def start_scheduler(embedded_capture: bool = True) -> BackgroundScheduler:
     # cadence bien plus serrée sans reproduire le coût qui justifiait 15 min.
     sched.add_job(pull_native_options_fast, "interval", minutes=3,
                   max_instances=1, coalesce=True)
+    # Snapshot NQ/ES ENREGISTRÉ juste avant 15h45 pour le rapport MOC
+    # (moc_report.snapshot_at lit le dernier snapshot <= 15h45) : sans lui,
+    # les options sur futures manquaient à l'estimation depuis le 24/09 (seules
+    # les collectes larges de 10h/14h étaient sur disque). Fenêtre rapide
+    # (0DTE/1DTE, ce qui pèse à la clôture) : la large (~90-280 s par
+    # sous-jacent) risquerait de finir après 15h45 et d'être ignorée.
+    sched.add_job(pull_native_options_fast, "cron", day_of_week="mon-fri",
+                  hour=15, minute=36, kwargs={"persist": True},
+                  max_instances=1, coalesce=True, id="native_moc_snapshot")
     # Chaînes d'indice natives : ~20 s par chaîne (contre ~90 s sur future),
     # donc une cadence bien plus serrée — supprimer un retard de 15 min pour
     # rafraîchir toutes les 15 min n'aurait aucun sens.
     sched.add_job(pull_native_index, "interval", minutes=3,
                   max_instances=1, coalesce=True)
+    # VXN maison : chaîne NDX COMPLÈTE toutes les 15 min (~3-4 min de collecte,
+    # la ±8 % à 3 min ci-dessus est trop étroite pour 30 jours). Les options
+    # NDX n'ont pas de séance étendue : 9h30-16h15 ET (cf. market_is_open).
+    sched.add_job(pull_vxn_live, "cron", day_of_week="mon-fri", hour="9-16",
+                  minute="0,15,30,45", max_instances=1, coalesce=True)
+    # VXN officiel CBOE (quotidien, gratuit). L'heure de publication de la
+    # séance du jour varie (26/10 : présente à 18h17 ET ; 27/10 : absente à
+    # 18h29 ET) : trois tentatives, le fichier étant réécrit en entier.
+    sched.add_job(refresh_vxn_daily, "cron", day_of_week="mon-fri", hour="19,21",
+                  minute=0, max_instances=1, coalesce=True)
+    sched.add_job(refresh_vxn_daily, "cron", day_of_week="tue-sat", hour=7, minute=0,
+                  max_instances=1, coalesce=True, id="vxn_daily_lendemain")
     sched.add_job(push_data_repo, "cron", day_of_week="mon-fri", hour=16, minute=20)
     # Sauvegarde distante après le push git : elle porte ce que GitHub refuse
     # (archives Databento de plus de 100 Mo). Sans rclone configuré, l'appel
@@ -646,7 +759,9 @@ def start_scheduler(embedded_capture: bool = True) -> BackgroundScheduler:
     # calibration a posteriori, pas une donnée de marché — 2 min suffit large.
     sched.add_job(resolve_scalp_signals, "interval", minutes=2, max_instances=1,
                   coalesce=True)
-    sched.start()
+
+
+def start_initial_pulls() -> None:
     # Premier chargement du taux au démarrage (dans un thread : ne pas bloquer
     # le lancement sur un appel réseau ; repli sur la constante si indisponible).
     threading.Thread(target=rates.refresh, daemon=True).start()
@@ -659,4 +774,3 @@ def start_scheduler(embedded_capture: bool = True) -> BackgroundScheduler:
     threading.Thread(target=pull_native_options_fast, daemon=True).start()
     threading.Thread(target=pull_native_options, daemon=True).start()
     threading.Thread(target=pull_native_index, daemon=True).start()
-    return sched

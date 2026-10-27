@@ -27,7 +27,7 @@ moins que rien dans un message de trading.
 | Semis / mégacaps / top 30 Nasdaq-100 (cf. liste complète plus bas) | ✅ |
 | **Taux 2Y / 10Y** | ✅ futures **ZT / ZN** |
 | **Intermarket** | ✅ **CL** (WTI), **GC** (or), **6E** (EUR/USD) |
-| Volatilité implicite | ⚠️ VIX seulement (VXN et VOLQ inaccessibles) |
+| Volatilité implicite | ✅ **VIX** (S&P 500) et **VXN** (Nasdaq-100, via `/api/v1/vxn`) — VOLQ inaccessible |
 | Calendrier macro + jours fériés + earnings | ✅ |
 | **Breadth de marché réel** (TICK, A/D, TRIN) | ❌ **Non disponible** — substitut ci-dessous |
 
@@ -71,9 +71,9 @@ hausse/baisse global.
 >   Un timeout qui se déclenche = source « Non disponible », PAS une
 >   erreur qui bloque le brief.
 > - **Journalise chaque étape** en ajoutant une ligne à
->   `D:\Gex\logs\premarket-nq.log` (créer le dossier `logs/` s'il n'existe
+>   `D:/Gex/logs/premarket-nq.log` (créer le dossier `logs/` s'il n'existe
 >   pas) via Bash, par exemple :
->   `echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) matin debut-dashboard" >> D:\Gex\logs\premarket-nq.log`
+>   `echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) matin debut-dashboard" >> D:/Gex/logs/premarket-nq.log`
 >   Une ligne avant et après CHAQUE source consultée (dashboard, calendriers,
 >   ticks, MCP gex-data), plus une au tout début et une à l'écriture finale
 >   du fichier. Si une exécution se bloque à nouveau, ce log dira exactement
@@ -85,6 +85,15 @@ continue avec ce que tu as :
 - `/api/v1/NQ/levels` — Gamma Flip, HVL, Call Wall, Put Support, 1D min/max, murs
 - `/api/v1/NQ/session_context` — contexte de séance
 - `/api/v1/vix` — VIX et son grade
+- `/api/v1/vxn` — VXN (vol implicite du Nasdaq-100, la plus pertinente pour le
+  NQ). `source` dit ce qui est servi : `calc` = **recalculé** en séance à partir
+  des options NDX (toutes les 15 min, 9h30-16h ET, non officiel mais validé à
+  ±0,3 pt de la clôture CBOE) ; `officiel` = dernière **clôture publiée par le
+  CBOE**. Mode `matin` : cite la clôture officielle de la veille (`officiel`).
+  Modes `prebrief`/`ajustement` : cite la valeur recalculée si elle date du
+  jour, avec `variation_vs_cloture`. Écris toujours laquelle des deux tu cites
+  (« VXN recalculé » ou « VXN clôture CBOE »), jamais « VXN » tout court pour
+  une valeur recalculée.
 - `/api/v1/NQ/summary`, `/api/v1/NQ/strikes`, `/api/v1/NQ/regime`
 
 **Taux et intermarket** — spots temps réel via le flux courtier, clés `ZT`,
@@ -92,12 +101,12 @@ continue avec ce que tu as :
 du jour). ⚠️ PAS `/summary` — ces 5 axes n'ont pas de chaîne d'options
 (`role="context"` dans `gex/config.py`), `/summary` renvoie systématiquement
 404 pour eux (confirmé le 2026-09-23). Repli si l'endpoint ne répond pas : les
-bougies 1 min dans `D:\Gex\data\prices\<cle>\<jour>.parquet`.
+bougies 1 min dans `D:/Gex/data/prices/<cle>/<jour>.parquet`.
 
 **MCP `gex-data`** : `get_market_context`, `get_gex_summary`, `get_gex_by_strike`,
 `get_flow_delta`, `get_history`.
 
-**Calendriers** (`D:\Outils de backtest\data\`) — dossier EXTERNE au projet,
+**Calendriers** (`D:/Outils de backtest/data/`) — dossier EXTERNE au projet,
 autorisé via `permissions.additionalDirectories` dans `.claude/settings.local.json`.
 
 > ⚠️ **Ne bloque JAMAIS sur cet accès.** Tu tournes sans personne devant
@@ -126,21 +135,30 @@ autorisé via `permissions.additionalDirectories` dans `.claude/settings.local.j
 - `us_market_holidays.json` — vérifie toujours si le jour est férié ou une
   demi-séance.
 
-**Ticks NQ** (`D:\Gex\data\ticks\NQ\<jour>.parquet`, colonnes `ts` epoch UTC,
+**Ticks NQ** (`D:/Gex/data/ticks/NQ/<jour>.parquet`, colonnes `ts` epoch UTC,
 `price`, `volume`, `bid`, `ask`, `side`) — pour le range overnight et la
 volatilité réalisée. Trie **toujours** avec `kind="stable"`.
 
 ## Conversions horaires
 
 Toutes les heures affichées sont en **heure de Paris**. Les `time_et` des
-calendriers sont en heure de New York : convertis-les explicitement. La séance
-CME va de 18:00 ET à 16:59 ET (00:00 → 23:00 Paris en été).
+calendriers sont en heure de New York : convertis-les explicitement, avec le
+**vrai fuseau**, jamais un « +6 h » fixe. L'écart vaut 6 h en temps normal mais
+**5 h** les semaines où un seul des deux pays a changé d'heure (fin mars, fin
+octobre) : l'open US tombe alors à 14h30 Paris, pas 15h30. PowerShell :
+`[System.TimeZoneInfo]::ConvertTime([datetime]'AAAA-MM-JJ HH:mm', [System.TimeZoneInfo]::FindSystemTimeZoneById('Eastern Standard Time'), [System.TimeZoneInfo]::FindSystemTimeZoneById('Romance Standard Time'))`.
+La séance CME va de 18:00 ET à 16:59 ET (00:00 → 23:00 Paris en temps normal).
+
+Les créneaux de publication des modes `prebrief`, `ajustement` et
+`ajustement2` sont fixés en **heure de New York** (9h15, 9h45, 10h15-10h45
+ET) ; les heures de Paris citées ci-dessous (15h15, 15h40…) sont celles du
+temps normal, à décaler d'une heure les semaines d'écart de 5 h.
 
 ---
 
 ## Mode `matin` — publié à 8h30, le plan de la journée
 
-Écris dans `D:\Gex\data\briefs\matin.md`. **1200 mots maximum.**
+Écris dans `D:/Gex/data/briefs/matin.md`. **1200 mots maximum.**
 
 C'est le brief qu'on lit avec le café : il sert à **planifier la journée**, pas
 à lire le marché en direct. À 8h30 Paris il est 2h30 à New York — le cash
@@ -172,7 +190,7 @@ américain dort, seuls les futures et les chaînes natives tournent.
 
 ## Mode `prebrief` — publié à 15h15, avant l'open
 
-Écris dans `D:\Gex\data\briefs\prebrief.md`. Format Markdown, **1500 mots
+Écris dans `D:/Gex/data/briefs/prebrief.md`. Format Markdown, **1500 mots
 maximum**, lisible en 90 secondes sur mobile.
 
 1. **Régime en 20 secondes** — 3 à 5 phrases.
@@ -204,7 +222,7 @@ maximum**, lisible en 90 secondes sur mobile.
 
 Lis d'abord `prebrief.md` : c'est ta **mémoire** du créneau précédent, car
 chaque exécution démarre sans contexte. Écris dans
-`D:\Gex\data\briefs\ajustement.md`. **600 mots maximum.**
+`D:/Gex/data/briefs/ajustement.md`. **600 mots maximum.**
 
 N'écris **que ce qui a changé**. Ne reconstruis pas le brief.
 
@@ -241,7 +259,7 @@ dans `econ_calendar.json`, la seule confirmation fiable qu'il est publié) et
 te le passe en argument : nom, heure Paris, et les trois chiffres
 `forecast`/`previous`/`actual` tels quels.
 
-Écris dans `D:\Gex\data\briefs\ajustement2.md`. **400 mots maximum** — plus
+Écris dans `D:/Gex/data/briefs/ajustement2.md`. **400 mots maximum** — plus
 court que l'ajustement standard : une réaction ciblée à UN événement, pas un
 état complet. Lis `ajustement.md` (le point précédent) comme mémoire.
 
