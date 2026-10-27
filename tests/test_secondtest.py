@@ -41,7 +41,12 @@ def test_meme_resultat_que_letude(seed):
             live.append((ev["ts"], ev["dir"], ev["extreme"], ev["duree_s"]))
     batch = _batch(ts, px)
     assert len(batch) > 0
-    assert sorted(live) == pytest.approx(batch)
+    live = sorted(live)
+    # pytest.approx refuse les structures imbriquées dans les versions récentes
+    # (liste de tuples) : comparaison élément par élément.
+    assert len(live) == len(batch)
+    for got, want in zip(live, batch):
+        assert got == pytest.approx(want)
 
 
 def test_evenement_et_affichage_limite():
