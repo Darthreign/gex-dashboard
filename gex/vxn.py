@@ -216,6 +216,48 @@ def update_live() -> dict | None:
     return res
 
 
+_LATEST_CACHE: dict = {}
+LATEST_CACHE_S = 60          # un point toutes les 15 min : inutile de relire plus souvent
+
+
+def latest(now_et: datetime | None = None) -> dict:
+    """VXN à afficher : le dernier point recalculé s'il date de la séance du
+    jour (heure de New York), sinon la dernière clôture officielle CBOE. Les
+    deux sont renvoyés, chacun avec sa date et sa provenance, pour que
+    l'affichage ne présente jamais le calcul maison comme l'indice officiel."""
+    import time as _time
+    from . import store
+    now_et = now_et or datetime.now(ET)
+    hit = _LATEST_CACHE.get("v")
+    if hit and _time.monotonic() - hit[0] < LATEST_CACHE_S and hit[2] == now_et.date():
+        return hit[1]
+    calc = None
+    for day in reversed(store.price_days(PRICES_KEY)[-5:]):
+        bars = store.load_prices(PRICES_KEY, day)
+        if not bars.empty:
+            last = bars.sort_values("timestamp").iloc[-1]
+            calc = {"value": float(last["close"]), "ts": pd.Timestamp(last["timestamp"]).isoformat()}
+            break
+    official = None
+    from .config import SETTINGS
+    path = SETTINGS.data_dir / "history" / f"{DAILY_KEY}.parquet"
+    if path.exists():
+        d = pd.read_parquet(path)
+        if not d.empty:
+            official = {"value": float(d["close"].iloc[-1]), "date": str(d["date"].iloc[-1])}
+    out: dict = {"available": bool(calc or official), "calc": calc, "officiel": official}
+    if calc and calc["ts"][:10] == now_et.date().isoformat():
+        out.update(value=calc["value"], source="calc", asof=calc["ts"])
+    elif official:
+        out.update(value=official["value"], source="officiel", asof=official["date"])
+    elif calc:
+        out.update(value=calc["value"], source="calc", asof=calc["ts"])
+    if out.get("source") == "calc" and official and official["date"] < calc["ts"][:10]:
+        out["variation_vs_cloture"] = round(calc["value"] - official["value"], 2)
+    _LATEST_CACHE["v"] = (_time.monotonic(), out, now_et.date())
+    return out
+
+
 def parse_cboe_daily(text: str) -> pd.DataFrame:
     df = pd.read_csv(io.StringIO(text))
     return pd.DataFrame({

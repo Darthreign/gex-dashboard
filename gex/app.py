@@ -1707,6 +1707,11 @@ def scalp_head(symbol: str, lang: str, ctx: dict, spot: float) -> html.Div:
                 else t(lang, "sc_vix_low_note") if vix < digest.VIX_BAS else "")
         chips.append(html.Span(f"VIX {vix:.1f} {digest.vix_grade_label(lang, g['label'])}{note}",
                                className="sc-chip"))
+    vx = _vxn_display()
+    if vx is not None:
+        txt = (t(lang, "sc_vxn_calc", v=f"{vx['value']:.1f}") if vx["source"] == "calc"
+               else t(lang, "sc_vxn_close", v=f"{vx['value']:.1f}", d=_vxn_date(vx["asof"])))
+        chips.append(html.Span(txt, className="sc-chip"))
     ext_txt = (t(lang, "sc_since_open", pts=_sc_fmt(ext)) if ext is not None else "")
     return html.Div([
         html.Div([html.Span(f"{spot:,.2f}", id="sc-live-price", className="sc-spot"),
@@ -3790,7 +3795,40 @@ def build_cards(symbol: str, lang: str, xf=None, scale: str | None = None) -> li
         card(t(lang, "card_gex_0dte"), f"{s.net_gex_0dte / 1e9:+.1f} $Bn"),
         card(t(lang, "card_pc_oi"), f"{s.pc_oi:.2f}"),
         card(t(lang, "card_pc_vol"), f"{s.pc_volume:.2f}"),
+        *_vxn_card(symbol, lang),
     ]
+
+
+def _vxn_display() -> dict | None:
+    """VXN à afficher (cf. gex/vxn.latest) ; None s'il n'y a rien, ou si la
+    lecture échoue — une tuile manquante ne doit jamais casser la page."""
+    try:
+        from . import vxn
+        v = vxn.latest()
+    except Exception:  # noqa: BLE001
+        log.exception("VXN : lecture impossible")
+        return None
+    return v if v.get("available") and "value" in v else None
+
+
+def _vxn_date(asof: str) -> str:
+    return f"{asof[8:10]}/{asof[5:7]}"
+
+
+def _vxn_card(symbol: str, lang: str) -> list:
+    """Tuile VXN, pour les sous-jacents de la famille Nasdaq seulement : c'est
+    leur vol implicite (le VIX, lui, est celle du S&P 500)."""
+    u = UNDERLYINGS.get(symbol)
+    if u is None or u.family != "ND":
+        return []
+    vx = _vxn_display()
+    if vx is None:
+        return []
+    if vx["source"] == "calc":
+        sub = t(lang, "card_vxn_calc", hhmm=vx["asof"][11:16])
+    else:
+        sub = t(lang, "card_vxn_close", d=_vxn_date(vx["asof"]))
+    return [card(t(lang, "card_vxn"), f"{vx['value']:.1f}", sub)]
 
 
 # --- Export d'un graphique en image (pour le bot Discord, etc.) -----------

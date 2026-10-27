@@ -27,7 +27,7 @@ moins que rien dans un message de trading.
 | Semis / mégacaps / top 30 Nasdaq-100 (cf. liste complète plus bas) | ✅ |
 | **Taux 2Y / 10Y** | ✅ futures **ZT / ZN** |
 | **Intermarket** | ✅ **CL** (WTI), **GC** (or), **6E** (EUR/USD) |
-| Volatilité implicite | ⚠️ VIX seulement (VXN et VOLQ inaccessibles) |
+| Volatilité implicite | ✅ **VIX** (S&P 500) et **VXN** (Nasdaq-100, via `/api/v1/vxn`) — VOLQ inaccessible |
 | Calendrier macro + jours fériés + earnings | ✅ |
 | **Breadth de marché réel** (TICK, A/D, TRIN) | ❌ **Non disponible** — substitut ci-dessous |
 
@@ -85,6 +85,15 @@ continue avec ce que tu as :
 - `/api/v1/NQ/levels` — Gamma Flip, HVL, Call Wall, Put Support, 1D min/max, murs
 - `/api/v1/NQ/session_context` — contexte de séance
 - `/api/v1/vix` — VIX et son grade
+- `/api/v1/vxn` — VXN (vol implicite du Nasdaq-100, la plus pertinente pour le
+  NQ). `source` dit ce qui est servi : `calc` = **recalculé** en séance à partir
+  des options NDX (toutes les 15 min, 9h30-16h ET, non officiel mais validé à
+  ±0,3 pt de la clôture CBOE) ; `officiel` = dernière **clôture publiée par le
+  CBOE**. Mode `matin` : cite la clôture officielle de la veille (`officiel`).
+  Modes `prebrief`/`ajustement` : cite la valeur recalculée si elle date du
+  jour, avec `variation_vs_cloture`. Écris toujours laquelle des deux tu cites
+  (« VXN recalculé » ou « VXN clôture CBOE »), jamais « VXN » tout court pour
+  une valeur recalculée.
 - `/api/v1/NQ/summary`, `/api/v1/NQ/strikes`, `/api/v1/NQ/regime`
 
 **Taux et intermarket** — spots temps réel via le flux courtier, clés `ZT`,

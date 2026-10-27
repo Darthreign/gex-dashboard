@@ -71,3 +71,41 @@ def test_parse_cboe_daily():
     df = vxn.parse_cboe_daily(txt)
     assert df["date"].tolist() == [date(2026, 10, 8), date(2026, 10, 9)]
     assert df["close"].iloc[-1] == 20.55
+
+
+def _store_vxn(tmp_path, monkeypatch, calc_rows, daily_rows):
+    from gex import store
+    from gex.config import SETTINGS
+    monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
+    vxn._LATEST_CACHE.clear()
+    if calc_rows:
+        store.append_prices(vxn.PRICES_KEY, calc_rows, calc_rows[0]["timestamp"])
+    if daily_rows:
+        p = tmp_path / "history" / f"{vxn.DAILY_KEY}.parquet"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(daily_rows).to_parquet(p, index=False)
+
+
+def test_latest_prefere_le_calcul_du_jour(tmp_path, monkeypatch):
+    ts = datetime(2026, 10, 27, 16, 0)
+    _store_vxn(tmp_path, monkeypatch,
+               [{"timestamp": ts, "open": 25.3, "high": 25.3, "low": 25.3, "close": 25.3}],
+               [{"date": date(2026, 10, 26), "open": 28.2, "high": 28.3, "low": 25.4, "close": 26.4}])
+    out = vxn.latest(datetime(2026, 10, 27, 18, 0, tzinfo=ET))
+    assert out["source"] == "calc" and out["value"] == 25.3
+    assert out["variation_vs_cloture"] == pytest.approx(-1.1)
+    assert out["officiel"]["date"] == "2026-10-26"
+
+
+def test_latest_le_lendemain_matin_sert_la_cloture_officielle(tmp_path, monkeypatch):
+    _store_vxn(tmp_path, monkeypatch,
+               [{"timestamp": datetime(2026, 10, 27, 16, 0), "open": 25.3, "high": 25.3,
+                 "low": 25.3, "close": 25.3}],
+               [{"date": date(2026, 10, 27), "open": 26.0, "high": 26.5, "low": 25.0, "close": 25.4}])
+    out = vxn.latest(datetime(2026, 10, 28, 8, 0, tzinfo=ET))
+    assert out["source"] == "officiel" and out["value"] == 25.4 and out["asof"] == "2026-10-27"
+
+
+def test_latest_sans_donnee(tmp_path, monkeypatch):
+    _store_vxn(tmp_path, monkeypatch, [], [])
+    assert vxn.latest(datetime(2026, 10, 27, 10, 0, tzinfo=ET))["available"] is False

@@ -464,6 +464,19 @@ def register_api(app) -> None:
                         "above": bool(v > digest_mod.VIX_SEUIL),
                         "grade": digest_mod.vix_grade(float(v))})
 
+    @server.route("/api/v1/vxn")
+    def _vxn():
+        """VXN : recalculé en séance (méthode CBOE sur la chaîne NDX, non
+        officiel) ou, à défaut, dernière clôture officielle CBOE. `source`
+        dit lequel est affiché ; les deux sont détaillés."""
+        from . import vxn as vxn_mod
+        out = dict(vxn_mod.latest())
+        if "value" in out:
+            out["value"] = round(out["value"], 2)
+        out["note"] = ("calc = recalculé à partir des options NDX, non officiel ; "
+                       "officiel = clôture publiée par le CBOE")
+        return jsonify(out)
+
     @server.route("/api/v1/<symbol>/spot")
     def _context_spot(symbol):
         """Spot temps réel + variation du jour pour un sous-jacent SANS chaîne
