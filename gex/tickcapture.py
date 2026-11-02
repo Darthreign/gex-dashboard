@@ -91,6 +91,11 @@ ABSORPTION_FRESH_S = 20.0
 # Les deux futures suivis : le libellé sert de dossier de stockage
 # (data/ticks/NQ) et de code produit pour résoudre les contrats (cf. gex/roll).
 TRACKED_FUTURES: tuple[str, ...] = ("NQ", "ES")
+# Ticks seuls : écrits dans data/ticks/<produit> et servis par gex/ticksapi, sans
+# aucune analyse (absorption, profil, bougies) ni abonnement aux cotations, dont
+# le débit sur ces produits pèserait sur le process. GC et CL ont déjà leurs
+# bougies via rtquote : celles de la capture les écriraient en double.
+TICK_ONLY_FUTURES: tuple[str, ...] = ("MNQ", "MES", "MGC", "GC", "CL", "MCL")
 
 # La session se recycle (reconnexion + reconstruction d'univers) à ce rythme :
 # suffisant pour rattraper un roll de contrat le jour dit et repartir sur une
@@ -123,8 +128,10 @@ class TickCapture:
     buffer sur disque toutes les ~30 s (cf. flush_ticks). Sans identifiants,
     `start()` est sans effet."""
 
-    def __init__(self, symbols: tuple[str, ...] = TRACKED_FUTURES) -> None:
+    def __init__(self, symbols: tuple[str, ...] = TRACKED_FUTURES + TICK_ONLY_FUTURES) -> None:
         self.symbols = tuple(symbols)
+        # dernier résultat de roll.resolve_pair : repli si l'API refuse un appel
+        self._pairs: dict[str, list[tuple[str, str]]] = {}
         self._buf: dict[str, dict[str, list[dict]]] = {}
         # ordre OFFICIEL des contrats par sous-jacent : [actif, suivant], tel que
         # le courtier les déclare. Sert de repli au choix de roll quand aucun
@@ -339,6 +346,8 @@ class TickCapture:
             # TOUJOURS bufferisé, même le contrat SUIVANT : c'est la comparaison
             # de volume des deux qui décide du dominant (cf. gex/roll), après coup.
             self._buf.setdefault(symbol, {}).setdefault(contract, []).append(row)
+            if symbol in TICK_ONLY_FUTURES:
+                return
             # ⚠️ Tout ce qui suit (spot affiché, absorption, volume profile,
             # bougie) est un agrégat PAR SOUS-JACENT, pas par contrat — il ne
             # doit voir que le contrat ACTIF déclaré par le courtier
@@ -449,9 +458,15 @@ class TickCapture:
         for label in self.symbols:
             try:
                 pair = roll.resolve_pair(label, access)
+                if pair:
+                    self._pairs[label] = pair
             except Exception:  # noqa: BLE001 — un référentiel muet n'en condamne pas deux
-                log.exception("Capture tick : contrats %s non résolus — exclu", label)
-                continue
+                pair = self._pairs.get(label)
+                if pair:
+                    log.warning("Capture tick : contrats %s non résolus — derniers connus", label)
+                else:
+                    log.exception("Capture tick : contrats %s non résolus — exclu", label)
+                    continue
             if not pair:
                 log.warning("Capture tick : aucun contrat %s — exclu", label)
                 continue
@@ -533,8 +548,7 @@ class TickCapture:
                     # TimeAndSale = chaque transaction ; Quote = tailles du meilleur
                     # bid/ask, rattachées à chaque transaction (cf. quote/record)
                     await send({"type": "FEED_SUBSCRIPTION", "channel": 1,
-                                "add": [{"type": t, "symbol": s}
-                                        for s in universe for t in ("TimeAndSale", "Quote")]})
+                                "add": subscriptions(universe)})
                     self._state = "connected"
                     log.info("Capture tick continue active — %s",
                              ", ".join(f"{lbl}:{code}={s}"
@@ -558,6 +572,14 @@ class TickCapture:
                 if time.monotonic() > deadline:
                     log.info("Capture tick : renouvellement périodique de la session")
                     return
+
+
+def subscriptions(universe: dict[str, tuple[str, str]]) -> list[dict]:
+    """TimeAndSale = chaque transaction ; Quote = tailles du meilleur bid/ask,
+    réservé aux produits analysés (cf. TICK_ONLY_FUTURES)."""
+    return [{"type": t, "symbol": s} for s, (label, _) in universe.items()
+            for t in (("TimeAndSale",) if label in TICK_ONLY_FUTURES
+                      else ("TimeAndSale", "Quote"))]
 
 
 def _vol(v) -> int:
