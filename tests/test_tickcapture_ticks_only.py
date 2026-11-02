@@ -1,7 +1,7 @@
-"""Produits en ticks seuls : écrits sur disque, sans analyse ni cotations."""
+"""Produits en ticks seuls : mêmes colonnes que NQ/ES sur disque, sans analyse."""
 from __future__ import annotations
 
-from gex import roll, tickcapture
+from gex import roll
 from gex.tickcapture import TickCapture
 
 UNIVERSE = {"/NQZ26:XCME": ("NQ", "/NQZ6"), "/GCZ26:XCEC": ("GC", "/GCZ6")}
@@ -30,11 +30,12 @@ def test_tous_les_produits_demandes_sont_suivis():
     assert {"NQ", "ES", "MNQ", "MES", "MGC", "GC", "CL", "MCL"} == set(TickCapture().symbols)
 
 
-def test_abonnement_sans_cotations_pour_les_ticks_seuls():
-    subs = tickcapture.subscriptions(UNIVERSE)
-    assert {"type": "TimeAndSale", "symbol": "/GCZ26:XCEC"} in subs
-    assert {"type": "Quote", "symbol": "/GCZ26:XCEC"} not in subs
-    assert {"type": "Quote", "symbol": "/NQZ26:XCME"} in subs
+def test_tailles_du_carnet_comme_nq_es():
+    tc = TickCapture()
+    tc.quote({"eventSymbol": "/GCZ26:XCEC", "bidSize": 5, "askSize": 7})
+    tc.record(UNIVERSE, _item("/GCZ26:XCEC"), 1_800_000_000.0)
+    row = tc.drain()["GC"]["/GCZ6"][0]
+    assert row["bid_size"] == 5 and row["ask_size"] == 7
 
 
 def test_erreur_du_courtier_garde_les_derniers_contrats(monkeypatch):

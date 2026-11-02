@@ -91,10 +91,10 @@ ABSORPTION_FRESH_S = 20.0
 # Les deux futures suivis : le libellé sert de dossier de stockage
 # (data/ticks/NQ) et de code produit pour résoudre les contrats (cf. gex/roll).
 TRACKED_FUTURES: tuple[str, ...] = ("NQ", "ES")
-# Ticks seuls : écrits dans data/ticks/<produit> et servis par gex/ticksapi, sans
-# aucune analyse (absorption, profil, bougies) ni abonnement aux cotations, dont
-# le débit sur ces produits pèserait sur le process. GC et CL ont déjà leurs
-# bougies via rtquote : celles de la capture les écriraient en double.
+# Ticks seuls : écrits dans data/ticks/<produit>, mêmes colonnes que NQ/ES, et
+# servis par gex/ticksapi, sans aucune analyse (absorption, profil, bougies). GC
+# et CL ont déjà leurs bougies via rtquote : celles de la capture les écriraient
+# en double.
 TICK_ONLY_FUTURES: tuple[str, ...] = ("MNQ", "MES", "MGC", "GC", "CL", "MCL")
 
 # La session se recycle (reconnexion + reconstruction d'univers) à ce rythme :
@@ -548,7 +548,8 @@ class TickCapture:
                     # TimeAndSale = chaque transaction ; Quote = tailles du meilleur
                     # bid/ask, rattachées à chaque transaction (cf. quote/record)
                     await send({"type": "FEED_SUBSCRIPTION", "channel": 1,
-                                "add": subscriptions(universe)})
+                                "add": [{"type": t, "symbol": s}
+                                        for s in universe for t in ("TimeAndSale", "Quote")]})
                     self._state = "connected"
                     log.info("Capture tick continue active — %s",
                              ", ".join(f"{lbl}:{code}={s}"
@@ -572,14 +573,6 @@ class TickCapture:
                 if time.monotonic() > deadline:
                     log.info("Capture tick : renouvellement périodique de la session")
                     return
-
-
-def subscriptions(universe: dict[str, tuple[str, str]]) -> list[dict]:
-    """TimeAndSale = chaque transaction ; Quote = tailles du meilleur bid/ask,
-    réservé aux produits analysés (cf. TICK_ONLY_FUTURES)."""
-    return [{"type": t, "symbol": s} for s, (label, _) in universe.items()
-            for t in (("TimeAndSale",) if label in TICK_ONLY_FUTURES
-                      else ("TimeAndSale", "Quote"))]
 
 
 def _vol(v) -> int:
