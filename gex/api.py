@@ -27,6 +27,7 @@ from flask import Flask, jsonify, request
 from . import broadcast, metrics
 from .metrics import ET, EXPIRY_BUCKETS
 from .scheduler import STATE
+from .ticksapi import register_ticks_api
 
 
 def _futures_last_price(symbol: str) -> float | None:
@@ -276,6 +277,7 @@ def register_api(app) -> None:
     instance Flask — pratique pour les tests, qui n'ont pas besoin de monter
     tout le dashboard."""
     server: Flask = app.server if hasattr(app, "server") else app
+    register_ticks_api(server)
 
     @server.after_request
     def _cors(resp):
