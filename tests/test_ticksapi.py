@@ -122,3 +122,13 @@ def test_limite_de_debit(env, monkeypatch):
     monkeypatch.setattr(ticksapi, "RATE_MAX", 2)
     _write(live, "NQ", "2026-10-30")
     assert [client.get("/api/v1/ticks/NQ/days", headers=AUTH).status_code for _ in range(3)] == [200, 200, 429]
+
+
+def test_historique_reconstruit_servi_si_l_export_n_a_pas_side(env, tmp_path):
+    client, _, full = env
+    side_root = tmp_path / "import" / "ticks_full_side"
+    _write(full, "NQ", "2024-08-06", side=False)
+    _write(side_root, "NQ", "2024-08-06")
+    assert client.get("/api/v1/ticks/NQ/days", headers=AUTH).get_json() == {"days": ["2024-08-06"]}
+    r = client.get("/api/v1/ticks/NQ/2024-08-06.parquet", headers=AUTH)
+    assert r.data == (side_root / "NQ" / "2024-08-06.parquet").read_bytes()

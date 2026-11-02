@@ -40,11 +40,13 @@ _hits_lock = threading.Lock()
 _schema_ok: dict[Path, tuple[int, int, bool]] = {}
 
 
-def _roots(product: str) -> tuple[Path, Path]:
+def _roots(product: str) -> tuple[Path, Path, Path]:
     """Dans l'ordre de préférence : l'export de fin de séance, définitif (repli
-    Databento si le live était incomplet), puis la capture live, seule à avoir
-    la séance en cours."""
-    return (SETTINGS.data_dir / "import" / "ticks_full" / product,
+    Databento si le live était incomplet) ; sa copie avec le côté agresseur
+    reconstruit pour l'historique ancien (scripts/rebuild_ticks_side.py) ; puis
+    la capture live, seule à avoir la séance en cours."""
+    imp = SETTINGS.data_dir / "import"
+    return (imp / "ticks_full" / product, imp / "ticks_full_side" / product,
             SETTINGS.data_dir / "ticks" / product)
 
 
