@@ -57,7 +57,8 @@ C = {
     "neg": "#e66767",   # GEX négatif / flux vendeur (rouge)
     "spot": "#ffffff",
     "zg": "#c98500",    # jaune sombre — Gamma Flip
-    "lvl": "#9085e9",   # violet — niveaux GEX 0DTE
+    "lvl": "#9085e9",   # violet — niveaux GEX 0DTE (mur à GEX net positif)
+    "lvlneg": "#e0709c",  # rose — mur à GEX net négatif (puts dominants)
     "hvl": "#199e70",   # aqua — HVL (bascule pondérée par le volume du jour)
     "cw": "#3987e5",    # bleu — Call Wall (résistance, au-dessus du spot)
     "ps": "#e66767",    # rouge — Put Support (support, sous le spot)
@@ -1725,6 +1726,23 @@ def scalp_head(symbol: str, lang: str, ctx: dict, spot: float) -> html.Div:
 _SC_KIND_COLOR = {"cw": "cw", "ps": "ps", "zg": "zg", "hvl": "hvl", "d1": "d1", "gex": "lvl"}
 
 
+def rung_color(r) -> str:
+    """Couleur d'un niveau de l'échelle : un mur GEX à GEX net NÉGATIF (puts
+    dominants, dealers courts gamma : le prix l'amplifie plutôt qu'il n'y
+    réagit) se distingue du positif (2026-11-04, demande de l'utilisateur)."""
+    if r.kind == "gex" and r.gex is not None and r.gex < 0:
+        return C["lvlneg"]
+    return C[_SC_KIND_COLOR[r.kind]]
+
+
+def rung_title(r) -> str:
+    """Étiquette d'un niveau sur le graphique : les murs GEX portent leur
+    signe et leur taille, comme le palier de gauche (« GEX2 +3.1 Bn »)."""
+    if r.kind == "gex" and r.gex is not None:
+        return f"{r.name} {r.gex / 1e9:+.1f} Bn".replace("-", "−")
+    return r.name
+
+
 def is_scalp_path(path: str | None) -> bool:
     """True pour `/scalp` (v2, en construction) ET `/scalpv1` (page actuelle,
     gelée) — les deux affichent aujourd'hui le même rendu, cf. commentaire du
@@ -1859,7 +1877,7 @@ def scalp_ladder(symbol: str, ctx: dict, spot: float, lang: str = "fr") -> html.
         if not spot_placed and r.price < spot:
             rows.append(spot_row)
             spot_placed = True
-        color = C[_SC_KIND_COLOR[r.kind]]
+        color = rung_color(r)
         cls = "sc-row" + (" sc-near" if r.near else "")
         if r is haut or r is bas:
             cls += " sc-next"
@@ -3111,8 +3129,8 @@ def _scalp_indicator_snapshot(symbol: str, ctx: dict, spot: float,
     pour autre chose (bougies volume, boucle SSE), pas la peine de lire
     `store.load_ticks` deux fois pour le même instant."""
     def ladder(keys, walls):
-        return [{"name": r.name, "price": r.price, "color": C[_SC_KIND_COLOR[r.kind]],
-                 "kind": r.kind}
+        return [{"name": rung_title(r), "price": r.price, "color": rung_color(r),
+                 "kind": r.kind, "gex": r.gex}
                 for r in scalp.build_ladder(symbol, spot, ctx["zg"], ctx["hvl"], keys, walls)]
     levels = ladder(ctx["keys"], ctx["walls"])
     levels_0dte = ladder(ctx.get("keys_0dte") or {}, ctx.get("walls_0dte") or [])
@@ -4352,6 +4370,15 @@ def create_app() -> Dash:
                                                        {"label": "Put Support", "value": "ps"},
                                                        {"label": "1D Min/Max", "value": "d1"},
                                                        {"label": "Murs GEX", "value": "gex"}]),
+                                html.Span("Murs GEX :", className="sc-set-lbl"),
+                                dcc.Checklist(id="scalp-set-gex-signs", inline=True,
+                                              className="check", persistence=True,
+                                              persistence_type="local",
+                                              value=["pos", "neg"],
+                                              options=[{"label": "+ positifs (violet)",
+                                                        "value": "pos"},
+                                                       {"label": "− négatifs (rose)",
+                                                        "value": "neg"}]),
                                 html.Span("Échéances :", className="sc-set-lbl"),
                                 dcc.RadioItems(id="scalp-set-expiry", inline=True, className="check",
                                                persistence=True, persistence_type="local",
@@ -5164,8 +5191,13 @@ def create_app() -> Dash:
                     const gs = window._gexSettings || {};
                     const kinds = gs.levelKinds;
                     const levelSrc = (gs.expiry === '0dte' && d.levels_0dte) ? d.levels_0dte : d.levels;
+                    const signs = gs.gexSigns;      // murs GEX : '+' positifs, '-' négatifs
                     const simpleLines = ind.levels ? (levelSrc || []).filter(function(lv) {
-                        return !kinds || !lv.kind || kinds.includes(lv.kind);
+                        if (kinds && lv.kind && !kinds.includes(lv.kind)) return false;
+                        if (signs && lv.kind === 'gex' && lv.gex != null) {
+                            return signs.includes(lv.gex > 0 ? 'pos' : 'neg');
+                        }
+                        return true;
                     }).map(function(lv) {
                         return st.series.createPriceLine({
                             price: lv.price, color: lv.color, lineWidth: 1,
@@ -5410,7 +5442,7 @@ def create_app() -> Dash:
         """
         function(merge, levels, expiry, absTotal, absRatio, hvlRatio, hvlDelta,
                  ofWindow, ofN, ofMode, ofOpts, emAnchor, emMult,
-                 confGap, confMin, confFams) {
+                 confGap, confMin, confFams, gexSigns) {
             const num = function(v, dflt) {
                 return (v === null || v === undefined || v === '' || isNaN(Number(v)))
                     ? dflt : Number(v);
@@ -5424,6 +5456,7 @@ def create_app() -> Dash:
                 hvlRatio: num(hvlRatio, 3),
                 hvlDelta: num(hvlDelta, 35) / 100,
             };
+            window._gexSettings.gexSigns = gexSigns || ['pos', 'neg'];
             window._gexSettings.confGap = num(confGap, null);
             window._gexSettings.confMin = Math.max(2, Math.round(num(confMin, 2)));
             window._gexSettings.confFamilies = confFams || null;
@@ -5459,6 +5492,7 @@ def create_app() -> Dash:
         Input("scalp-set-conf-gap", "value"),
         Input("scalp-set-conf-min", "value"),
         Input("scalp-set-conf-fams", "value"),
+        Input("scalp-set-gex-signs", "value"),
     )
 
     # Bascule V1/V2 du bandeau (cf. commentaire sur scalp-banner-version dans

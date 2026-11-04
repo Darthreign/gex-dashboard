@@ -149,5 +149,25 @@ def test_niveaux_0dte_fournis_a_cote_de_toutes_echeances(monkeypatch):
     tout = {lv["name"]: lv["price"] for lv in snap["levels"]}
     zero = {lv["name"]: lv["price"] for lv in snap["levels_0dte"]}
     assert tout["Call Wall"] == 30500.0 and zero["Call Wall"] == 30200.0
-    assert "GEX1" in tout and "GEX1" not in zero
+    assert "GEX1 +1.0 Bn" in tout and not any(n.startswith("GEX1") for n in zero)
     assert all("kind" in lv for lv in snap["levels"])
+
+
+def test_murs_gex_portent_leur_signe_et_leur_couleur():
+    from gex import scalp
+    r = scalp.build_ladder("NQ", 30000.0, None, None, None,
+                           [("GEX1", 30100.0, 3.1e9), ("GEX2", 29900.0, -2.4e9)])
+    pos = next(x for x in r if x.name == "GEX1")
+    neg = next(x for x in r if x.name == "GEX2")
+    assert app.rung_title(pos) == "GEX1 +3.1 Bn" and app.rung_title(neg) == "GEX2 \u22122.4 Bn"
+    assert app.rung_color(pos) == app.C["lvl"] and app.rung_color(neg) == app.C["lvlneg"]
+    cw = scalp.build_ladder("NQ", 30000.0, None, None, {"call_wall": 30200.0}, None)[0]
+    assert app.rung_title(cw) == "Call Wall" and app.rung_color(cw) == app.C["cw"]
+
+
+def test_reglage_des_signes_branche_sur_le_graphique():
+    """Le panneau ⚙ transmet `gexSigns` au graphique, qui masque un mur GEX
+    dont le signe est décoché (vérifié dans Chromium, cf. passation)."""
+    src = Path(app.__file__).read_text(encoding="utf-8")
+    assert 'id="scalp-set-gex-signs"' in src and 'Input("scalp-set-gex-signs", "value")' in src
+    assert "signs.includes(lv.gex > 0 ? 'pos' : 'neg')" in src
