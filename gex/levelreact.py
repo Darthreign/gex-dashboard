@@ -9,27 +9,30 @@ la mesure sur l'historique, sans rien caler sur les données :
   net| (convention dealer du tableau de bord : call +, put −, évalué à la
   clôture de la veille), chacun avec le signe de son GEX net ;
 - ZONE : un niveau GEX n'est pas une ligne. Autour de chaque niveau, une zone
-  de ± `ZONE_PTS` points (5 pts NQ, comme la tolérance de contact de
-  gex/confluence.py) ;
+  de ± `ZONE_PTS` points (20 pts NQ, demande de l'utilisateur). Elle sert
+  UNIQUEMENT à DÉTECTER le contact ; toutes les mesures se font depuis le
+  niveau EXACT du strike ;
 - contact : premier instant où le prix ENTRE dans la zone, par le côté d'où
   la fenêtre l'a trouvé (démarrer dans la zone, ou ne jamais l'atteindre, n'est
   pas un contact ; les contacts des 30 dernières minutes sont écartés : trop
   peu de temps pour se développer) ;
 - issue, SANS limite de temps (jusqu'à la fin de la fenêtre) :
-    TRAVERSÉE : le prix atteint le bord opposé de la zone ;
-    REJET : le prix recule de `RETRACE_PTS` (20) points depuis son point le
-      plus profond dans la zone, sans l'avoir traversée ;
-- EXPÉDITION : après la traversée, distance maximale parcourue au-delà du bord
-  de sortie, jusqu'au premier retracement d'au moins `RETRACE_PTS` points ;
-  après un rejet, la même chose dans l'autre sens, depuis le bord d'entrée ;
-- RETRACEMENT : ce premier recul d'au moins 20 points depuis le plus haut de
+    TRAVERSÉE : le prix atteint le niveau exact (le strike) ;
+    REJET : le prix recule de `RETRACE_PTS` (40 ou 50) points depuis son point
+      le plus avancé, sans avoir atteint le niveau ;
+- EXPÉDITION : après la traversée, distance maximale parcourue au-delà du
+  strike, jusqu'au premier retracement d'au moins `RETRACE_PTS` points ;
+  après un rejet, la même chose dans l'autre sens (distance au strike, du
+  côté d'où le prix est venu) ;
+- RETRACEMENT : ce premier recul d'au moins `RETRACE_PTS` depuis le sommet de
   l'expédition (profondeur maximale avant que le prix ne dépasse de nouveau
-  ce sommet), et s'il est retourné jusqu'au bord de la zone. Sans recul de 20
-  points avant la fin de la fenêtre : « sans retracement » ;
-- repère : une marche aléatoire traverse une zone de largeur L avant un recul
-  de M points avec la probabilité exp(−L / M) (≈ 61 % pour ±5 pts et 20 pts) ;
-- TÉMOINS : des prix sans rien de particulier (les niveaux décalés de ±30 /
-  ±40 pts au moins, zones de même largeur, jamais chevauchantes), mesurés
+  ce sommet), et s'il est retourné jusqu'au niveau. Sans un tel recul avant la
+  fin de la fenêtre : « sans retracement » ;
+- repère : une marche aléatoire atteint le niveau avant un recul de M points
+  avec la probabilité exp(−Z / M), Z = demi-largeur de la zone (≈ 61 % pour
+  ±20 pts et 40 pts) ;
+- TÉMOINS : des prix sans rien de particulier (les niveaux décalés d'au moins
+  ±30 / ±40 pts, zones de même largeur, jamais chevauchantes), mesurés
   pareil. Sans eux, « 70 % de traversées » ne dit pas si c'est le niveau ou
   le marché ;
 - comparaison positif / négatif / témoin par RÉÉCHANTILLONNAGE DES SÉANCES
@@ -46,8 +49,9 @@ import pandas as pd
 
 from . import dbgamma, edgestats as es
 
-ZONE_PTS = 5.0                 # demi-largeur de la zone d'un niveau (NQ)
-RETRACE_PTS = 20.0             # recul minimal pour parler de retracement / rejet
+ZONE_PTS = 20.0                # demi-largeur de la zone de DÉTECTION d'un niveau (NQ)
+RETRACE_PTS = 40.0             # recul minimal pour parler de retracement / rejet
+RETRACE_DEFAULTS = (40.0, 50.0)  # « 40-50 pts au moins » : 40 principal, 50 en sensibilité
 CONTACT_CUTOFF_S = 1800.0      # contacts écartés dans les 30 dernières minutes
 PLACEBO_SHIFTS = (-40.0, -30.0, 30.0, 40.0)
 MIN_PLACEBO_GAP = 15.0
@@ -55,8 +59,10 @@ GROUPS = ("positif", "négatif", "témoin")
 
 
 def baseline_crossing(zone: float = ZONE_PTS, retrace: float = RETRACE_PTS) -> float:
-    """Part de traversées d'une marche aléatoire : exp(−largeur / recul)."""
-    return float(np.exp(-2 * zone / retrace))
+    """Part de traversées d'une marche aléatoire : le prix part du bord de la
+    zone, à `zone` points du niveau, et l'atteint avant un recul de `retrace`
+    points avec la probabilité exp(−zone / retrace)."""
+    return float(np.exp(-zone / retrace))
 
 
 def session_levels(chain: pd.DataFrame, t_epoch: float, ref_spot: float, rate: float,
@@ -85,8 +91,8 @@ def session_levels(chain: pd.DataFrame, t_epoch: float, ref_spot: float, rate: f
 
 def _leg(y: np.ndarray, start: int, origin: float, m: float) -> dict:
     """Expédition puis retracement, dans le sens où `y` MONTE, à partir de
-    l'indice `start`. `origin` : prix depuis lequel l'expédition se mesure (bord
-    de la zone). L'expédition s'arrête au premier recul d'au moins `m` depuis
+    l'indice `start`. `origin` : prix depuis lequel l'expédition se mesure (le
+    niveau exact du strike). L'expédition s'arrête au premier recul d'au moins `m` depuis
     le plus haut courant ; le retracement est la profondeur maximale de ce
     recul avant que `y` ne dépasse de nouveau ce sommet."""
     seg = y[start:]
@@ -107,11 +113,13 @@ def _leg(y: np.ndarray, start: int, origin: float, m: float) -> dict:
 def touch_outcome(ts: np.ndarray, px: np.ndarray, level: float, zone: float = ZONE_PTS,
                   retrace: float = RETRACE_PTS, t_end: float | None = None,
                   cutoff_s: float = CONTACT_CUTOFF_S) -> dict | None:
-    """Premier contact avec la zone [level − zone, level + zone] et ce qui suit,
-    jusqu'à la fin du chemin (`ts`, `px` : chemin de prix trié, cf.
-    excess.tick_path). None si le prix démarre dans la zone ou ne l'atteint
-    jamais. Issues : traversée, rejet, non résolu (reste dans la zone), trop
-    tard (contact dans les `cutoff_s` dernières secondes avant `t_end`)."""
+    """Contact avec la zone [level − zone, level + zone] puis, DEPUIS LE NIVEAU
+    EXACT, ce qui suit jusqu'à la fin du chemin (`ts`, `px` : chemin de prix
+    trié, cf. excess.tick_path). None si le prix démarre dans la zone ou ne
+    l'atteint jamais. Issues : traversée (le prix atteint le strike), rejet
+    (recul de `retrace` pts depuis son point le plus avancé, sans avoir atteint
+    le strike), non résolu (ni l'un ni l'autre avant la fin), trop tard
+    (contact dans les `cutoff_s` dernières secondes avant `t_end`)."""
     if len(px) < 2:
         return None
     lo, hi = level - zone, level + zone
@@ -119,8 +127,8 @@ def touch_outcome(ts: np.ndarray, px: np.ndarray, level: float, zone: float = ZO
         return None
     side = 1 if px[0] < lo else -1                  # +1 : le prix arrive PAR LE BAS
     y = px if side > 0 else -px                     # ramené à « arrive par le bas »
-    ylo, yhi = (lo, hi) if side > 0 else (-hi, -lo)
-    hit = np.flatnonzero(y >= ylo)
+    ylev = level if side > 0 else -level            # le strike, dans ce repère
+    hit = np.flatnonzero(y >= ylev - zone)          # entrée dans la zone
     if not len(hit):
         return None
     i = int(hit[0])
@@ -131,17 +139,17 @@ def touch_outcome(ts: np.ndarray, px: np.ndarray, level: float, zone: float = ZO
         return {**out, "issue": "trop tard"}
     seg = y[i:]
     run = np.maximum.accumulate(seg)
-    crossed = np.flatnonzero(seg >= yhi)
+    crossed = np.flatnonzero(seg >= ylev)           # le niveau exact est atteint
     rejected = np.flatnonzero(run - seg >= retrace)
     a = int(crossed[0]) if len(crossed) else None
     b = int(rejected[0]) if len(rejected) else None
     if a is None and b is None:
         return {**out, "issue": "non résolu"}
     if b is None or (a is not None and a < b):
-        leg = _leg(y, i + a, yhi, retrace)             # traversée : au-delà du bord opposé
+        leg = _leg(y, i + a, ylev, retrace)            # traversée : au-delà du strike
         issue = "traversée"
     else:
-        leg = _leg(-y, i + b, -ylo, retrace)           # rejet : loin du bord d'entrée
+        leg = _leg(-y, i + b, -ylev, retrace)          # rejet : loin du strike, côté d'arrivée
         issue = "rejet"
     return {**out, "issue": issue, "exp": leg["exp"], "retr": leg["retr"],
             "retr_oui": leg["retr_oui"], "retour": leg["retour"]}
@@ -203,7 +211,7 @@ def _after_table(d: pd.DataFrame, n_boot: int) -> pd.DataFrame:
                      "exp_p90": float(x["exp_pts"].quantile(0.90)) if len(x) else np.nan,
                      "retracement_%": 100 * float(x["retr_oui"].mean()) if len(x) else np.nan,
                      "retr_méd": float(w["retr_pts"].median()) if len(w) else np.nan,
-                     "retour_zone_%": 100 * float(w["retour_zone"].mean()) if len(w) else np.nan})
+                     "retour_niveau_%": 100 * float(w["retour_zone"].mean()) if len(w) else np.nan})
     return pd.DataFrame(rows).set_index("groupe")
 
 

@@ -15,60 +15,72 @@ def _path(prices, step=1.0):
     return np.arange(len(prices)) * step, np.asarray(prices, float)
 
 
-def _path(prices, step=1.0):
-    return np.arange(len(prices)) * step, np.asarray(prices, float)
-
-
 def _o(prices, level=100.0, zone=5.0, retrace=20.0, **kw):
     ts, px = _path(prices)
     return lr.touch_outcome(ts, px, level, zone, retrace, t_end=kw.pop("t_end", 1e9), **kw)
 
 
-def test_traversee_expedition_et_retracement():
-    # arrive par le bas : entre à 95, sort à 105, monte à 140, recule de 25 (à 115),
-    # puis repart plus haut : l'expédition s'arrête au premier recul >= 20
-    o = _o([90, 96, 105, 120, 140, 125, 115, 130, 150])
+def test_traversee_expedition_et_retracement_depuis_le_strike():
+    # arrive par le bas : entre dans la zone à 96, atteint le strike (100) à 101,
+    # monte à 140, recule de 25 (à 115), puis repart plus haut : l'expédition
+    # s'arrête au premier recul >= 20 et se mesure DEPUIS LE STRIKE (140 − 100)
+    o = _o([90, 96, 101, 120, 140, 115, 130, 150])
     assert o["issue"] == "traversée" and o["cote"] == "par le bas"
-    assert o["exp"] == pytest.approx(140 - 105)         # depuis le bord de sortie (105)
+    assert o["exp"] == pytest.approx(40)
     assert o["retr"] == pytest.approx(25) and o["retr_oui"] and not o["retour"]
-    # retracement qui revient jusque dans la zone (bord de sortie 105)
-    o = _o([90, 96, 105, 130, 100])
-    assert o["issue"] == "traversée" and o["exp"] == pytest.approx(25) and o["retour"]
+    # retracement qui revient jusqu'au strike
+    o = _o([90, 96, 101, 130, 95])
+    assert o["exp"] == pytest.approx(30) and o["retr"] == pytest.approx(35) and o["retour"]
     # jamais de recul de 20 pts : expédition ouverte jusqu'à la fin, sans retracement
-    o = _o([90, 96, 105, 130, 125, 150])
-    assert o["exp"] == pytest.approx(45) and not o["retr_oui"] and np.isnan(o["retr"])
+    o = _o([90, 96, 101, 130, 125, 150])
+    assert o["exp"] == pytest.approx(50) and not o["retr_oui"] and np.isnan(o["retr"])
 
 
 def test_la_profondeur_du_retracement_s_arrete_au_nouveau_sommet():
     # pic 140, recul à 115, nouveau sommet à 145 puis recul plus profond à 95 :
     # le retracement mesuré est celui du premier recul (25), pas du second
-    o = _o([90, 96, 105, 140, 115, 145, 95])
+    o = _o([90, 96, 101, 140, 115, 145, 95])
     assert o["retr"] == pytest.approx(25)
 
 
-def test_rejet_et_expedition_dans_l_autre_sens():
-    # entre à 95, va à 99 (dans la zone), recule de 20 depuis 99 (à 79) : rejet ;
-    # l'expédition part du bord d'entrée (95) vers le bas : jusqu'à 60, puis rebond de 22
+def test_rejet_avant_le_strike_et_expedition_dans_l_autre_sens():
+    # entre à 96, monte à 99 SANS atteindre le strike (100), recule de 20 (à 79) :
+    # rejet ; expédition mesurée depuis le strike vers le bas : jusqu'à 60, puis
+    # rebond de 22 (qui ne revient pas au strike)
     o = _o([90, 96, 99, 85, 79, 70, 60, 82])
-    assert o["issue"] == "rejet"
-    assert o["exp"] == pytest.approx(95 - 60) and o["retr"] == pytest.approx(22)
-    assert o["retr_oui"] and not o["retour"]
+    assert o["issue"] == "rejet" and o["cote"] == "par le bas"
+    assert o["exp"] == pytest.approx(100 - 60)
+    assert o["retr"] == pytest.approx(22) and o["retr_oui"] and not o["retour"]
+    # le rebond revient jusqu'au strike
+    assert _o([90, 96, 99, 79, 60, 105])["retour"]
+
+
+def test_la_zone_detecte_mais_le_strike_decide():
+    """Zone ±20 autour de 100 : le prix y entre à 82 mais ne devient « traversé »
+    qu'au strike ; un recul avant le strike est un rejet."""
+    ts, px = _path([60, 85, 90, 101, 130])
+    o = lr.touch_outcome(ts, px, 100.0, 20.0, 40.0, t_end=1e9)
+    assert o["issue"] == "traversée" and o["exp"] == pytest.approx(30)
+    ts, px = _path([60, 85, 90, 40, 20])                          # recul de 50 avant le strike
+    assert lr.touch_outcome(ts, px, 100.0, 20.0, 40.0, t_end=1e9)["issue"] == "rejet"
+    ts, px = _path([60, 75, 30])                                  # n'entre jamais dans la zone [80,120]
+    assert lr.touch_outcome(ts, px, 100.0, 20.0, 40.0, t_end=1e9) is None
 
 
 def test_arrivee_par_le_haut_est_symetrique():
-    o = _o([112, 104, 95, 70, 50], level=100.0)       # entre à 105, sort à 95 : traversée
+    o = _o([112, 104, 99, 70, 50], level=100.0)       # entre à 104, atteint le strike à 99
     assert o["cote"] == "par le haut" and o["issue"] == "traversée"
-    assert o["exp"] == pytest.approx(95 - 50)
-    o = _o([112, 104, 101, 130])                      # recule de 29 depuis 101... : rejet
+    assert o["exp"] == pytest.approx(100 - 50) and not o["retr_oui"]
+    o = _o([112, 104, 101, 130])                      # recule de 29 sans atteindre 100
     assert o["cote"] == "par le haut" and o["issue"] == "rejet"
 
 
 def test_cas_sans_contact_et_cas_particuliers():
-    assert _o([90, 95.5, 99]) is not None and _o([80, 85, 90]) is None     # jamais dans la zone
-    assert _o([102, 95, 90]) is None                                      # démarre dans la zone
-    assert _o([90, 96, 99, 100, 99, 98])["issue"] == "non résolu"          # reste dans la zone
-    # saut au-dessus de la zone : le premier tick au-delà compte comme contact et traversée
-    assert _o([90, 112, 130])["issue"] == "traversée"
+    assert _o([90, 95.5, 99])["issue"] == "non résolu"        # dans la zone, jamais au strike
+    assert _o([80, 85, 90]) is None                            # jamais dans la zone
+    assert _o([102, 95, 90]) is None                           # démarre dans la zone
+    assert _o([90, 112, 130])["issue"] == "traversée"        # saut au-dessus du strike
+    assert _o([90, 112, 130])["exp"] == pytest.approx(30)
 
 
 def test_contacts_tardifs_ecartes():
@@ -78,9 +90,9 @@ def test_contacts_tardifs_ecartes():
     assert lr.touch_outcome(ts, px, 100.0, 5.0, 20.0, t_end=9000.0)["issue"] == "traversée"
 
 
-def test_marche_aleatoire_traverse_environ_61_pour_cent():
-    """Repère affiché dans le rapport : exp(−largeur / recul). Pour une marche
-    de ±1, la valeur exacte est (M / (M + 1)) ** largeur."""
+def test_marche_aleatoire_atteint_le_niveau_comme_prevu():
+    """Repère du rapport : exp(−zone / recul). Pour une marche de ±1, la valeur
+    exacte est (M / (M + 1)) ** zone."""
     rng = np.random.default_rng(0)
     out = []
     for _ in range(4000):
@@ -88,10 +100,11 @@ def test_marche_aleatoire_traverse_environ_61_pour_cent():
         o = lr.touch_outcome(np.arange(3000.0), px, 100.0, 5.0, 20.0, t_end=1e9)
         if o and o["issue"] in ("traversée", "rejet"):
             out.append(o["issue"] == "traversée")
-    exact = (20 / 21) ** 10
-    assert len(out) > 2000
+    exact = (20 / 21) ** 5
+    assert len(out) > 2500
     assert np.mean(out) == pytest.approx(exact, abs=3 * 0.5 / np.sqrt(len(out)))
-    assert lr.baseline_crossing(5.0, 20.0) == pytest.approx(0.6065, abs=1e-3)
+    assert lr.baseline_crossing(5.0, 20.0) == pytest.approx(0.7788, abs=1e-3)
+    assert lr.baseline_crossing(20.0, 40.0) == pytest.approx(0.6065, abs=1e-3)
 
 
 def test_niveaux_temoins_ecartes_des_vrais_niveaux():
@@ -173,7 +186,7 @@ def test_comparaisons_par_cote_d_arrivee():
 def test_evenements_d_une_seance_simulee():
     """Chemin construit à la main : le niveau positif rejette le prix, le négatif est traversé."""
     steps = np.concatenate([np.linspace(30000, 30099, 100),    # monte vers le niveau positif
-                            np.linspace(30099, 30075, 24),     # recule de 24 : rejet
+                            np.linspace(30099, 30075, 24),     # recule de 24 sans atteindre 30100 : rejet
                             np.linspace(30075, 30040, 35),
                             np.linspace(30040, 30062, 22),     # rebond de 22
                             np.linspace(30062, 29900, 162),    # descend, traverse le niveau négatif
@@ -181,13 +194,14 @@ def test_evenements_d_une_seance_simulee():
     ts = np.arange(len(steps)) * 60.0
     levels = pd.DataFrame({"strike": [30100.0, 29950.0], "gex": [3e9, -2e9], "gross": [4e9, 3e9],
                            "rang": [1, 2], "signe": ["positif", "négatif"]})
-    ev = pd.DataFrame(lr.session_events("2026-11-04", ts, steps, levels))
+    ev = pd.DataFrame(lr.session_events("2026-11-04", ts, steps, levels, 5.0, 20.0))
     vrais = ev[ev["groupe"] != "témoin"].set_index("groupe")
     pos, neg = vrais.loc["positif"], vrais.loc["négatif"]
     assert pos["issue"] == "rejet" and pos["cote"] == "par le bas"
-    assert pos["exp_pts"] == pytest.approx(30095 - 30040, abs=1.0) and pos["retr_pts"] == pytest.approx(22, abs=1.0)
+    assert pos["exp_pts"] == pytest.approx(30100 - 30040, abs=1.5)      # depuis le strike
+    assert pos["retr_pts"] == pytest.approx(22, abs=1.5)
     assert neg["issue"] == "traversée" and neg["cote"] == "par le haut"
-    assert neg["exp_pts"] == pytest.approx(29945 - 29900, abs=1.0)
+    assert neg["exp_pts"] == pytest.approx(29950 - 29900, abs=1.5)
     assert not neg["retr_oui"]                                 # le prix s'arrête à 29900, sans recul de 20
     assert (ev["groupe"] == "témoin").any() and (ev["zone"] == 5.0).all()
 
@@ -209,9 +223,11 @@ def test_le_rapport_s_assemble_avec_plusieurs_zones():
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
     import level_reaction_report as rep
     base = _evenements(0.45, 0.80, 0.60, 30, 90, 50)
-    ev = pd.concat([base.assign(zone=10.0), base.assign(zone=5.0)], ignore_index=True)
+    ev = pd.concat([base.assign(zone=10.0, retrace=40.0), base.assign(zone=10.0, retrace=50.0),
+                    base.assign(zone=5.0, retrace=40.0)], ignore_index=True)
     md = rep.report(ev, "NQ", "tdb", "cash", 150)
-    assert md.index("# Niveaux GEX") < md.index("# Sensibilité : zone de ± 5 pts")   # 1re = principale
+    assert md.index("# Niveaux GEX") < md.index("# Sensibilité : zone de ± 10 pts, retracement de 50 pts")
+    assert "# Sensibilité : zone de ± 5 pts, retracement de 40 pts" in md                 # 1er = principal
     for titre in ("## Traversée ou rejet", "## Après une traversée", "## Après un rejet",
                   "## Comparaisons", "Repère", "tient"):
         assert titre in md
@@ -245,11 +261,14 @@ def test_script_de_bout_en_bout_sur_donnees_simulees(monkeypatch, tmp_path):
     monkeypatch.setattr(rates, "current_rate", lambda: 0.04)
     monkeypatch.setattr(dbgamma, "select", lambda chain, t, spot, mode: chain)
 
-    ev = rep.collect("NQ", None, None, "tdb", "cash", 5, (5.0, 10.0), 20.0)
-    assert not ev.empty and ev["day"].nunique() == 40 and set(ev["zone"]) == {5.0, 10.0}
+    ev = rep.collect("NQ", None, None, "tdb", "cash", 5, (20.0, 10.0), (40.0, 50.0))
+    assert not ev.empty and ev["day"].nunique() == 40
+    assert set(map(tuple, ev[["zone", "retrace"]].drop_duplicates().to_numpy())) == {
+        (20.0, 40.0), (20.0, 50.0), (10.0, 40.0), (10.0, 50.0)}
     assert {"positif", "négatif", "témoin"} <= set(ev["groupe"])
     assert set(ev["issue"]) <= {"traversée", "rejet", "non résolu", "non touché", "trop tard"}
     md = rep.report(ev, "NQ", "tdb", "cash", 120)
-    assert "## Traversée ou rejet" in md and "# Sensibilité : zone de ± 10 pts" in md
+    assert "## Traversée ou rejet" in md
+    assert "# Sensibilité : zone de ± 10 pts, retracement de 50 pts" in md
     w0, w1 = rep.window_bounds("2026-11-04", "cash")
     assert w1 - w0 == 6.5 * 3600

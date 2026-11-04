@@ -7,18 +7,18 @@ Selon le signe du GEX du niveau.
 Pour chaque séance de l'année : les 5 plus gros strikes en |GEX net| (chaîne
 reconstruite depuis l'open interest Databento, comme la piste 2 du rapport
 d'excès), chacun avec le signe de son GEX. Un niveau GEX est une ZONE, pas une
-ligne : ± 5 pts autour du strike (`--zone`). Premier contact du prix avec la
-zone, puis, SANS limite de temps (jusqu'à 16h00 ET) : traversée (le prix sort
-par le côté opposé) ou rejet (le prix recule de 20 pts, `--retracement`, depuis
-son point le plus profond dans la zone) ; après une traversée, l'expédition
-maximale au-delà de la zone jusqu'au premier retracement de 20 pts, et la
-profondeur de ce retracement (idem après un rejet, dans l'autre sens). Voir
-gex/levelreact.py.
+ligne : ± 20 pts autour du strike (`--zone`), qui sert à DÉTECTER le contact ;
+tout est ensuite mesuré depuis le niveau EXACT du strike. SANS limite de temps
+(jusqu'à 16h00 ET) : traversée (le prix atteint le strike) ou rejet (le prix
+recule d'au moins 40 pts, `--retracement`, sans l'avoir atteint) ; après une
+traversée, l'expédition maximale au-delà du strike jusqu'au premier
+retracement de 40 pts, et la profondeur de ce retracement (idem après un rejet,
+dans l'autre sens). Voir gex/levelreact.py.
 
 Les mêmes mesures sont faites sur des niveaux TÉMOINS (les vrais niveaux
 décalés de ±30 / ±40 pts au moins) : c'est ce qui dit si le niveau compte, ou si
-c'est le marché qui fait pareil partout. Repère : une marche aléatoire traverse
-environ 61 % du temps (± 5 pts, retracement de 20 pts).
+c'est le marché qui fait pareil partout. Repère : une marche aléatoire atteint
+le niveau avant un recul de 40 pts environ 61 % du temps (zone de ± 20 pts).
 
 Aucun seuil n'est calé sur les données : toutes les séances sont lues. Les
 intervalles et p-values tirent des SÉANCES entières (les niveaux d'une même
@@ -66,7 +66,7 @@ def window_bounds(day: str, fenetre: str) -> tuple[float, float]:
 
 def collect(symbol: str, start: str | None, end: str | None, perimetre: str, fenetre: str,
             n_levels: int, zones: tuple[float, ...] = (levelreact.ZONE_PTS,),
-            retrace: float = levelreact.RETRACE_PTS) -> pd.DataFrame:
+            retraces: tuple[float, ...] = levelreact.RETRACE_DEFAULTS) -> pd.DataFrame:
     defs, stats = excess_report.gamma_context()
     if defs.empty or stats.empty:
         raise SystemExit("Il faut les fichiers Databento `definition` ET `statistics` "
@@ -94,7 +94,8 @@ def collect(symbol: str, start: str | None, end: str | None, perimetre: str, fen
             skipped += 1
             continue
         for z in zones:
-            rows += levelreact.session_events(day, ts[keep], px[keep], levels, z, retrace, w1)
+            for r in retraces:
+                rows += levelreact.session_events(day, ts[keep], px[keep], levels, z, r, w1)
     if skipped:
         print(f"{skipped} séance(s) sans clôture de la veille ou sans chaîne : écartées.")
     return pd.DataFrame(rows)
@@ -105,23 +106,23 @@ def _table(df: pd.DataFrame) -> str:
 
 
 def report(ev: pd.DataFrame, symbol: str, perimetre: str, fenetre: str, n_boot: int) -> str:
-    """Un bloc par largeur de zone ; la première (celle de `--zone` donnée en
-    premier) est la zone PRINCIPALE, les suivantes une vérification de
-    sensibilité (chacune avec sa propre correction de Holm : choisir après coup
-    la zone qui arrange invaliderait les p-values)."""
+    """Un bloc par couple (zone, retracement) ; le premier (premières valeurs de
+    `--zone` et `--retracement`) est le bloc PRINCIPAL, les suivants une
+    vérification de sensibilité (chacun avec sa propre correction de Holm :
+    choisir après coup la combinaison qui arrange invaliderait les p-values)."""
     if ev.empty:
         return _report_zone(ev, symbol, perimetre, fenetre, n_boot,
                             levelreact.ZONE_PTS, levelreact.RETRACE_PTS, True)
-    zones = list(ev["zone"].unique())                    # ordre de `--zone`
+    combos = list(ev[["zone", "retrace"]].drop_duplicates().itertuples(index=False, name=None))
     return "\n\n".join(
-        _report_zone(ev[ev["zone"] == z], symbol, perimetre, fenetre, n_boot, z,
-                     float(ev["retrace"].iloc[0]), k == 0) for k, z in enumerate(zones))
+        _report_zone(ev[(ev["zone"] == z) & (ev["retrace"] == r)], symbol, perimetre, fenetre,
+                     n_boot, z, r, k == 0) for k, (z, r) in enumerate(combos))
 
 
 def _report_zone(ev: pd.DataFrame, symbol: str, perimetre: str, fenetre: str, n_boot: int,
                  zone: float, retrace: float, principal: bool) -> str:
     titre = (f"# Niveaux GEX : traversée, expédition et retracement — {symbol}" if principal
-             else f"# Sensibilité : zone de ± {zone:g} pts")
+             else f"# Sensibilité : zone de ± {zone:g} pts, retracement de {retrace:g} pts")
     lines = [titre, f"_{datetime.now(ET):%Y-%m-%d %H:%M}_", ""]
     if ev.empty:
         return "\n".join(lines + ["_(aucune séance exploitable)_"])
@@ -134,26 +135,27 @@ def _report_zone(ev: pd.DataFrame, symbol: str, perimetre: str, fenetre: str, n_
         f"{'séance cash 9h30-16h00 ET' if fenetre == 'cash' else 'séance Globex'}.", "",
         "Niveaux = les 5 strikes de plus fort |GEX net| à l'ouverture de la fenêtre (calls +, "
         "puts −, évalué à la clôture de la veille). Un niveau est une **zone** de "
-        f"± {zone:g} pts autour du strike. **Contact** : le prix entre dans la zone (les contacts "
-        "des 30 dernières minutes sont écartés). **Traversée** : le prix atteint le bord "
-        f"opposé. **Rejet** : le prix recule de {retrace:g} pts depuis son point le plus profond "
-        "dans la zone sans l'avoir traversée. Aucune limite de temps : on suit jusqu'à 16h00. "
-        "**Expédition** : distance maximale au-delà de la zone (bord de sortie après une "
-        "traversée, bord d'entrée après un rejet) jusqu'au premier retracement de "
-        f"{retrace:g} pts ; **retracement** : la profondeur de ce premier recul "
-        "(`retracement_%` = part des cas où il survient avant 16h00 ; `retr_méd` = sa profondeur "
-        "médiane ; `retour_zone_%` = part où il revient jusqu'au bord de la zone). "
-        "**Témoin** : les vrais niveaux décalés d'au moins ±30 / ±40 pts (zones de même "
-        f"largeur, jamais chevauchantes). **Repère** : une marche aléatoire traverserait "
-        f"environ {base:.0f} % du temps.",
-        ("" if principal else "_Vérification de sensibilité : la zone principale est celle du "
-         "premier bloc. Ne pas retenir la zone qui arrange : les p-values supposent une zone "
-         "choisie d'avance._"), ""]
+        f"± {zone:g} pts autour du strike, qui sert à **détecter le contact** (le prix entre "
+        "dans la zone ; les contacts des 30 dernières minutes sont écartés). **Tout est "
+        "mesuré depuis le niveau exact du strike.** **Traversée** : le prix atteint le strike. "
+        f"**Rejet** : le prix recule de {retrace:g} pts depuis son point le plus avancé sans "
+        "avoir atteint le strike. Aucune limite de temps : on suit jusqu'à 16h00. "
+        "**Expédition** : distance maximale au-delà du strike (après un rejet : du côté "
+        f"d'où le prix est venu) jusqu'au premier retracement de {retrace:g} pts ; "
+        "**retracement** : la profondeur de ce premier recul (`retracement_%` = part des cas "
+        "où il survient avant 16h00 ; `retr_méd` = sa profondeur médiane ; `retour_niveau_%` = "
+        "part où il revient jusqu'au strike). **Témoin** : les vrais niveaux décalés d'au moins "
+        "±30 / ±40 pts (zones de même largeur, jamais chevauchantes). **Repère** : une marche "
+        f"aléatoire atteindrait le niveau avant un recul de {retrace:g} pts environ "
+        f"{base:.0f} % du temps.",
+        ("" if principal else "_Vérification de sensibilité : le bloc principal est le premier. "
+         "Ne pas retenir la combinaison qui arrange : les p-values supposent des réglages "
+         "choisis d'avance._"), ""]
     res = levelreact.analyse(ev, n_boot)
     lines += ["## Traversée ou rejet", "", _table(res["resume"]), "",
-              "## Après une traversée (distances en points)", "",
+              "## Après une traversée (distances en points, depuis le strike)", "",
               _table(res["apres_traversee"]), "",
-              "## Après un rejet (expédition dans l'autre sens, depuis le bord d'entrée)", "",
+              "## Après un rejet (expédition dans l'autre sens, depuis le strike)", "",
               _table(res["apres_rejet"]), ""]
     tests = res["tests"]
     if not tests.empty:
@@ -184,17 +186,19 @@ def main(argv: list[str] | None = None) -> None:
                     help="options retenues (défaut tdb : celles du tableau de bord)")
     ap.add_argument("--fenetre", default="cash", choices=("cash", "globex"))
     ap.add_argument("--niveaux", type=int, default=5)
-    ap.add_argument("--retracement", type=float, default=levelreact.RETRACE_PTS,
-                    help="recul minimal (pts) pour parler de rejet / de retracement "
-                         "(défaut 20)")
-    ap.add_argument("--zone", type=float, nargs="+", default=[levelreact.ZONE_PTS],
-                    help="demi-largeur(s) de la zone d'un niveau, en points (défaut 5 ; "
-                         "plusieurs valeurs : la première est la principale, les autres une "
+    ap.add_argument("--retracement", type=float, nargs="+",
+                    default=list(levelreact.RETRACE_DEFAULTS),
+                    help="recul(s) minimal(aux) en points pour parler de rejet / de retracement "
+                         "(défaut 40 puis 50 : le premier est le principal, les autres une "
                          "vérification de sensibilité)")
+    ap.add_argument("--zone", type=float, nargs="+", default=[levelreact.ZONE_PTS],
+                    help="demi-largeur(s) de la zone de détection d'un niveau, en points "
+                         "(défaut 20 de chaque côté ; plusieurs valeurs : la première est la "
+                         "principale, les autres une vérification de sensibilité)")
     ap.add_argument("--boot", type=int, default=2000, help="tirages de séances")
     args = ap.parse_args(argv)
     ev = collect(args.symbol, args.start, args.end, args.perimetre, args.fenetre, args.niveaux,
-                 tuple(args.zone), args.retracement)
+                 tuple(args.zone), tuple(args.retracement))
     md = report(ev, args.symbol, args.perimetre, args.fenetre, args.boot)
     outdir = SETTINGS.data_dir / "reports"
     outdir.mkdir(parents=True, exist_ok=True)
