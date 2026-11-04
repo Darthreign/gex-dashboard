@@ -272,3 +272,30 @@ def test_script_de_bout_en_bout_sur_donnees_simulees(monkeypatch, tmp_path):
     assert "# Sensibilité : zone de ± 10 pts, retracement de 50 pts" in md
     w0, w1 = rep.window_bounds("2026-11-04", "cash")
     assert w1 - w0 == 6.5 * 3600
+
+
+def test_perimetre_0dte_ne_garde_que_les_options_du_jour():
+    exp_today = pd.Timestamp("2026-11-06 20:00", tz="UTC")           # 15h00 ET le 06/11
+    exp_later = pd.Timestamp("2026-11-13 20:00", tz="UTC")
+    rows = [(30000.0, "C", 4000.0, exp_today), (29800.0, "P", 5000.0, exp_today),
+            (30200.0, "C", 90000.0, exp_later), (29600.0, "P", 90000.0, exp_later)]
+    chain = pd.DataFrame({"strike": [r[0] for r in rows], "type": [r[1] for r in rows],
+                          "expiration": [r[3] for r in rows], "oi": [r[2] for r in rows],
+                          "iv": 0.2, "fwd": 1.0})
+    t = pd.Timestamp("2026-11-06 14:30", tz="UTC").timestamp()       # 9h30 ET le 06/11
+    tout = lr.session_levels(chain, t, 30000.0, 0.04, "tdb", 5)
+    zero = lr.session_levels(chain, t, 30000.0, 0.04, "0dte", 5)
+    assert set(tout["strike"]) == {30000.0, 29800.0, 30200.0, 29600.0}
+    assert set(zero["strike"]) == {30000.0, 29800.0}                 # les strikes de la semaine suivante disparaissent
+
+
+def test_le_nom_du_rapport_porte_le_perimetre(monkeypatch, tmp_path):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import level_reaction_report as rep
+    from gex.config import SETTINGS
+    monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
+    monkeypatch.setattr(rep, "collect", lambda *a, **k: pd.DataFrame())
+    for perimetre in ("tdb", "0dte"):
+        rep.main(["--perimetre", perimetre, "--boot", "10"])
+    noms = sorted(p.name for p in (tmp_path / "reports").glob("level_reaction_*.md"))
+    assert len(noms) == 2 and any("_0dte_" in n for n in noms) and any("_tdb_" in n for n in noms)

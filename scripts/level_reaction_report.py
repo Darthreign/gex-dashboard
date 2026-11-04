@@ -24,7 +24,7 @@ Aucun seuil n'est calé sur les données : toutes les séances sont lues. Les
 intervalles et p-values tirent des SÉANCES entières (les niveaux d'une même
 séance ne sont pas indépendants), avec correction de Holm sur l'ensemble des
 comparaisons. Lecture seule ; rapport dans
-data/reports/level_reaction_<SYMBOLE>_<date>.md.
+data/reports/level_reaction_<SYMBOLE>_<périmètre>_<date>.md.
 
 Il faut les fichiers Databento `definition` + `statistics` (cache du rapport
 d'excès) et les ticks du future (live ou import/ticks_full).
@@ -202,7 +202,9 @@ def main(argv: list[str] | None = None) -> None:
     md = report(ev, args.symbol, args.perimetre, args.fenetre, args.boot)
     outdir = SETTINGS.data_dir / "reports"
     outdir.mkdir(parents=True, exist_ok=True)
-    path = outdir / f"level_reaction_{args.symbol}_{datetime.now(ET):%Y-%m-%d}.md"
+    # le périmètre fait partie du nom : un rapport 0DTE n'écrase pas celui de `tdb`
+    path = outdir / (f"level_reaction_{args.symbol}_{args.perimetre}_"
+                     f"{datetime.now(ET):%Y-%m-%d}.md")
     path.write_text(md, encoding="utf-8")
     print(md)
     print(f"\n→ {path}")
