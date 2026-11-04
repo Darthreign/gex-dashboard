@@ -1,17 +1,24 @@
-"""Les niveaux GEX à gamma positif font-ils plus réagir le prix que les négatifs ?
+"""Un niveau GEX est-il traversé, jusqu'où va le prix, et se retrace-t-il ?
+Selon le signe du GEX du niveau.
 
     python scripts/level_reaction_report.py
     python scripts/level_reaction_report.py --start 2026-01-01 --perimetre 0dte
 
 Pour chaque séance de l'année : les 5 plus gros strikes en |GEX net| (chaîne
 reconstruite depuis l'open interest Databento, comme la piste 2 du rapport
-d'excès), chacun avec le signe de son GEX ; premier contact du prix avec
-chacun pendant la fenêtre, puis réaction ou traversée (cf. gex/levelreact.py).
-Un niveau GEX est une ZONE, pas une ligne : le contact est compté à l'entrée dans
-± 5 pts autour du strike (`--zone`), la réaction se mesure depuis ce bord.
+d'excès), chacun avec le signe de son GEX. Un niveau GEX est une ZONE, pas une
+ligne : ± 5 pts autour du strike (`--zone`). Premier contact du prix avec la
+zone, puis, SANS limite de temps (jusqu'à 16h00 ET) : traversée (le prix sort
+par le côté opposé) ou rejet (le prix recule de 20 pts, `--retracement`, depuis
+son point le plus profond dans la zone) ; après une traversée, l'expédition
+maximale au-delà de la zone jusqu'au premier retracement de 20 pts, et la
+profondeur de ce retracement (idem après un rejet, dans l'autre sens). Voir
+gex/levelreact.py.
+
 Les mêmes mesures sont faites sur des niveaux TÉMOINS (les vrais niveaux
-décalés de ±30 / ±40 pts) : c'est ce qui dit si le niveau compte, ou si c'est
-le marché qui rebondit partout autant.
+décalés de ±30 / ±40 pts au moins) : c'est ce qui dit si le niveau compte, ou si
+c'est le marché qui fait pareil partout. Repère : une marche aléatoire traverse
+environ 61 % du temps (± 5 pts, retracement de 20 pts).
 
 Aucun seuil n'est calé sur les données : toutes les séances sont lues. Les
 intervalles et p-values tirent des SÉANCES entières (les niveaux d'une même
@@ -58,7 +65,8 @@ def window_bounds(day: str, fenetre: str) -> tuple[float, float]:
 
 
 def collect(symbol: str, start: str | None, end: str | None, perimetre: str, fenetre: str,
-            n_levels: int, zones: tuple[float, ...] = (levelreact.ZONE_PTS,)) -> pd.DataFrame:
+            n_levels: int, zones: tuple[float, ...] = (levelreact.ZONE_PTS,),
+            retrace: float = levelreact.RETRACE_PTS) -> pd.DataFrame:
     defs, stats = excess_report.gamma_context()
     if defs.empty or stats.empty:
         raise SystemExit("Il faut les fichiers Databento `definition` ET `statistics` "
@@ -86,7 +94,7 @@ def collect(symbol: str, start: str | None, end: str | None, perimetre: str, fen
             skipped += 1
             continue
         for z in zones:
-            rows += levelreact.session_events(day, ts[keep], px[keep], levels, z)
+            rows += levelreact.session_events(day, ts[keep], px[keep], levels, z, retrace, w1)
     if skipped:
         print(f"{skipped} séance(s) sans clôture de la veille ou sans chaîne : écartées.")
     return pd.DataFrame(rows)
@@ -97,59 +105,73 @@ def _table(df: pd.DataFrame) -> str:
 
 
 def report(ev: pd.DataFrame, symbol: str, perimetre: str, fenetre: str, n_boot: int) -> str:
-    """Un bloc par largeur de zone ; la première est la zone PRINCIPALE, les
-    suivantes sont une vérification de sensibilité (chacune avec sa propre
-    correction de Holm : choisir après coup la zone qui arrange invaliderait
-    les p-values)."""
-    zones = sorted(ev["zone"].unique(), key=lambda z: (z != levelreact.ZONE_PTS, z)) \
-        if not ev.empty and "zone" in ev else [levelreact.ZONE_PTS]
-    parts = [_report_zone(ev[ev["zone"] == z] if "zone" in ev and not ev.empty else ev, symbol,
-                          perimetre, fenetre, n_boot, z, k == 0)
-             for k, z in enumerate(zones)]
-    return "\n\n".join(parts)
+    """Un bloc par largeur de zone ; la première (celle de `--zone` donnée en
+    premier) est la zone PRINCIPALE, les suivantes une vérification de
+    sensibilité (chacune avec sa propre correction de Holm : choisir après coup
+    la zone qui arrange invaliderait les p-values)."""
+    if ev.empty:
+        return _report_zone(ev, symbol, perimetre, fenetre, n_boot,
+                            levelreact.ZONE_PTS, levelreact.RETRACE_PTS, True)
+    zones = list(ev["zone"].unique())                    # ordre de `--zone`
+    return "\n\n".join(
+        _report_zone(ev[ev["zone"] == z], symbol, perimetre, fenetre, n_boot, z,
+                     float(ev["retrace"].iloc[0]), k == 0) for k, z in enumerate(zones))
 
 
 def _report_zone(ev: pd.DataFrame, symbol: str, perimetre: str, fenetre: str, n_boot: int,
-                 zone: float, principal: bool) -> str:
-    titre = (f"# Niveaux GEX : signe et réaction — {symbol}" if principal
+                 zone: float, retrace: float, principal: bool) -> str:
+    titre = (f"# Niveaux GEX : traversée, expédition et retracement — {symbol}" if principal
              else f"# Sensibilité : zone de ± {zone:g} pts")
     lines = [titre, f"_{datetime.now(ET):%Y-%m-%d %H:%M}_", ""]
     if ev.empty:
         return "\n".join(lines + ["_(aucune séance exploitable)_"])
-    real = ev[(ev["groupe"] != "témoin") & (ev["echelle"] == 0)]
-    n_days = ev["day"].nunique()
+    real = ev[ev["groupe"] != "témoin"]
+    base = 100 * levelreact.baseline_crossing(zone, retrace)
     lines += [
-        f"{n_days} séances, {len(real)} niveaux ({(real['groupe'] == 'positif').sum()} positifs, "
-        f"{(real['groupe'] == 'négatif').sum()} négatifs). Périmètre des options : `{perimetre}` ; "
-        f"fenêtre : {'séance cash 9h30-16h00 ET' if fenetre == 'cash' else 'séance Globex'}.", "",
+        f"{ev['day'].nunique()} séances, {len(real)} niveaux "
+        f"({(real['groupe'] == 'positif').sum()} positifs, {(real['groupe'] == 'négatif').sum()} "
+        f"négatifs). Périmètre des options : `{perimetre}` ; fenêtre : "
+        f"{'séance cash 9h30-16h00 ET' if fenetre == 'cash' else 'séance Globex'}.", "",
         "Niveaux = les 5 strikes de plus fort |GEX net| à l'ouverture de la fenêtre (calls +, "
         "puts −, évalué à la clôture de la veille). Un niveau est une **zone** de "
-        f"± {zone:g} pts autour du strike : le contact est l'entrée dans la zone, et la suite "
-        "se mesure depuis ce bord. **Réaction** : le prix recule de R points avant d'avancer de "
-        "R points de plus ; **traversée** : l'inverse ; **indécis** : ni l'un ni l'autre dans le "
-        "délai. Seuils symétriques : une marche aléatoire donnerait 50 %. **Témoin** : les vrais "
-        "niveaux décalés d'au moins ±30 / ±40 pts (zones de même largeur, jamais chevauchantes).",
+        f"± {zone:g} pts autour du strike. **Contact** : le prix entre dans la zone (les contacts "
+        "des 30 dernières minutes sont écartés). **Traversée** : le prix atteint le bord "
+        f"opposé. **Rejet** : le prix recule de {retrace:g} pts depuis son point le plus profond "
+        "dans la zone sans l'avoir traversée. Aucune limite de temps : on suit jusqu'à 16h00. "
+        "**Expédition** : distance maximale au-delà de la zone (bord de sortie après une "
+        "traversée, bord d'entrée après un rejet) jusqu'au premier retracement de "
+        f"{retrace:g} pts ; **retracement** : la profondeur de ce premier recul "
+        "(`retracement_%` = part des cas où il survient avant 16h00 ; `retr_méd` = sa profondeur "
+        "médiane ; `retour_zone_%` = part où il revient jusqu'au bord de la zone). "
+        "**Témoin** : les vrais niveaux décalés d'au moins ±30 / ±40 pts (zones de même "
+        f"largeur, jamais chevauchantes). **Repère** : une marche aléatoire traverserait "
+        f"environ {base:.0f} % du temps.",
         ("" if principal else "_Vérification de sensibilité : la zone principale est celle du "
          "premier bloc. Ne pas retenir la zone qui arrange : les p-values supposent une zone "
          "choisie d'avance._"), ""]
     res = levelreact.analyse(ev, n_boot)
-    for (r, w, name), table in zip(levelreact.SCALES, res["tables"]):
-        lines += [f"## Échelle {name}", "", _table(table), ""]
+    lines += ["## Traversée ou rejet", "", _table(res["resume"]), "",
+              "## Après une traversée (distances en points)", "",
+              _table(res["apres_traversee"]), "",
+              "## Après un rejet (expédition dans l'autre sens, depuis le bord d'entrée)", "",
+              _table(res["apres_rejet"]), ""]
     tests = res["tests"]
     if not tests.empty:
         shown = tests.copy()
         shown["p"] = shown["p"].map(lambda x: f"{x:.2g}")
         shown["p_holm"] = shown["p_holm"].map(lambda x: f"{x:.2g}")
         lines += ["## Comparaisons (séances rééchantillonnées, correction de Holm)", "",
-                  f"{len(shown)} comparaisons. `écart_pts_%` : différence des parts de "
-                  "réaction (points de pourcentage). `tient` : significatif même après "
-                  "correction ; `fragile` : significatif seul, pas après ; `pas démontré` : "
-                  "compatible avec le hasard.", "",
-                  _table(shown.set_index(["échelle", "comparaison"])), ""]
-    lines += ["Lecture : l'affirmation « seuls les niveaux positifs font réagir » est étayée si "
-              "positif − témoin est nettement > 0, négatif − témoin ≈ 0 ou < 0, et positif − "
-              "négatif > 0 avec verdict `tient`. Si positif ≈ témoin, ce sont les niveaux GEX "
-              "eux-mêmes qui n'apportent rien au-delà du bruit du marché."]
+                  f"{len(shown)} comparaisons. `écart` : différence A − B, en points de "
+                  "pourcentage (taux de traversée) ou en points (expéditions). `tient` : "
+                  "significatif même après correction ; `fragile` : significatif seul, pas "
+                  "après ; `pas démontré` : compatible avec le hasard.", "",
+                  _table(shown.set_index(["mesure", "comparaison"])), ""]
+    lines += ["Lecture : « seuls les niveaux positifs font réagir, les négatifs sont des "
+              "tremplins » serait étayé si les niveaux positifs sont moins traversés que les "
+              "négatifs (positif − négatif < 0, verdict `tient`) et/ou si l'expédition après "
+              "traversée est plus longue pour les négatifs. Si positif et négatif ne se "
+              "distinguent pas du témoin, ce sont les niveaux GEX eux-mêmes qui n'apportent "
+              "rien au-delà du bruit du marché."]
     return "\n".join(lines)
 
 
@@ -162,6 +184,9 @@ def main(argv: list[str] | None = None) -> None:
                     help="options retenues (défaut tdb : celles du tableau de bord)")
     ap.add_argument("--fenetre", default="cash", choices=("cash", "globex"))
     ap.add_argument("--niveaux", type=int, default=5)
+    ap.add_argument("--retracement", type=float, default=levelreact.RETRACE_PTS,
+                    help="recul minimal (pts) pour parler de rejet / de retracement "
+                         "(défaut 20)")
     ap.add_argument("--zone", type=float, nargs="+", default=[levelreact.ZONE_PTS],
                     help="demi-largeur(s) de la zone d'un niveau, en points (défaut 5 ; "
                          "plusieurs valeurs : la première est la principale, les autres une "
@@ -169,7 +194,7 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--boot", type=int, default=2000, help="tirages de séances")
     args = ap.parse_args(argv)
     ev = collect(args.symbol, args.start, args.end, args.perimetre, args.fenetre, args.niveaux,
-                 tuple(args.zone))
+                 tuple(args.zone), args.retracement)
     md = report(ev, args.symbol, args.perimetre, args.fenetre, args.boot)
     outdir = SETTINGS.data_dir / "reports"
     outdir.mkdir(parents=True, exist_ok=True)
