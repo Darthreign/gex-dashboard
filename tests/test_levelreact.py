@@ -173,3 +173,56 @@ def test_script_de_bout_en_bout_sur_donnees_simulees(monkeypatch, tmp_path):
     assert (ev["delai_s"].dropna() >= 0).all()
     w0, w1 = rep.window_bounds("2026-11-04", "cash")
     assert w1 - w0 == 6.5 * 3600
+
+
+def test_la_zone_declenche_le_contact_a_son_bord():
+    # niveau 100, zone ±5 : le contact a lieu à 95 (bord bas), pas à 100
+    px = [90, 96, 98, 90, 84]
+    o = lr.touch_outcome(*_path(px), level=100.0, r=10.0, window_s=100, zone=5.0)
+    assert o["issue"] == "réaction" and o["cote"] == "par le bas"     # 95 -> 85 atteint à 84
+    # avec zone 0 le même chemin ne touche jamais la ligne : pas de contact
+    assert lr.touch_outcome(*_path(px), level=100.0, r=10.0, window_s=100, zone=0.0) is None
+    # traversée : depuis le bord d'entrée (95), +10 = 105
+    assert lr.touch_outcome(*_path([90, 96, 101, 106]), 100.0, 10.0, 100, 5.0)["issue"] == "traversée"
+    # arrivée par le haut : le bord d'entrée est 105
+    o = lr.touch_outcome(*_path([112, 104, 100, 94]), 100.0, 10.0, 100, 5.0)
+    assert o["cote"] == "par le haut" and o["issue"] == "réaction" or o["issue"] == "traversée"
+    assert lr.touch_outcome(*_path([112, 104, 100, 94]), 100.0, 10.0, 100, 5.0)["issue"] == "traversée"
+    assert lr.touch_outcome(*_path([112, 104, 110, 116]), 100.0, 10.0, 100, 5.0)["issue"] == "réaction"
+    # démarrer dans la zone n'est pas un contact
+    assert lr.touch_outcome(*_path([102, 95, 90]), 100.0, 10.0, 100, 5.0) is None
+
+
+def test_marche_aleatoire_50_50_avec_zone():
+    rng = np.random.default_rng(2)
+    out = []
+    for _ in range(6000):
+        px = 100 + np.cumsum(rng.choice([-1.0, 1.0], 600)) - 12
+        o = lr.touch_outcome(np.arange(600.0), px, 100.0, 10.0, 599, zone=5.0)
+        if o and o["issue"] != "indécis":
+            out.append(o["issue"] == "réaction")
+    assert len(out) > 2500
+    assert np.mean(out) == pytest.approx(0.5, abs=3 * 0.5 / np.sqrt(len(out)))
+
+
+def test_zones_temoins_ne_chevauchent_pas_les_vraies_zones():
+    ts = np.arange(0.0, 300.0)
+    px = 30000 + np.cumsum(np.random.default_rng(0).normal(0, 2, 300))
+    levels = pd.DataFrame({"strike": [30000.0, 30030.0], "gex": [1e9, -1e9], "gross": [2e9, 2e9],
+                           "rang": [1, 2], "signe": ["positif", "négatif"]})
+    for zone in (5.0, 20.0):
+        ev = pd.DataFrame(lr.session_events("2026-11-04", ts, px, levels, zone))
+        real = ev[ev["groupe"] != "témoin"]["strike"].unique()
+        temoins = ev[ev["groupe"] == "témoin"]["strike"].unique()
+        assert (ev["zone"] == zone).all() and len(temoins) > 0
+        assert all(np.abs(real - t).min() >= 2 * zone + 5 for t in temoins)
+
+
+def test_rapport_a_plusieurs_largeurs_de_zone():
+    base = _evenements(0.7, 0.4, 0.5)
+    ev = pd.concat([base.assign(zone=5.0), base.assign(zone=10.0)], ignore_index=True)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import level_reaction_report as rep
+    md = rep.report(ev, "NQ", "tdb", "cash", 150)
+    assert md.index("# Niveaux GEX") < md.index("# Sensibilité : zone de ± 10 pts")
+    assert "zone** de ± 5 pts" in md and "choisie d'avance" in md

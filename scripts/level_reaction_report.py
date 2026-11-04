@@ -7,6 +7,8 @@ Pour chaque séance de l'année : les 5 plus gros strikes en |GEX net| (chaîne
 reconstruite depuis l'open interest Databento, comme la piste 2 du rapport
 d'excès), chacun avec le signe de son GEX ; premier contact du prix avec
 chacun pendant la fenêtre, puis réaction ou traversée (cf. gex/levelreact.py).
+Un niveau GEX est une ZONE, pas une ligne : le contact est compté à l'entrée dans
+± 5 pts autour du strike (`--zone`), la réaction se mesure depuis ce bord.
 Les mêmes mesures sont faites sur des niveaux TÉMOINS (les vrais niveaux
 décalés de ±30 / ±40 pts) : c'est ce qui dit si le niveau compte, ou si c'est
 le marché qui rebondit partout autant.
@@ -56,7 +58,7 @@ def window_bounds(day: str, fenetre: str) -> tuple[float, float]:
 
 
 def collect(symbol: str, start: str | None, end: str | None, perimetre: str, fenetre: str,
-            n_levels: int) -> pd.DataFrame:
+            n_levels: int, zones: tuple[float, ...] = (levelreact.ZONE_PTS,)) -> pd.DataFrame:
     defs, stats = excess_report.gamma_context()
     if defs.empty or stats.empty:
         raise SystemExit("Il faut les fichiers Databento `definition` ET `statistics` "
@@ -83,7 +85,8 @@ def collect(symbol: str, start: str | None, end: str | None, perimetre: str, fen
         if levels.empty:
             skipped += 1
             continue
-        rows += levelreact.session_events(day, ts[keep], px[keep], levels)
+        for z in zones:
+            rows += levelreact.session_events(day, ts[keep], px[keep], levels, z)
     if skipped:
         print(f"{skipped} séance(s) sans clôture de la veille ou sans chaîne : écartées.")
     return pd.DataFrame(rows)
@@ -94,8 +97,23 @@ def _table(df: pd.DataFrame) -> str:
 
 
 def report(ev: pd.DataFrame, symbol: str, perimetre: str, fenetre: str, n_boot: int) -> str:
-    lines = [f"# Niveaux GEX : signe et réaction — {symbol}",
-             f"_{datetime.now(ET):%Y-%m-%d %H:%M}_", ""]
+    """Un bloc par largeur de zone ; la première est la zone PRINCIPALE, les
+    suivantes sont une vérification de sensibilité (chacune avec sa propre
+    correction de Holm : choisir après coup la zone qui arrange invaliderait
+    les p-values)."""
+    zones = sorted(ev["zone"].unique(), key=lambda z: (z != levelreact.ZONE_PTS, z)) \
+        if not ev.empty and "zone" in ev else [levelreact.ZONE_PTS]
+    parts = [_report_zone(ev[ev["zone"] == z] if "zone" in ev and not ev.empty else ev, symbol,
+                          perimetre, fenetre, n_boot, z, k == 0)
+             for k, z in enumerate(zones)]
+    return "\n\n".join(parts)
+
+
+def _report_zone(ev: pd.DataFrame, symbol: str, perimetre: str, fenetre: str, n_boot: int,
+                 zone: float, principal: bool) -> str:
+    titre = (f"# Niveaux GEX : signe et réaction — {symbol}" if principal
+             else f"# Sensibilité : zone de ± {zone:g} pts")
+    lines = [titre, f"_{datetime.now(ET):%Y-%m-%d %H:%M}_", ""]
     if ev.empty:
         return "\n".join(lines + ["_(aucune séance exploitable)_"])
     real = ev[(ev["groupe"] != "témoin") & (ev["echelle"] == 0)]
@@ -105,10 +123,15 @@ def report(ev: pd.DataFrame, symbol: str, perimetre: str, fenetre: str, n_boot: 
         f"{(real['groupe'] == 'négatif').sum()} négatifs). Périmètre des options : `{perimetre}` ; "
         f"fenêtre : {'séance cash 9h30-16h00 ET' if fenetre == 'cash' else 'séance Globex'}.", "",
         "Niveaux = les 5 strikes de plus fort |GEX net| à l'ouverture de la fenêtre (calls +, "
-        "puts −, évalué à la clôture de la veille). **Réaction** : après le premier contact, le "
-        "prix revient de R points avant de passer R points au-delà ; **traversée** : l'inverse ; "
-        "**indécis** : ni l'un ni l'autre dans le délai. Seuils symétriques : une marche "
-        "aléatoire donnerait 50 %. **Témoin** : les vrais niveaux décalés de ±30 / ±40 pts.", ""]
+        "puts −, évalué à la clôture de la veille). Un niveau est une **zone** de "
+        f"± {zone:g} pts autour du strike : le contact est l'entrée dans la zone, et la suite "
+        "se mesure depuis ce bord. **Réaction** : le prix recule de R points avant d'avancer de "
+        "R points de plus ; **traversée** : l'inverse ; **indécis** : ni l'un ni l'autre dans le "
+        "délai. Seuils symétriques : une marche aléatoire donnerait 50 %. **Témoin** : les vrais "
+        "niveaux décalés d'au moins ±30 / ±40 pts (zones de même largeur, jamais chevauchantes).",
+        ("" if principal else "_Vérification de sensibilité : la zone principale est celle du "
+         "premier bloc. Ne pas retenir la zone qui arrange : les p-values supposent une zone "
+         "choisie d'avance._"), ""]
     res = levelreact.analyse(ev, n_boot)
     for (r, w, name), table in zip(levelreact.SCALES, res["tables"]):
         lines += [f"## Échelle {name}", "", _table(table), ""]
@@ -139,9 +162,14 @@ def main(argv: list[str] | None = None) -> None:
                     help="options retenues (défaut tdb : celles du tableau de bord)")
     ap.add_argument("--fenetre", default="cash", choices=("cash", "globex"))
     ap.add_argument("--niveaux", type=int, default=5)
+    ap.add_argument("--zone", type=float, nargs="+", default=[levelreact.ZONE_PTS],
+                    help="demi-largeur(s) de la zone d'un niveau, en points (défaut 5 ; "
+                         "plusieurs valeurs : la première est la principale, les autres une "
+                         "vérification de sensibilité)")
     ap.add_argument("--boot", type=int, default=2000, help="tirages de séances")
     args = ap.parse_args(argv)
-    ev = collect(args.symbol, args.start, args.end, args.perimetre, args.fenetre, args.niveaux)
+    ev = collect(args.symbol, args.start, args.end, args.perimetre, args.fenetre, args.niveaux,
+                 tuple(args.zone))
     md = report(ev, args.symbol, args.perimetre, args.fenetre, args.boot)
     outdir = SETTINGS.data_dir / "reports"
     outdir.mkdir(parents=True, exist_ok=True)
