@@ -7,12 +7,21 @@ dans l'application : https://<hôte>/api/v1
     GET {base}/ticks/{PRODUIT}/{AAAA-MM-JJ}.parquet
 
 Sécurité : jeton `Authorization: Bearer` obligatoire (variable GEX_TICKS_TOKEN).
-Sans cette variable, tout est refusé : les routes restent inertes tant qu'on ne
-l'a pas définie. Données personnelles et non redistribuables.
+Sans cette variable (ni GEX_TICKS_SECRET), tout est refusé : les routes restent inertes
+tant qu'on ne l'a pas définie. Données personnelles et non redistribuables.
+
+Jetons personnels : la page d'invités de Squirrel X délivre à chacun un jeton signé
+`v1.<charge>.<signature>` (charge = e-mail et échéance, signature = HMAC-SHA256 avec
+GEX_TICKS_SECRET). Il est vérifié ici sans base de données. Un e-mail listé dans le fichier
+GEX_TICKS_REVOKED (un par ligne ; par défaut data/ticks_revoked.txt) est refusé aussitôt.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import hmac
+import json
+import logging
 import os
 import re
 import threading
@@ -27,6 +36,8 @@ from flask import Flask, Response, jsonify, request
 from .config import SETTINGS
 from .rtquote import _env
 from .store import REPLACE_DELAY_S, REPLACE_RETRIES
+
+log = logging.getLogger(__name__)
 
 PRODUCT_RE = re.compile(r"^[A-Z0-9]{1,8}$")
 DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -85,11 +96,57 @@ def available_days(product: str) -> list[str]:
     return sorted(d for d in stems if DAY_RE.match(d) and _session_file(product, d))
 
 
+def _b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def _unb64(text: str) -> bytes:
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def sign_token(email: str, expires: int, secret: str) -> str:
+    """Jeton personnel `v1.<charge>.<signature>` (même format que la page d'invités)."""
+    payload = _b64(json.dumps({"e": email.lower(), "exp": int(expires)}, separators=(",", ":")).encode())
+    return f"v1.{payload}.{_b64(hmac.new(secret.encode(), payload.encode(), hashlib.sha256).digest())}"
+
+
+def _revoked(email: str) -> bool:
+    """Sans fichier, personne n'est révoqué. Un fichier illisible refuse tous les jetons
+    personnels : mieux vaut un refus de trop qu'un e-mail bloqué qui passe."""
+    path = Path(_env("GEX_TICKS_REVOKED") or SETTINGS.data_dir / "ticks_revoked.txt")
+    try:
+        lines = _retry_locked(lambda: path.read_text(encoding="utf-8")).splitlines()
+    except FileNotFoundError:
+        return False
+    except (OSError, UnicodeError) as exc:
+        log.warning("Liste de révocation illisible, jetons personnels refusés : %s", type(exc).__name__)
+        return True
+    return email.lower() in {l.strip().lower() for l in lines if l.strip() and not l.startswith("#")}
+
+
+def _personal_ok(given: str) -> bool:
+    """Jeton personnel valide : signature exacte, non expiré, e-mail non révoqué."""
+    secret = _env("GEX_TICKS_SECRET") or ""
+    parts = given.split(".")
+    if not secret or len(parts) != 3 or parts[0] != "v1":
+        return False
+    expected = _b64(hmac.new(secret.encode(), parts[1].encode(), hashlib.sha256).digest())
+    if not hmac.compare_digest(parts[2].encode(), expected.encode()):
+        return False
+    try:
+        claims = json.loads(_unb64(parts[1]))
+        email, expires = str(claims["e"]), int(claims["exp"])
+    except (ValueError, KeyError, TypeError):
+        return False
+    return expires > time.time() and not _revoked(email)
+
+
 def _refused() -> Response | None:
     expected = _env("GEX_TICKS_TOKEN") or ""
     header = request.headers.get("Authorization", "")
     given = header[7:] if header.startswith("Bearer ") else ""
-    if not expected or not hmac.compare_digest(given.encode(), expected.encode()):
+    shared = bool(expected) and hmac.compare_digest(given.encode(), expected.encode())
+    if not shared and not _personal_ok(given):
         return Response(status=401)
     now = time.monotonic()
     with _hits_lock:
