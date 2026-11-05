@@ -279,3 +279,23 @@ def test_stream_ferme_si_la_cle_est_revoquee(monkeypatch):
     cle["v"] = None
     assert list(flux) == []
     assert not ticksapi._conns
+
+
+@pytest.mark.parametrize("path", ["", "days", "x/y", "levels", "session_context", "NQ/autre"])
+def test_adresse_inconnue_404_sans_passer_par_le_dashboard(tmp_path, monkeypatch, path):
+    """Ce chemin passe le Bypass Cloudflare : ni la page Dash, ni les routes à symbole."""
+    monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
+    monkeypatch.setenv("GEX_TICKS_TOKEN", TOKEN)
+    ticksapi._hits.clear()
+    app = Flask(__name__)
+    ticksapi.register_ticks_api(app)
+    app.add_url_rule("/<path:path>", endpoint="dash", view_func=lambda path: "page du dashboard")
+    app.add_url_rule("/api/v1/<symbol>/levels", endpoint="levels", view_func=lambda symbol: "niveaux")
+    app.add_url_rule("/api/v1/<symbol>/session_context", endpoint="ctx", view_func=lambda symbol: "contexte")
+    client = app.test_client()
+    r = client.get(f"/api/v1/ticks/{path}")
+    assert r.status_code == 404 and r.data == b""
+    assert client.get("/api/v1/NQ/levels").data == b"niveaux"     # les vrais symboles restent servis
+    assert client.get("/autre").data == b"page du dashboard"
+    assert client.get("/api/v1/ticks/NQ/days").status_code == 401  # les routes du contrat aussi
+    assert client.get("/api/v1/ticks/stream").status_code == 401

@@ -282,6 +282,8 @@ def _matches(etag: str) -> bool:
 
 
 def register_ticks_api(server: Flask) -> None:
+    _register_unknown_paths(server)
+
     def _ticks_stream():
         # Repli GEX_SERVER=waitress : sous ASGI, la route de gex/asgi.py passe avant.
         from . import broadcast
@@ -324,6 +326,17 @@ def register_ticks_api(server: Flask) -> None:
         if data is None:
             return Response(status=304, headers=headers)
         return Response(data, mimetype="application/octet-stream", headers=headers)
+
+
+def _register_unknown_paths(server: Flask) -> None:
+    """Ce chemin passe le Bypass Cloudflare Access : sans cette règle, une adresse
+    inconnue tomberait sur la page du dashboard (route attrape-tout de Dash) ou sur
+    une route `/api/v1/<symbol>/...` avec « ticks » pour symbole, sans aucun jeton."""
+    def _ticks_unknown(rest=""):
+        return Response(status=404)
+    for rule in ("/api/v1/ticks/", "/api/v1/ticks/<path:rest>"):
+        server.add_url_rule(rule, endpoint="_ticks_unknown", view_func=_ticks_unknown,
+                            methods=["GET"], provide_automatic_options=False)
 
 
 def _route(server: Flask, rule: str):
