@@ -12,7 +12,7 @@ import re
 import threading
 import time
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -2965,6 +2965,80 @@ def lw_channel(name: str, params: tuple) -> broadcast.Channel:
         return produce
 
     return broadcast.channel(("lw", name, params), factory, interval)
+
+
+def _scalp_as_of(symbol: str) -> str | None:
+    """Heure UTC de la dernière salve de la chaîne, pour repérer des niveaux périmés."""
+    st = chain_state(symbol)
+    with STATE.lock:
+        snap = st.snapshot
+    if snap is None:
+        return None
+    at = snap.fetched_at
+    at = at.replace(tzinfo=UTC) if at.tzinfo is None else at.astimezone(UTC)
+    return at.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def scalp_feed_levels(symbol: str) -> dict | None:
+    """Niveaux du graphique /scalp pour un indicateur distant, sans le spot."""
+    ctx = scalp_context(symbol)
+    if ctx is None:
+        return None
+
+    def ladder(keys, walls):
+        # `dist` et `near` dépendent du spot et ne sont pas envoyés.
+        return [{"name": r.name, "price": r.price, "color": rung_color(r),
+                 "kind": r.kind, "gex": r.gex}
+                for r in scalp.build_ladder(symbol, ctx["snap_spot"], ctx["zg"], ctx["hvl"],
+                                            keys, walls)]
+    return {"symbol": symbol, "as_of": _scalp_as_of(symbol),
+            "levels": ladder(ctx["keys"], ctx["walls"]),
+            "levels_0dte": ladder(ctx.get("keys_0dte") or {}, ctx.get("walls_0dte") or [])}
+
+
+def scalp_feed_profile(symbol: str) -> dict | None:
+    """Profil par strike du graphique /scalp pour un indicateur distant."""
+    ctx = scalp_context(symbol)
+    if ctx is None:
+        return None
+    profile = scalp_gex_profile(symbol, _scalp_live_spot(symbol, ctx))
+    if not profile:
+        return None
+    return {"symbol": symbol, "as_of": _scalp_as_of(symbol), "profile": profile}
+
+
+SCALP_FEED_BUILDERS = {"levels": scalp_feed_levels, "profile": scalp_feed_profile}
+SCALP_FEED_INTERVAL_S = 2.0
+
+
+def scalp_feed_channel(kind: str, symbol: str) -> broadcast.Channel:
+    builder = SCALP_FEED_BUILDERS[kind]
+
+    def factory():
+        last = {"j": None}
+
+        def produce():
+            content = builder(symbol)
+            if content is None:
+                return None
+            # allow_nan=False : un NaN rendrait l'événement illisible côté client.
+            j = json.dumps(content, allow_nan=False)
+            if j == last["j"]:
+                return None
+            last["j"] = j
+            return f"data: {j}\n\n"
+        return produce
+
+    return broadcast.channel(("scalp-feed", kind, symbol), factory, SCALP_FEED_INTERVAL_S)
+
+
+def scalp_feed_channels(products: str | None) -> dict[str, broadcast.Channel]:
+    """Canaux du flux /api/v1/ticks/stream, partagés par tous les clients. Par défaut
+    NQ et ES ; un produit sans /scalp (MNQ, CL...) est ignoré."""
+    wanted = SCALP_SCHED_SYMBOLS if products is None else products.split(",")
+    return {f"{kind}:{symbol}": scalp_feed_channel(kind, symbol)
+            for symbol in wanted if symbol in SCALP_SCHED_SYMBOLS
+            for kind in SCALP_FEED_BUILDERS}
 
 
 _SCALP_INDICATOR_SCHED = None

@@ -107,3 +107,45 @@ def test_deux_cents_flux_sans_deux_cents_threads(serveur):
     recus, pendant = asyncio.run(tous())
     assert recus == 200
     assert pendant - avant < 10          # un producteur partagé, pas un thread par flux
+
+
+def test_flux_ticks_avant_le_flux_de_symbole_et_jeton_exige(serveur, monkeypatch):
+    import http.client
+    import json
+
+    from gex import app as gex_app, ticksapi
+    port = serveur
+    ticksapi._conns.clear()
+    ticksapi._hits.clear()
+    monkeypatch.setenv("GEX_TICKS_TOKEN", "jeton-de-test")
+    broadcast._channels.pop(("scalp-feed", "levels", "NQ"), None)
+    broadcast._channels.pop(("scalp-feed", "profile", "NQ"), None)
+    monkeypatch.setitem(gex_app.SCALP_FEED_BUILDERS, "levels", lambda s: {"symbol": s, "levels": []})
+    monkeypatch.setitem(gex_app.SCALP_FEED_BUILDERS, "profile", lambda s: {"symbol": s, "profile": []})
+
+    def get(path, token=None):
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        c.request("GET", path, headers={"Authorization": f"Bearer {token}"} if token else {})
+        return c, c.getresponse()
+
+    c, r = get("/api/v1/ticks/stream?products=NQ")
+    assert r.status == 401
+    c.close()
+    c, r = get("/api/v1/ticks/stream?products=CL", "jeton-de-test")
+    assert r.status == 404
+    c.close()
+    c, r = get("/api/v1/ticks/stream?products=NQ", "jeton-de-test")
+    assert r.status == 200 and r.getheader("Content-Type").startswith("text/event-stream")
+    tags = set()
+    while len(tags) < 2:
+        line = r.fp.readline().decode()
+        if line.startswith("data: "):
+            tags.add(json.loads(line[6:])["id"])
+    assert tags == {"levels:NQ", "profile:NQ"}
+    assert ticksapi._conns == {"partage": 1}
+    c.close()
+    for _ in range(100):
+        if not ticksapi._conns:
+            break
+        time.sleep(0.05)
+    assert not ticksapi._conns              # la déconnexion rend la place

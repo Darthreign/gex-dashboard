@@ -18,9 +18,11 @@ Repli possible sur waitress : GEX_SERVER=waitress (cf. gex/run.py).
 """
 from __future__ import annotations
 
+import asyncio
+
 from a2wsgi import WSGIMiddleware
 from starlette.applications import Starlette
-from starlette.responses import JSONResponse, StreamingResponse
+from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Mount, Route
 
 from . import broadcast
@@ -80,6 +82,23 @@ async def lw_stream(request):
     return _sse(lw_channel(name, params))
 
 
+async def ticks_stream(request):
+    """Niveaux et profil de /scalp pour un indicateur distant, avec un jeton."""
+    from . import ticksapi
+    from .app import scalp_feed_channels
+    header = request.headers.get("authorization", "")
+    slot, refusal = await asyncio.to_thread(ticksapi.open_stream, header)
+    if slot is None:
+        return Response(status_code=refusal[0], headers=refusal[1])
+    chs = scalp_feed_channels(request.query_params.get("products"))
+    if not chs:
+        slot.release()
+        return Response(status_code=404)
+    return StreamingResponse(
+        ticksapi.guarded_stream_async(broadcast.multi_events_async(chs), header, slot),
+        media_type="text/event-stream", headers=SSE_HEADERS)
+
+
 async def lw_multi_stream(request):
     from .app import lw_multi_channels
     chs = lw_multi_channels(request.query_params.get("q"))
@@ -93,6 +112,8 @@ def build(dash_app, wsgi_threads: int = WSGI_THREADS) -> Starlette:
     """Application ASGI : routes SSE asynchrones, puis tout le reste vers
     l'application Flask de Dash."""
     return Starlette(routes=[
+        # AVANT /api/v1/{symbol}/stream, qui prendrait « ticks » pour un symbole.
+        Route("/api/v1/ticks/stream", ticks_stream, methods=["GET"]),
         Route("/api/v1/{symbol}/stream", price_stream),
         Route("/api/v1/{symbol}/scalp-indicators-stream", scalp_indicators_stream),
         Route("/api/v1/{symbol}/chart-stream", scalp_chart_stream),

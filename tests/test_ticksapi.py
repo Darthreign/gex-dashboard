@@ -28,6 +28,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
     monkeypatch.setenv("GEX_TICKS_TOKEN", TOKEN)
     ticksapi._hits.clear()
+    ticksapi._conns.clear()
     ticksapi._schema_ok.clear()
     app = Flask(__name__)
     ticksapi.register_ticks_api(app)
@@ -221,3 +222,60 @@ def test_sans_secret_aucun_jeton_personnel(env, monkeypatch):
     _write(live, "NQ", "2026-10-30")
     assert client.get("/api/v1/ticks/NQ/days", headers={"Authorization": f"Bearer {_signed()}"}).status_code == 401
     assert client.get("/api/v1/ticks/NQ/days", headers=AUTH).status_code == 200  # le jeton partagé existant marche toujours
+
+
+def test_limite_de_debit_par_cle(perso, monkeypatch):
+    monkeypatch.setattr(ticksapi, "RATE_MAX", 1)
+    url = "/api/v1/ticks/NQ/days"
+    assert perso.get(url, headers={"Authorization": f"Bearer {_signed()}"}).status_code == 200
+    assert perso.get(url, headers={"Authorization": f"Bearer {_signed()}"}).status_code == 429
+    assert perso.get(url, headers=AUTH).status_code == 200   # le titulaire n'est pas bloqué
+    assert perso.get(url, headers={"Authorization": f"Bearer {_signed('autre@example.com')}"}).status_code == 200
+
+
+def test_stream_refuse_sans_jeton_et_produit_inconnu(env, monkeypatch):
+    client, _, _ = env
+    monkeypatch.setattr("gex.app.scalp_feed_channels", lambda products: {})
+    assert client.get("/api/v1/ticks/stream").status_code == 401
+    assert client.get("/api/v1/ticks/stream?products=CL", headers=AUTH).status_code == 404
+    assert client.post("/api/v1/ticks/stream", headers=AUTH).status_code == 405
+    assert client.head("/api/v1/ticks/stream", headers=AUTH).status_code == 405
+    assert not ticksapi._conns      # le 404 a rendu sa place
+
+
+def test_stream_trois_connexions_par_cle(monkeypatch):
+    h = "Bearer x"
+    ticksapi._hits.clear()
+    ticksapi._conns.clear()
+    monkeypatch.setattr(ticksapi, "key_of", lambda header: "partage" if header == h else "perso:a")
+    slots = [ticksapi.open_stream(h)[0] for _ in range(3)]
+    assert all(slots)
+    slot, refus = ticksapi.open_stream(h)
+    assert slot is None and refus[0] == 429 and refus[1]["Retry-After"] == "15"
+    autre, _ = ticksapi.open_stream("Bearer y")
+    assert autre is not None        # une autre clé garde ses places
+    slots[0].release()
+    slots[0].release()              # une seule libération compte
+    assert ticksapi._conns["partage"] == 2
+    dernier, _ = ticksapi.open_stream(h)
+    assert dernier is not None
+    del dernier                     # flux jamais démarré : la place revient quand même
+    assert ticksapi._conns["partage"] == 2
+
+
+def test_stream_ferme_si_la_cle_est_revoquee(monkeypatch):
+    ticksapi._conns.clear()
+    ticksapi._hits.clear()
+    cle = {"v": "partage"}
+    monkeypatch.setattr(ticksapi, "key_of", lambda header: cle["v"])
+    monkeypatch.setattr(ticksapi, "STREAM_RECHECK_S", 0)
+    slot, _ = ticksapi.open_stream("Bearer x")
+
+    def evenements():
+        while True:
+            yield "ev"
+    flux = ticksapi.guarded_stream(evenements(), "Bearer x", slot)
+    assert next(flux) == "ev"
+    cle["v"] = None
+    assert list(flux) == []
+    assert not ticksapi._conns
