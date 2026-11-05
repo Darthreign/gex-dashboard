@@ -91,6 +91,11 @@ ABSORPTION_FRESH_S = 20.0
 # Les deux futures suivis : le libellé sert de dossier de stockage
 # (data/ticks/NQ) et de code produit pour résoudre les contrats (cf. gex/roll).
 TRACKED_FUTURES: tuple[str, ...] = ("NQ", "ES")
+# Ticks seuls : écrits dans data/ticks/<produit>, mêmes colonnes que NQ/ES, et
+# servis par gex/ticksapi, sans aucune analyse (absorption, profil, bougies). GC
+# et CL ont déjà leurs bougies via rtquote : celles de la capture les écriraient
+# en double.
+TICK_ONLY_FUTURES: tuple[str, ...] = ("MNQ", "MES", "MGC", "GC", "CL", "MCL")
 
 # La session se recycle (reconnexion + reconstruction d'univers) à ce rythme :
 # suffisant pour rattraper un roll de contrat le jour dit et repartir sur une
@@ -123,8 +128,10 @@ class TickCapture:
     buffer sur disque toutes les ~30 s (cf. flush_ticks). Sans identifiants,
     `start()` est sans effet."""
 
-    def __init__(self, symbols: tuple[str, ...] = TRACKED_FUTURES) -> None:
+    def __init__(self, symbols: tuple[str, ...] = TRACKED_FUTURES + TICK_ONLY_FUTURES) -> None:
         self.symbols = tuple(symbols)
+        # dernier résultat de roll.resolve_pair : repli si l'API refuse un appel
+        self._pairs: dict[str, list[tuple[str, str]]] = {}
         self._buf: dict[str, dict[str, list[dict]]] = {}
         # ordre OFFICIEL des contrats par sous-jacent : [actif, suivant], tel que
         # le courtier les déclare. Sert de repli au choix de roll quand aucun
@@ -142,6 +149,9 @@ class TickCapture:
         # contrairement à rtquote.QUOTES qui est CONFLATÉ côté dxFeed). Exposé au
         # dashboard via capturebus pour le ticker de prix de la page /scalp.
         self._last: dict[str, float] = {}
+        # second test d'un excès, détecté en direct (cf. gex/secondtest.py) —
+        # NQ seulement, comme l'étude ; remis à zéro au changement de séance
+        self._second: dict[str, tuple[str, object]] = {}
         # Fenêtre glissante par sous-jacent (ICEBERG_WINDOW_S), pour la détection
         # d'absorption en direct — mêmes colonnes que les lignes écrites sur
         # disque (cf. record), directement consommables par gex.iceberg.
@@ -191,8 +201,9 @@ class TickCapture:
             import pandas as pd
 
             from . import iceberg as ib
-            sw = ib.build_sweeps(pd.DataFrame(rows))
-            flags = sorted(ib.flag_absorption(sw, symbol), key=lambda f: f.end_ts)
+            # vectorisé (gex.iceberg.detect_absorptions) : quelques ms sur la
+            # fenêtre, au lieu d'une boucle Python par tick toutes les 2 s
+            flags = list(ib.detect_absorptions(pd.DataFrame(rows), symbol).itertuples())
         with self._lock:
             self._absorb_cache[symbol] = (now, flags)
         return flags
@@ -216,6 +227,13 @@ class TickCapture:
         if not fraiches:
             return None
         return self._sweep_dict(max(fraiches, key=lambda s: s.ratio or 0.0), symbol)
+
+    def second_test(self, symbol: str, now: float | None = None) -> dict | None:
+        """Dernier second test d'excès de la séance, s'il est frais (cf.
+        gex/secondtest.py), ou None."""
+        with self._lock:
+            st = self._second.get(symbol)
+            return st[1].current(now if now is not None else time.time()) if st else None
 
     def absorption_recent(self, symbol: str, limit: int = 3,
                           now: float | None = None) -> list[dict]:
@@ -328,6 +346,8 @@ class TickCapture:
             # TOUJOURS bufferisé, même le contrat SUIVANT : c'est la comparaison
             # de volume des deux qui décide du dominant (cf. gex/roll), après coup.
             self._buf.setdefault(symbol, {}).setdefault(contract, []).append(row)
+            if symbol in TICK_ONLY_FUTURES:
+                return
             # ⚠️ Tout ce qui suit (spot affiché, absorption, volume profile,
             # bougie) est un agrégat PAR SOUS-JACENT, pas par contrat — il ne
             # doit voir que le contrat ACTIF déclaré par le courtier
@@ -368,6 +388,13 @@ class TickCapture:
             if row["side"] not in ("BUY", "SELL"):
                 return
             self._last[symbol] = float(price)
+            if symbol == "NQ":
+                from .secondtest import SecondTestTracker
+                st = self._second.get(symbol)
+                if st is None or st[0] != session:
+                    st = (session, SecondTestTracker())
+                    self._second[symbol] = st
+                st[1].feed(row["ts"], float(price))
             # bougie 1 min depuis les vraies transactions (cf. PriceBar)
             minute = int(row["ts"] // 60) * 60
             cur = self._price_bar.get(symbol)
@@ -431,9 +458,15 @@ class TickCapture:
         for label in self.symbols:
             try:
                 pair = roll.resolve_pair(label, access)
+                if pair:
+                    self._pairs[label] = pair
             except Exception:  # noqa: BLE001 — un référentiel muet n'en condamne pas deux
-                log.exception("Capture tick : contrats %s non résolus — exclu", label)
-                continue
+                pair = self._pairs.get(label)
+                if pair:
+                    log.warning("Capture tick : contrats %s non résolus — derniers connus", label)
+                else:
+                    log.exception("Capture tick : contrats %s non résolus — exclu", label)
+                    continue
             if not pair:
                 log.warning("Capture tick : aucun contrat %s — exclu", label)
                 continue

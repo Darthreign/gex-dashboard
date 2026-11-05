@@ -40,9 +40,17 @@ STALE_AFTER_S = 5.0          # sans message depuis ce délai, le miroir se dit h
 MAX_MESSAGE = 2 ** 26        # l'instantané (prints + points live) dépasse le 1 Mo par défaut
 
 
+# Vrai dans le process capture/moteur lui-même : il DÉTIENT les collecteurs,
+# il ne doit jamais se prendre pour un client de sa propre liaison, même si
+# GEX_CAPTURE_URL est défini dans l'environnement système partagé.
+IS_CAPTURE_PROCESS = False
+
+
 def remote_url() -> str | None:
     """URL du process capture si le dashboard doit s'y brancher, sinon None
     (= mode autonome, collecteurs dans le même process)."""
+    if IS_CAPTURE_PROCESS:
+        return None
     return _env("GEX_CAPTURE_URL") or None
 
 
@@ -73,6 +81,10 @@ async def _handler(ws, tape: FlowTape, ticks=None) -> None:
             # tant que fraîches) — TOUJOURS incluse aussi, même liste vide.
             payload["absorption_recent"] = {s: r for s in ("NQ", "ES")
                                             if (r := ticks.absorption_recent(s))}
+            # second test d'excès en cours d'affichage (cf. gex/secondtest.py) —
+            # toujours inclus, même vide, pour que le miroir l'efface à temps
+            payload["second_test"] = {s: e for s in ("NQ",)
+                                      if (e := ticks.second_test(s)) is not None}
         await ws.send(json.dumps(payload))
         await asyncio.sleep(PUSH_INTERVAL_S)
 
@@ -155,7 +167,10 @@ class RemoteTape:
         self._last_price: dict[str, float] = {}
         self._absorption: dict[str, dict] = {}
         self._absorption_recent: dict[str, list] = {}
+        self._second_test: dict[str, dict] = {}
         self._status: tuple[str, int] = ("connecting", 0)
+        self._vol: dict[str, float] = {}
+        self._vol_day = ""
         self._last_msg = 0.0
         self._started = False
 
@@ -210,6 +225,12 @@ class RemoteTape:
                 self._rows = {
                     s: [{**r, "timestamp": datetime.fromisoformat(r["timestamp"])}
                         for r in lst] for s, lst in rows.items()}
+            if "vol" in msg:
+                day = msg.get("vol_day") or ""
+                if msg.get("snapshot") or day != self._vol_day:
+                    self._vol = {}
+                    self._vol_day = day
+                self._vol.update(msg["vol"] or {})
             st = msg.get("status")
             if st:
                 self._status = (st[0], int(st[1]))
@@ -222,6 +243,8 @@ class RemoteTape:
                 self._absorption = msg["absorption"] or {}
             if "absorption_recent" in msg:
                 self._absorption_recent = msg["absorption_recent"] or {}
+            if "second_test" in msg:
+                self._second_test = msg["second_test"] or {}
             self._last_msg = time.time() if now is None else now
 
     # -- lecture (même interface que FlowTape) ----------------------------
@@ -253,6 +276,10 @@ class RemoteTape:
         with self.lock:
             return [dict(r) for r in self._rows.get(symbol, ())]
 
+    def contract_volumes(self) -> dict[str, float]:
+        with self.lock:
+            return dict(self._vol) if self._online() else {}
+
     def live_points(self, symbol: str, window_s: int = 300,
                     now: float | None = None) -> list[tuple[float, float, int]]:
         now = time.time() if now is None else now
@@ -271,6 +298,11 @@ class RemoteTape:
         ou None. Se vide dès que la capture ne la considère plus fraîche."""
         with self.lock:
             return self._absorption.get(symbol)
+
+    def second_test(self, symbol: str) -> dict | None:
+        """Second test d'excès relayé depuis `TickCapture.second_test`, ou None."""
+        with self.lock:
+            return self._second_test.get(symbol)
 
     def absorption_recent(self, symbol: str) -> list[dict]:
         """Derniers niveaux détectés relayés depuis `TickCapture.absorption_recent`

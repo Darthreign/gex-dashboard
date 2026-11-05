@@ -73,6 +73,7 @@ def parse_chain(symbol: str, raw: dict, fetched_at: datetime) -> ChainSnapshot:
         rows.append(
             {
                 "contract": o["option"],
+                "root": OCC_RE.match(o["option"]).group("root"),
                 "expiry": exp,
                 "type": cp,
                 "strike": strike,
