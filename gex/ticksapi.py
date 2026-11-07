@@ -32,6 +32,7 @@ from collections import deque
 from datetime import date
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 from flask import Flask, Response, jsonify, request
 
@@ -87,7 +88,13 @@ def _usable(path: Path) -> bool:
     hit = _schema_ok.get(path)
     if hit and hit[:2] == (st.st_mtime_ns, st.st_size):
         return hit[2]
-    ok = REQUIRED <= set(_retry_locked(lambda: pq.read_schema(path)).names)
+    try:
+        ok = REQUIRED <= set(_retry_locked(lambda: pq.read_schema(path)).names)
+    except pa.ArrowInvalid:
+        # Fichier tronqué (plantage pendant l'écriture, 06/11) : cette séance est
+        # absente, sans faire échouer la liste entière en 500.
+        log.warning("Ticks : fichier illisible ignoré, %s", path)
+        ok = False
     _schema_ok[path] = (st.st_mtime_ns, st.st_size, ok)
     return ok
 

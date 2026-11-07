@@ -299,3 +299,20 @@ def test_adresse_inconnue_404_sans_passer_par_le_dashboard(tmp_path, monkeypatch
     assert client.get("/autre").data == b"page du dashboard"
     assert client.get("/api/v1/ticks/NQ/days").status_code == 401  # les routes du contrat aussi
     assert client.get("/api/v1/ticks/stream").status_code == 401
+
+
+def test_fichier_tronque_ignore_sans_erreur_500(env):
+    """Plantage pendant l'écriture : l'en-tête est là, la fin du fichier manque."""
+    client, live, full = env
+    _write(live, "NQ", "2026-10-29")
+    _write(live, "NQ", "2026-10-30")
+    _write(full, "NQ", "2026-10-30")
+    for d in (live / "NQ", full / "NQ"):
+        (d / "2026-10-30.parquet").write_bytes(b"PAR1" + b"\0" * 64)
+    _write(full, "NQ", "2026-10-31")
+    (live / "NQ" / "2026-10-31.parquet").write_bytes(b"PAR1" + b"\0" * 64)
+    r = client.get("/api/v1/ticks/NQ/days", headers=AUTH)
+    assert r.status_code == 200 and r.get_json() == {"days": ["2026-10-29", "2026-10-31"]}
+    assert client.get("/api/v1/ticks/NQ/2026-10-30.parquet", headers=AUTH).status_code == 404
+    r = client.get("/api/v1/ticks/NQ/2026-10-31.parquet", headers=AUTH)
+    assert r.data == (full / "NQ" / "2026-10-31.parquet").read_bytes()
