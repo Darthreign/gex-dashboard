@@ -127,7 +127,8 @@ def test_comparaison_des_definitions_de_murs(tmp_path, monkeypatch):
     rows = [{"expiry": exp, "type": t, "strike": float(k), "open_interest": float(oi)}
             for t, k, oi in (("C", 105, 5000), ("P", 105, 6000), ("C", 110, 800),
                              ("P", 95, 300))]
-    df = metrics.enrich(make_chain(100.0, rows))
+    df = metrics.enrich(make_chain(100.0, rows),
+                      now_et=datetime(2026, 10, 7, 8, 0, tzinfo=metrics.ET))
     df["spot"] = 100.0
     store.save_snapshot("NQ", df, datetime(2026, 10, 7, 8, 0))
     up = list(np.linspace(100.0, 105.0, 100)) + list(np.linspace(105.0, 101.0, 100))
