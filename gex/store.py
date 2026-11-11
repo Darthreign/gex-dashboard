@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -222,6 +223,39 @@ def previous_close_spot(symbol: str, day: str | None = None) -> float | None:
 SESSION_SPOT_MIN = (9 * 60 + 30, 16 * 60 + 15)   # minutes de New York, clôture + dernier relevé
 
 
+def _session_close_path() -> Path:
+    return SETTINGS.data_dir / "session_close.json"
+
+
+_SESSION_CLOSE: tuple[int, dict] | None = None      # (mtime_ns, contenu)
+
+
+def session_close(symbol: str) -> tuple[str, float] | None:
+    """(jour, prix) du dernier relevé de 16h00 New York pour `symbol` : les futures
+    NQ/ES, dont l'historique ne porte que les collectes de 10h et 14h."""
+    global _SESSION_CLOSE
+    try:
+        mtime = _session_close_path().stat().st_mtime_ns
+        if _SESSION_CLOSE is None or _SESSION_CLOSE[0] != mtime:
+            _SESSION_CLOSE = (mtime, json.loads(_session_close_path().read_text(encoding="utf-8")))
+        hit = _SESSION_CLOSE[1].get(symbol)
+        return (str(hit["day"]), float(hit["spot"])) if hit else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def save_session_close(symbol: str, day: str, spot: float) -> None:
+    path = _session_close_path()
+    try:
+        content = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        content = {}
+    content[symbol] = {"day": day, "spot": float(spot)}
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(content, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def last_session_spot(symbol: str) -> float | None:
     """Dernier spot relevé EN SÉANCE cash (09:30–16:15 New York), quel qu'en soit
     le jour : la clôture du jour dès 16:00, celle de la veille avant l'ouverture.
@@ -229,16 +263,21 @@ def last_session_spot(symbol: str) -> float | None:
     Sert au CÔTÉ des murs hors séance (cf. app.side_spot). Les relevés hors
     séance (relance, futures de nuit) sont écartés : un gap de nuit ne doit pas
     déplacer les murs avant l'ouverture du cash. L'historique est daté en heure
-    de New York."""
+    de New York. Le relevé de 16h00 (`session_close`, NQ/ES) l'emporte s'il est
+    plus récent que le dernier point d'historique en séance."""
+    close = session_close(symbol)
     h = load_history(symbol)
     if h.empty or "spot" not in h.columns:
-        return None
+        return close[1] if close else None
     ts = pd.to_datetime(h["timestamp"])
     minute = ts.dt.hour * 60 + ts.dt.minute
     ok = h[(minute >= SESSION_SPOT_MIN[0]) & (minute <= SESSION_SPOT_MIN[1]) & (ts.dt.day_of_week < 5)]
     if ok.empty:
-        return None
-    return float(ok.sort_values("timestamp", kind="stable")["spot"].iloc[-1])
+        return close[1] if close else None
+    last = ok.sort_values("timestamp", kind="stable").iloc[-1]
+    if close and pd.Timestamp(f"{close[0]} 16:00") >= pd.Timestamp(last["timestamp"]):
+        return close[1]
+    return float(last["spot"])
 
 
 def price_days(symbol: str) -> list[str]:

@@ -637,6 +637,22 @@ def resolve_scalp_signals(now: datetime | None = None) -> None:
         log.exception("Résolution des signaux /scalp échouée")
 
 
+def record_session_close(now: datetime | None = None) -> None:
+    """Relève à 16h00 New York le dernier prix échangé du NQ et de l'ES : c'est la
+    référence du CÔTÉ des murs hors séance (cf. store.last_session_spot), que
+    l'historique de ces futures (collectes de 10h et 14h) ne fournit pas."""
+    day = (now or datetime.now(ET)).strftime("%Y-%m-%d")
+    for code in ("NQ", "ES"):
+        px = CAPTURE.last_price(code)
+        if not px:
+            continue
+        try:
+            store.save_session_close(code, day, px)
+            log.info("%s : clôture cash relevée à %.2f", code, px)
+        except Exception:  # noqa: BLE001 — un relevé manqué ne doit pas tuer le planificateur
+            log.exception("%s : relevé de clôture cash impossible", code)
+
+
 def start_scheduler(embedded_capture: bool = True, ingest: bool = True) -> BackgroundScheduler:
     """`embedded_capture=False` : la capture (ticks, tape, bougies) vit dans un
     autre process, le dashboard n'écrit donc AUCUN de ces flux.
@@ -749,6 +765,8 @@ def add_ingest_jobs(sched: BackgroundScheduler) -> None:
                   minute=0, max_instances=1, coalesce=True)
     sched.add_job(refresh_vxn_daily, "cron", day_of_week="tue-sat", hour=7, minute=0,
                   max_instances=1, coalesce=True, id="vxn_daily_lendemain")
+    sched.add_job(record_session_close, "cron", day_of_week="mon-fri", hour=16, minute=0,
+                  second=5, max_instances=1, coalesce=True)
     # 17h20 ET (23h20 à Paris) : après la clôture des futures à 17h ET. À 16h20,
     # la dernière heure de la séance manquait à la sauvegarde du jour.
     sched.add_job(push_data_repo, "cron", day_of_week="mon-fri", hour=17, minute=20)

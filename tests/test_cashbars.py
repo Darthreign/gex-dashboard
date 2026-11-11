@@ -279,3 +279,21 @@ def test_cote_des_murs_en_seance_et_hors_seance(monkeypatch):
     assert app.side_spot("QQQ", 688.0) == 690.03           # fermé : clôture du jour
     monkeypatch.setattr(store, "last_session_spot", lambda s: None)
     assert app.side_spot("QQQ", 688.0) == 675.4            # sans relevé : ancienne référence
+
+
+def test_releve_de_16h_pour_les_futures(monkeypatch, tmp_path):
+    from gex import scheduler, store
+    monkeypatch.setattr(store, "_session_close_path", lambda: tmp_path / "session_close.json")
+    monkeypatch.setattr(store, "_SESSION_CLOSE", None)
+    h = _history([("2026-11-10 14:00:00", 27692.1), ("2026-11-11 14:00:00", 28663.0)])
+    monkeypatch.setattr(store, "load_history", lambda symbol=None: h)
+    assert store.last_session_spot("NQ") == 28663.0                 # pas encore de relevé
+    monkeypatch.setattr(scheduler.CAPTURE, "last_price", lambda s: {"NQ": 28441.5}.get(s))
+    scheduler.record_session_close(datetime(2026, 11, 11, 16, 0, 5))
+    assert store.session_close("NQ") == ("2026-11-11", 28441.5)
+    assert store.session_close("ES") is None                        # pas de prix : rien d'écrit
+    assert store.last_session_spot("NQ") == 28441.5                 # la clôture l'emporte sur 14h
+    # un point d'historique en séance plus récent que le relevé reprend la main
+    h2 = _history([("2026-11-11 14:00:00", 28663.0), ("2026-11-12 10:00:00", 28500.0)])
+    monkeypatch.setattr(store, "load_history", lambda symbol=None: h2)
+    assert store.last_session_spot("NQ") == 28500.0
