@@ -297,3 +297,14 @@ def test_releve_de_16h_pour_les_futures(monkeypatch, tmp_path):
     h2 = _history([("2026-11-11 14:00:00", 28663.0), ("2026-11-12 10:00:00", 28500.0)])
     monkeypatch.setattr(store, "load_history", lambda symbol=None: h2)
     assert store.last_session_spot("NQ") == 28500.0
+
+
+def test_collecte_forcee_avant_l_ouverture():
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from gex import scheduler
+    sched = BackgroundScheduler(timezone="America/New_York")
+    scheduler.add_ingest_jobs(sched)
+    job = sched.get_job("preopen_pull")
+    assert job.func is scheduler.pull_all and job.kwargs == {"force": True}
+    fields = {f.name: str(f) for f in job.trigger.fields}
+    assert (fields["day_of_week"], fields["hour"], fields["minute"]) == ("mon-fri", "8", "0")

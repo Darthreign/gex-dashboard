@@ -706,6 +706,14 @@ def add_ingest_jobs(sched: BackgroundScheduler) -> None:
         max_instances=1,
         coalesce=True,
     )
+    # Collecte forcée AVANT l'ouverture : l'open interest des options d'actions,
+    # d'ETF et d'indices est publié dans la nuit (entre 00h45 et 03h06 ET, relevé
+    # sur 45 jours de snapshots le 11/11/2026), mais `pull_all` ne tourne qu'en
+    # séance — sans ce passage, les murs QQQ/SPY/actions restaient sur l'open
+    # interest de la veille jusqu'au premier relevé de 09h30.
+    sched.add_job(pull_all, "cron", day_of_week="mon-fri", hour=8, minute=0,
+                  kwargs={"force": True}, max_instances=1, coalesce=True,
+                  id="preopen_pull")
     # Options natives NQ/ES — fenêtre LARGE (14 j) : 2 fois/jour seulement
     # depuis le 2026-09-23 (cf. pull_native_options), la fraîcheur intraday
     # étant désormais du ressort de pull_native_options_fast ci-dessous.
