@@ -15,7 +15,7 @@ from datetime import UTC, datetime, time, timedelta
 import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from . import backup, flowtape, idxopt, metrics, rates, roll, store, vxn
+from . import flowtape, idxopt, metrics, rates, roll, store, vxn
 from .config import SETTINGS, UNDERLYINGS
 from .ingest import ChainSnapshot, fetch_chain, fetch_index_spot
 from .metrics import ET, SummaryMetrics
@@ -187,22 +187,25 @@ def push_data_repo() -> None:
     clôture — backup hors-machine des données non reconstituables."""
     import subprocess
 
+    # Lancé par pythonw (sans console) : sans ce drapeau, Windows ouvre une
+    # fenêtre de console visible à chaque appel de git.
+    def git(*args, **kw):
+        return subprocess.run(["git", "-C", str(repo), *args],
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), **kw)
+
     repo = SETTINGS.data_dir
     if not SETTINGS.auto_push_data or not (repo / ".git").exists():
         return
     day = datetime.now(ET).strftime("%Y-%m-%d")
     try:
-        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
-        diff = subprocess.run(["git", "-C", str(repo), "diff", "--cached", "--quiet"])
+        git("add", "-A", check=True, capture_output=True)
+        diff = git("diff", "--cached", "--quiet")
         if diff.returncode == 0:
             return  # rien de nouveau
-        subprocess.run(["git", "-C", str(repo), "commit", "-m", f"data {day}"],
-                       check=True, capture_output=True)
-        has_remote = subprocess.run(["git", "-C", str(repo), "remote"],
-                                    capture_output=True, text=True).stdout.strip()
+        git("commit", "-m", f"data {day}", check=True, capture_output=True)
+        has_remote = git("remote", capture_output=True, text=True).stdout.strip()
         if has_remote:
-            subprocess.run(["git", "-C", str(repo), "push"], check=True,
-                           capture_output=True, timeout=120)
+            git("push", check=True, capture_output=True, timeout=120)
             log.info("Repo data poussé (%s)", day)
         else:
             log.info("Repo data commité localement (%s, pas de remote)", day)
@@ -747,10 +750,8 @@ def add_ingest_jobs(sched: BackgroundScheduler) -> None:
     sched.add_job(refresh_vxn_daily, "cron", day_of_week="tue-sat", hour=7, minute=0,
                   max_instances=1, coalesce=True, id="vxn_daily_lendemain")
     sched.add_job(push_data_repo, "cron", day_of_week="mon-fri", hour=16, minute=20)
-    # Sauvegarde distante après le push git : elle porte ce que GitHub refuse
-    # (archives Databento de plus de 100 Mo). Sans rclone configuré, l'appel
-    # journalise et se retire.
-    sched.add_job(backup.run, "cron", day_of_week="mon-fri", hour=16, minute=30)
+    # La sauvegarde rclone vers Drive n'est plus planifiée (11/11/2026) :
+    # l'utilisateur la gère lui-même. `python -m gex.backup` reste disponible.
     # Taux sans risque : le SOFR de la veille est publié ~8h ET, on le récupère
     # à 8h15 pour la journée (cf. gex/rates). Le week-end reprend le dernier
     # ouvré, ce qui convient.
