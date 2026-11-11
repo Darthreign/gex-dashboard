@@ -749,7 +749,9 @@ def add_ingest_jobs(sched: BackgroundScheduler) -> None:
                   minute=0, max_instances=1, coalesce=True)
     sched.add_job(refresh_vxn_daily, "cron", day_of_week="tue-sat", hour=7, minute=0,
                   max_instances=1, coalesce=True, id="vxn_daily_lendemain")
-    sched.add_job(push_data_repo, "cron", day_of_week="mon-fri", hour=16, minute=20)
+    # 17h20 ET (23h20 à Paris) : après la clôture des futures à 17h ET. À 16h20,
+    # la dernière heure de la séance manquait à la sauvegarde du jour.
+    sched.add_job(push_data_repo, "cron", day_of_week="mon-fri", hour=17, minute=20)
     # La sauvegarde rclone vers Drive n'est plus planifiée (11/11/2026) :
     # l'utilisateur la gère lui-même. `python -m gex.backup` reste disponible.
     # Taux sans risque : le SOFR de la veille est publié ~8h ET, on le récupère
