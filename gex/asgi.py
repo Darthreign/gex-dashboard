@@ -83,14 +83,14 @@ async def lw_stream(request):
 
 
 async def ticks_stream(request):
-    """Niveaux et profil de /scalp pour un indicateur distant, avec un jeton."""
+    """Niveaux et profil de /scalp, bougies cash en cours, avec un jeton."""
     from . import ticksapi
-    from .app import scalp_feed_channels
     header = request.headers.get("authorization", "")
     slot, refusal = await asyncio.to_thread(ticksapi.open_stream, header)
     if slot is None:
         return Response(status_code=refusal[0], headers=refusal[1])
-    chs = scalp_feed_channels(request.query_params.get("products"))
+    chs = ticksapi.stream_channels(request.query_params.get("products"),
+                                   request.query_params.get("cash"))
     if not chs:
         slot.release()
         return Response(status_code=404)

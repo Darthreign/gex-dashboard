@@ -6,6 +6,9 @@ dans l'application : https://<hôte>/api/v1
     GET {base}/ticks/{PRODUIT}/days
     GET {base}/ticks/{PRODUIT}/{AAAA-MM-JJ}.parquet
     GET {base}/ticks/stream?products=NQ,ES      (niveaux et profil de /scalp, en SSE)
+    GET {base}/ticks/stream?cash=QQQ,SPX        (bougie 1 min en cours, `bar:<SYMBOLE>`)
+    GET {base}/ticks/bars/{SYMBOLE}/days        (bougies 1 min cash, cf. gex/cashbars.py)
+    GET {base}/ticks/bars/{SYMBOLE}/{AAAA-MM-JJ}.parquet
 
 Sécurité : jeton `Authorization: Bearer` obligatoire (variable GEX_TICKS_TOKEN).
 Sans cette variable (ni GEX_TICKS_SECRET), tout est refusé : les routes restent inertes
@@ -288,20 +291,28 @@ def _matches(etag: str) -> bool:
     return sent.strip() == "*" or etag in [t.strip().removeprefix("W/") for t in sent.split(",")]
 
 
+def stream_channels(products: str | None, cash: str | None) -> dict:
+    """Canaux d'un flux : niveaux et profil des `products`, bougies des `cash`.
+    Sans `products`, NQ et ES par défaut, sauf si `cash` est demandé seul."""
+    from . import cashbars
+    from .app import scalp_feed_channels
+    chs = {} if products is None and cash is not None else scalp_feed_channels(products)
+    return {**chs, **cashbars.feed_channels(cash)}
+
+
 def register_ticks_api(server: Flask) -> None:
     _register_unknown_paths(server)
 
     def _ticks_stream():
         # Repli GEX_SERVER=waitress : sous ASGI, la route de gex/asgi.py passe avant.
         from . import broadcast
-        from .app import scalp_feed_channels
         if request.method != "GET":
             return Response(status=405, headers={"Allow": "GET"})
         header = request.headers.get("Authorization", "")
         slot, refusal = open_stream(header)
         if slot is None:
             return Response(status=refusal[0], headers=refusal[1])
-        chs = scalp_feed_channels(request.args.get("products"))
+        chs = stream_channels(request.args.get("products"), request.args.get("cash"))
         if not chs:
             slot.release()
             return Response(status=404)
@@ -329,6 +340,26 @@ def register_ticks_api(server: Flask) -> None:
         if path is None:
             return Response(status=404)
         etag, data = _read_for_response(path)
+        headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
+        if data is None:
+            return Response(status=304, headers=headers)
+        return Response(data, mimetype="application/octet-stream", headers=headers)
+
+
+    # Sous /ticks/ : seul chemin qui passe le Bypass Cloudflare Access.
+    @_route(server, "/api/v1/ticks/bars/<symbol>/days")
+    def _bars_days(symbol):
+        from . import cashbars
+        days = cashbars.available_days(symbol)
+        return jsonify({"days": days}) if days else Response(status=404)
+
+    @_route(server, "/api/v1/ticks/bars/<symbol>/<day>.parquet")
+    def _bars_file(symbol, day):
+        from . import cashbars
+        path = cashbars.session_file(symbol, day) if DAY_RE.match(day) else None
+        if path is None:
+            return Response(status=404)
+        etag, data = cashbars.session_parquet(path, _matches)
         headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
         if data is None:
             return Response(status=304, headers=headers)

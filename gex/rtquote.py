@@ -23,7 +23,7 @@ import os
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 
 import requests
@@ -288,6 +288,8 @@ class RealtimeQuotes:
     # manquait au backtest de niveaux.
     _bar: dict[str, Bar] = field(default_factory=dict)
     _done: list[tuple[str, Bar]] = field(default_factory=list)
+    # dernière bougie close par clé, gardée après le vidage (cf. bar_state)
+    _closed: dict[str, Bar] = field(default_factory=dict)
 
     # ------------------------------------------------------------- démarrage
     def start(self) -> None:
@@ -458,6 +460,7 @@ class RealtimeQuotes:
             cur.update(px)
         else:
             self._done.append((key, cur))
+            self._closed[key] = cur
             self._bar[key] = Bar(minute, px, px, px, px)
 
     def drain_bars(self, flush: bool = False, now: float | None = None
@@ -476,8 +479,17 @@ class RealtimeQuotes:
             out, self._done = self._done, []
             for key in list(self._bar):
                 if flush or self._bar[key].minute < current:
+                    self._closed[key] = self._bar[key]
                     out.append((key, self._bar.pop(key)))
         return out
+
+    def bar_state(self, key: str) -> tuple[Bar | None, Bar | None]:
+        """(bougie en cours, dernière bougie close) de `key`, en copies. La
+        seconde survit à `drain_bars` : un flux poussé peut l'annoncer close
+        même si le vidage périodique est passé entre deux lectures."""
+        with self.lock:
+            cur, done = self._bar.get(key), self._closed.get(key)
+            return (replace(cur) if cur else None, replace(done) if done else None)
 
 
 QUOTES = RealtimeQuotes()
