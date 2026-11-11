@@ -314,12 +314,12 @@ def register_api(app) -> None:
         # Source UNIQUE des niveaux (cf. metrics.compute_levels) : mêmes murs que
         # le dashboard. structural_spot = clôture veille (magnitude), live_spot =
         # spot courant en séance (côté). `?bucket=` fixe le périmètre d'échéances.
-        from .app import market_is_open, ref_spot as _ref_spot
+        from .app import ref_spot as _ref_spot, side_spot as _side_spot
         bucket = request.args.get("bucket", "0DTE")
         if bucket not in EXPIRY_BUCKETS:
             bucket = "0DTE"
         structural = _ref_spot(symbol, s.spot)
-        live = s.spot if market_is_open() else structural
+        live = _side_spot(symbol, s.spot)
         res = metrics.compute_levels(df, structural, live, bucket=bucket)
         levels, keys = res["levels"], res["keys"]
         hvl = metrics.zero_gamma(df, s.spot, weight_col="volume")

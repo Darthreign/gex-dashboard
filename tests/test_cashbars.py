@@ -247,3 +247,35 @@ def test_grille_des_strikes(monkeypatch):
                          [700.0, 15, 0, 300000, 10, 0, 200000]]       # 710 : aucun OI, écarté
     st.enriched = df.iloc[:1]
     assert app.scalp_feed_strikes("NQ", "QQQ")["rows"] == m["rows"]   # en cache 5 min
+
+
+# --- côté des murs hors séance : clôture du jour, pas celle de la veille ---
+
+def _history(rows):
+    return pd.DataFrame({"timestamp": pd.to_datetime([r[0] for r in rows]),
+                         "symbol": "QQQ", "spot": [r[1] for r in rows]})
+
+
+def test_dernier_spot_de_seance_ignore_les_releves_hors_seance(monkeypatch):
+    from gex import store
+    h = _history([("2026-11-10 15:59:00", 675.4), ("2026-11-11 05:39:00", 680.0),
+                  ("2026-11-11 16:09:00", 690.03), ("2026-11-11 17:05:00", 690.25)])
+    monkeypatch.setattr(store, "load_history", lambda symbol=None: h)
+    assert store.last_session_spot("QQQ") == 690.03
+    # avant l'ouverture du lendemain : toujours la dernière clôture
+    monkeypatch.setattr(store, "load_history", lambda symbol=None: h.iloc[:2])
+    assert store.last_session_spot("QQQ") == 675.4
+    monkeypatch.setattr(store, "load_history", lambda symbol=None: h.iloc[0:0])
+    assert store.last_session_spot("QQQ") is None
+
+
+def test_cote_des_murs_en_seance_et_hors_seance(monkeypatch):
+    from gex import app, store
+    monkeypatch.setattr(store, "last_session_spot", lambda s: 690.03)
+    monkeypatch.setattr(store, "previous_close_spot", lambda s, day=None: 675.4)
+    monkeypatch.setattr(app, "market_is_open", lambda: True)
+    assert app.side_spot("QQQ", 688.0) == 688.0            # séance : spot courant
+    monkeypatch.setattr(app, "market_is_open", lambda: False)
+    assert app.side_spot("QQQ", 688.0) == 690.03           # fermé : clôture du jour
+    monkeypatch.setattr(store, "last_session_spot", lambda s: None)
+    assert app.side_spot("QQQ", 688.0) == 675.4            # sans relevé : ancienne référence

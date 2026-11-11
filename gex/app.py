@@ -1373,8 +1373,8 @@ def scalp_context(symbol: str) -> dict | None:
     if df is None or snap is None:
         return None
     ref = ref_spot(symbol, snap.spot)
-    side_spot = snap.spot if market_is_open() else ref
-    res = metrics.compute_levels(df, ref, side_spot, bucket="Tout")
+    side_px = side_spot(symbol, snap.spot)
+    res = metrics.compute_levels(df, ref, side_px, bucket="Tout")
     levels = res["levels"]
     walls = []
     if not levels.empty:
@@ -1384,7 +1384,7 @@ def scalp_context(symbol: str) -> dict | None:
     # 2026-10-16) ; le bandeau et l'échelle restent sur toutes les échéances
     keys0, walls0 = {}, []
     try:
-        r0 = metrics.compute_levels(df, ref, side_spot, bucket="0DTE")
+        r0 = metrics.compute_levels(df, ref, side_px, bucket="0DTE")
         keys0 = r0["keys"]
         if not r0["levels"].empty:
             lab0 = wall_labels(r0["levels"])
@@ -3067,13 +3067,13 @@ def _linked_native(underlying: str) -> dict | None:
     if hit and (hit[1] == snap.fetched_at or now - hit[0] < LINKED_NATIVE_TTL_S):
         return hit[2]
     ref = ref_spot(underlying, snap.spot)
-    side_spot = snap.spot if market_is_open() else ref
+    side_px = side_spot(underlying, snap.spot)
     zg = summary.zero_gamma if summary else None
     hvl = metrics.zero_gamma(df, snap.spot, weight_col="volume")
 
     def ladder(bucket):
         try:
-            res = metrics.compute_levels(df, ref, side_spot, bucket=bucket)
+            res = metrics.compute_levels(df, ref, side_px, bucket=bucket)
         except Exception:  # noqa: BLE001 — pas de 0DTE (week-end, chaîne partielle)
             return []
         walls = []
@@ -3858,6 +3858,18 @@ def ref_spot(symbol: str, fallback: float) -> float:
     return store.previous_close_spot(symbol) or fallback
 
 
+def side_spot(symbol: str, spot: float) -> float:
+    """Spot qui décide du CÔTÉ des murs (résistance au-dessus, support en dessous).
+
+    En séance cash : le spot courant. Hors séance : le dernier spot relevé en
+    séance, donc la clôture du JOUR dès 16:00 — et non celle de la veille, qui
+    laissait un Call Wall sous le cours jusqu'au changement de date. Les
+    mouvements de nuit ne comptent pas : le plan reste bâti sur la clôture."""
+    if market_is_open():
+        return spot
+    return store.last_session_spot(symbol) or ref_spot(symbol, spot)
+
+
 def live_spot(symbol: str, fallback: float) -> tuple[float, bool]:
     """Spot temps réel si le flux le fournit, sinon celui de la chaîne CBOE.
 
@@ -4137,7 +4149,7 @@ def _figure_for(symbol: str, name: str, lang: str = "fr", bucket: str = "Tout",
     # Mêmes murs que le dashboard : structural = clôture veille (magnitude),
     # live = spot courant en séance (côté), périmètre = bucket affiché.
     structural = ref_spot(symbol, spot)
-    live = spot if market_is_open() else structural
+    live = side_spot(symbol, spot)
 
     if name == "gex":
         res = metrics.compute_levels(df, structural, live, bucket=bucket, today=today_d)
@@ -6457,10 +6469,10 @@ def create_app() -> Dash:
         # seulement. Hors séance, un gap de futures invaliderait des murs avant
         # même l'ouverture du cash : le prix de référence reste alors celui de
         # la clôture, qui est l'état sur lequel le plan a été bâti.
-        side_spot = snap.spot if market_is_open() else ref
+        side_px = side_spot(symbol, snap.spot)
         # Source UNIQUE des niveaux (cf. metrics.compute_levels) : murs classés au
         # spot structurel (clôture veille), côté au spot live, périmètre = bucket.
-        _res = metrics.compute_levels(df, ref, side_spot, bucket=bucket)
+        _res = metrics.compute_levels(df, ref, side_px, bucket=bucket)
         levels = _res["levels"]
         if majors and not levels.empty:
             # ne garde que les murs pesant au moins 25 % du plus fort

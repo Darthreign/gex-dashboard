@@ -219,6 +219,28 @@ def previous_close_spot(symbol: str, day: str | None = None) -> float | None:
     return float(prev["spot"].iloc[-1]) if not prev.empty else None
 
 
+SESSION_SPOT_MIN = (9 * 60 + 30, 16 * 60 + 15)   # minutes de New York, clôture + dernier relevé
+
+
+def last_session_spot(symbol: str) -> float | None:
+    """Dernier spot relevé EN SÉANCE cash (09:30–16:15 New York), quel qu'en soit
+    le jour : la clôture du jour dès 16:00, celle de la veille avant l'ouverture.
+
+    Sert au CÔTÉ des murs hors séance (cf. app.side_spot). Les relevés hors
+    séance (relance, futures de nuit) sont écartés : un gap de nuit ne doit pas
+    déplacer les murs avant l'ouverture du cash. L'historique est daté en heure
+    de New York."""
+    h = load_history(symbol)
+    if h.empty or "spot" not in h.columns:
+        return None
+    ts = pd.to_datetime(h["timestamp"])
+    minute = ts.dt.hour * 60 + ts.dt.minute
+    ok = h[(minute >= SESSION_SPOT_MIN[0]) & (minute <= SESSION_SPOT_MIN[1]) & (ts.dt.day_of_week < 5)]
+    if ok.empty:
+        return None
+    return float(ok.sort_values("timestamp", kind="stable")["spot"].iloc[-1])
+
+
 def price_days(symbol: str) -> list[str]:
     """Jours (YYYY-MM-DD) pour lesquels des bougies existent."""
     root = SETTINGS.data_dir / "prices" / symbol
