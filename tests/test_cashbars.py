@@ -93,12 +93,15 @@ def test_jeton_obligatoire_et_lecture_seule(env):
 T0 = int(pd.Timestamp("2026-11-10 10:00", tz="America/New_York").timestamp())
 
 
-def _producer(quotes, now):
-    produce = cashbars.bar_producer("QQQ", quotes=quotes, clock=lambda: now[0])
+def _producer(quotes, now, fichier=None):
+    """`fichier` : minute -> Bar, ce que la capture a déjà écrit."""
+    fichier = {} if fichier is None else fichier
+    produce = cashbars.bar_producer("QQQ", quotes=quotes, clock=lambda: now[0],
+                                    file_bar=lambda s, m: fichier.get(m))
     return lambda: (lambda p: p and json.loads(p[len("data: "):]))(produce())
 
 
-def test_bougie_en_cours_emise_sur_changement_puis_close_une_fois():
+def test_bougie_en_cours_emise_sur_changement():
     q, now = RealtimeQuotes(), [T0 + 5]
     read = _producer(q, now)
     assert read() is None                                      # aucun prix encore
@@ -107,24 +110,48 @@ def test_bougie_en_cours_emise_sur_changement_puis_close_une_fois():
     assert read() is None                                      # inchangée : rien
     q._accumulate("QQQ", 687.5, T0)
     assert read()["c"] == 687.5
+
+
+def test_cloture_emise_avec_les_valeurs_du_fichier_quand_il_arrive():
+    q, now, fichier = RealtimeQuotes(), [T0 + 5], {}
+    read = _producer(q, now, fichier)
+    q._accumulate("QQQ", 687.0, T0)
+    read()
     now[0] = T0 + 62                                           # minute suivante, premier prix
     q._accumulate("QQQ", 688.0, T0 + 60)
-    assert read() == {"symbol": "QQQ", "t": T0, "o": 687.0, "h": 687.5, "l": 687.0, "c": 687.5,
-                      "closed": True}
-    assert read() == {"symbol": "QQQ", "t": T0 + 60, "o": 688.0, "h": 688.0, "l": 688.0, "c": 688.0}
+    suivante = {"symbol": "QQQ", "t": T0 + 60, "o": 688.0, "h": 688.0, "l": 688.0, "c": 688.0}
+    assert read() == suivante                                  # fichier pas encore écrit
     assert read() is None
+    fichier[T0] = Bar(T0, 687.01, 687.6, 686.9, 687.4)         # la capture a vidé ses bougies
+    now[0] = T0 + 80
+    assert read() == {"symbol": "QQQ", "t": T0, "o": 687.01, "h": 687.6, "l": 686.9, "c": 687.4,
+                      "closed": True}
+    assert read() is None                                      # une seule fois
 
 
-def test_bougie_close_meme_sans_nouveau_prix_et_apres_le_vidage():
+def test_sans_fichier_la_bougie_locale_part_apres_l_attente():
     q, now = RealtimeQuotes(), [T0 + 5]
     read = _producer(q, now)
     q._accumulate("QQQ", 687.0, T0)
-    assert read()["t"] == T0
+    read()
     now[0] = T0 + 61                                           # la minute a tourné, pas de prix
     q.drain_bars(now=now[0])                                   # le vidage périodique est passé
+    assert read() is None
+    now[0] = T0 + 60 + cashbars.CLOSED_WAIT_S
     assert read() == {"symbol": "QQQ", "t": T0, "o": 687.0, "h": 687.0, "l": 687.0, "c": 687.0,
                       "closed": True}
     assert read() is None
+
+
+def test_cloture_lue_dans_le_vrai_fichier(tmp_path, monkeypatch):
+    monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
+    cashbars._file_bars.clear()
+    assert cashbars._file_bar("QQQ", T0) is None               # fichier absent
+    _write(tmp_path, "QQQ", "2026-11-10", ["09:59"])
+    assert cashbars._file_bar("QQQ", T0) is None               # minute pas encore écrite
+    _write(tmp_path, "QQQ", "2026-11-10", ["09:59", "10:00"])
+    bar = cashbars._file_bar("QQQ", T0)
+    assert (bar.minute, bar.open, bar.high, bar.low, bar.close) == (T0, 1.0, 3.0, 0.5, 2.0)
 
 
 def test_hors_seance_ou_bougie_close_ancienne_rien_n_est_emis():

@@ -24,7 +24,7 @@ import pandas as pd
 
 from . import broadcast, store
 from .config import SETTINGS
-from .rtquote import QUOTES
+from .rtquote import QUOTES, Bar
 
 SYMBOLS = ("QQQ", "NDX", "SPX", "SPY")
 NY = ZoneInfo("America/New_York")
@@ -32,11 +32,15 @@ OPEN_MIN, CLOSE_MIN = 9 * 60 + 30, 16 * 60
 COLUMNS = ["ts", "open", "high", "low", "close"]
 FEED_INTERVAL_S = 2.0
 BUILT_MAX = 64
+# attente du fichier avant d'émettre la bougie close locale (la capture écrit toutes les 30 s)
+CLOSED_WAIT_S = 90.0
 
 # chemin -> (mtime_ns, taille, a des bougies de séance)
 _has_session: dict[Path, tuple[int, int, bool]] = {}
 # chemin -> (ETag, parquet servi) ; le fichier du jour change toutes les 30 s
 _built: dict[Path, tuple[str, bytes]] = {}
+# chemin -> (signature, bougies de séance par minute), pour la clôture du flux
+_file_bars: dict[Path, tuple[tuple[int, int], dict]] = {}
 
 
 def _root(symbol: str) -> Path:
@@ -126,22 +130,52 @@ def _event(symbol: str, bar, closed: bool) -> str:
     return json.dumps(content, allow_nan=False)
 
 
-def bar_producer(symbol: str, quotes=QUOTES, clock=time.time):
+def _file_bar(symbol: str, minute: int):
+    """Bougie `minute` telle que la capture l'a écrite, ou None si elle n'y est pas encore."""
+    path = _root(symbol) / f"{datetime.fromtimestamp(minute, NY):%Y-%m-%d}.parquet"
+    try:
+        _, sig = _etag(path)
+        hit = _file_bars.get(path)
+        if not hit or hit[0] != sig:
+            df = _session(store._read_parquet_retry(path))
+            hit = _file_bars[path] = (sig, {int(r.ts): r for r in df.itertuples(index=False)})
+    except Exception:  # noqa: BLE001 — fichier absent ou en cours de remplacement : on réessaiera
+        return None
+    r = hit[1].get(minute)
+    return None if r is None else Bar(minute, r.open, r.high, r.low, r.close)
+
+
+def bar_producer(symbol: str, quotes=QUOTES, clock=time.time, file_bar=_file_bar):
     """Producteur du canal `bar:<symbol>` : la bougie en cours quand elle change,
-    et une fois chaque bougie close (`closed: true`) avant la suivante."""
+    et une fois chaque bougie close (`closed: true`).
+
+    La bougie close est celle du FICHIER (écrite par la capture, qui fait foi) :
+    celle de ce processus vient d'une autre connexion de cotations et en diffère.
+    Elle part donc dès que le fichier la contient (0 à ~30 s après la minute), la
+    bougie suivante étant émise entre-temps ; passé `CLOSED_WAIT_S`, c'est la
+    bougie locale qui part, pour ne jamais laisser une minute sans clôture."""
     last = {"j": None, "closed_t": 0}
+    pending: list = []                       # bougies locales closes, en attente du fichier
 
     def produce():
         cur, done = quotes.bar_state(symbol)
-        current = int(clock() // 60) * 60
+        now = clock()
+        current = int(now // 60) * 60
         if cur is not None and cur.minute < current:
             cur, done = None, cur            # minute passée, pas encore de nouveau prix
         if done is not None and done.minute > last["closed_t"]:
             last["closed_t"] = done.minute
             # une bougie close ancienne (flux resté sans abonné) n'est pas renvoyée
             if done.minute == current - 60 and in_session(done.minute):
-                last["j"] = _event(symbol, done, True)
-                return f"data: {last['j']}\n\n"
+                pending.append(done)
+        if pending:
+            local = pending[0]
+            bar = file_bar(symbol, local.minute)
+            if bar is None and now - (local.minute + 60) >= CLOSED_WAIT_S:
+                bar = local
+            if bar is not None:
+                pending.pop(0)
+                return f"data: {_event(symbol, bar, True)}\n\n"
         if cur is None or not in_session(cur.minute):
             return None
         j = _event(symbol, cur, False)
