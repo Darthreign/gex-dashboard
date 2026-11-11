@@ -171,3 +171,15 @@ def test_canaux_du_flux(monkeypatch):
     assert set(ticksapi.stream_channels(None, "QQQ,SPX,NQ,x")) == {"bar:QQQ", "bar:SPX"}
     assert set(ticksapi.stream_channels("NQ", "QQQ")) == {"levels:NQ", "bar:QQQ"}
     assert ticksapi.stream_channels("CL", "AAPL") == {}
+
+
+def test_regroupement_du_flux_spot(monkeypatch):
+    from gex import rtquote
+    monkeypatch.setattr(rtquote, "_env", lambda name: None)
+    assert rtquote.spot_aggregation() == 0.0                   # par défaut : aucun regroupement
+    assert rtquote.feed_setup_message(1)["acceptAggregationPeriod"] == 10    # chaînes inchangées
+    assert rtquote.feed_setup_message(1, 0.0)["acceptAggregationPeriod"] == 0.0
+    monkeypatch.setattr(rtquote, "_env", lambda name: "10")
+    assert rtquote.spot_aggregation() == 10.0                  # retour arrière sans code
+    monkeypatch.setattr(rtquote, "_env", lambda name: "abc")
+    assert rtquote.spot_aggregation() == 0.0

@@ -30,7 +30,7 @@ SYMBOLS = ("QQQ", "NDX", "SPX", "SPY")
 NY = ZoneInfo("America/New_York")
 OPEN_MIN, CLOSE_MIN = 9 * 60 + 30, 16 * 60
 COLUMNS = ["ts", "open", "high", "low", "close"]
-FEED_INTERVAL_S = 2.0
+FEED_INTERVAL_S = 0.5       # rythme du flux spot sans regroupement (cf. rtquote.spot_aggregation)
 BUILT_MAX = 64
 # attente du fichier avant d'émettre la bougie close locale (la capture écrit toutes les 30 s)
 CLOSED_WAIT_S = 90.0
