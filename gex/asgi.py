@@ -90,7 +90,8 @@ async def ticks_stream(request):
     if slot is None:
         return Response(status_code=refusal[0], headers=refusal[1])
     chs = ticksapi.stream_channels(request.query_params.get("products"),
-                                   request.query_params.get("cash"))
+                                   request.query_params.get("cash"),
+                                   request.query_params.get("linked"))
     if not chs:
         slot.release()
         return Response(status_code=404)

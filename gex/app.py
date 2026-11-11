@@ -3041,6 +3041,112 @@ def scalp_feed_channels(products: str | None) -> dict[str, broadcast.Channel]:
             for kind in SCALP_FEED_BUILDERS}
 
 
+# Options liées : niveaux des sous-jacents cash d'un future, pour Squirrel X.
+# Le premier de chaque paire porte le plus de gamma (mesuré du 04 au 10/11/2026).
+LINKED_UNDERLYINGS = {"NQ": ("QQQ", "NDX"), "ES": ("SPX", "SPY")}
+# Un message lié toutes les 15 s au plus : la conversion suit le basis, les
+# niveaux eux-mêmes ne bougent qu'à l'arrivée d'une chaîne.
+LINKED_FEED_INTERVAL_S = 15.0
+# Durée de vie minimale du calcul des niveaux d'un sous-jacent. Le zero gamma
+# (deux fois par sous-jacent) est le calcul qui a saturé le serveur les 03 et
+# 05/10/2026 : jamais par client, jamais plus souvent que ceci.
+LINKED_NATIVE_TTL_S = 60.0
+_LINKED_NATIVE: dict[str, tuple[float, object, dict]] = {}
+
+
+def _linked_native(underlying: str) -> dict | None:
+    """Échelle de niveaux d'un sous-jacent cash dans SON prix (strikes natifs),
+    recalculée à l'arrivée d'une chaîne et au plus toutes les `LINKED_NATIVE_TTL_S`."""
+    st = chain_state(underlying)
+    with STATE.lock:
+        df, snap, summary = st.enriched, st.snapshot, st.summary
+    if df is None or snap is None:
+        return None
+    now = time.time()
+    hit = _LINKED_NATIVE.get(underlying)
+    if hit and (hit[1] == snap.fetched_at or now - hit[0] < LINKED_NATIVE_TTL_S):
+        return hit[2]
+    ref = ref_spot(underlying, snap.spot)
+    side_spot = snap.spot if market_is_open() else ref
+    zg = summary.zero_gamma if summary else None
+    hvl = metrics.zero_gamma(df, snap.spot, weight_col="volume")
+
+    def ladder(bucket):
+        try:
+            res = metrics.compute_levels(df, ref, side_spot, bucket=bucket)
+        except Exception:  # noqa: BLE001 — pas de 0DTE (week-end, chaîne partielle)
+            return []
+        walls = []
+        if not res["levels"].empty:
+            labels = wall_labels(res["levels"])
+            walls = [(labels[lv.strike], lv.strike, lv.gex) for lv in res["levels"].itertuples()]
+        return scalp.build_ladder(underlying, snap.spot, zg, hvl, res["keys"], walls)
+    native = {"as_of": _scalp_as_of(underlying), "levels": ladder("Tout"), "levels_0dte": ladder("0DTE")}
+    _LINKED_NATIVE[underlying] = (now, snap.fetched_at, native)
+    return native
+
+
+def scalp_feed_linked(symbol: str, underlying: str) -> dict | None:
+    """Niveaux de `underlying` (QQQ, NDX, SPX, SPY) pour le graphique du future
+    `symbol` : chaque ligne porte son `strike` natif et son `price` en points du
+    future. Conversion par `gex/scales.py` : décalage du basis pour l'indice de
+    ce future (exact), ratio des prix pour l'ETF (approximation, à lire comme une
+    zone). Marché cash fermé, le basis est celui de la dernière chaîne (parité
+    call-put), figé : cf. `_transform_for`. None si la conversion est impossible,
+    plutôt que des prix faux."""
+    native = _linked_native(underlying)
+    if native is None:
+        return None
+    xf, ratio, mode = _transform_for(underlying, symbol)
+    if mode == "native":
+        return None
+    live = market_is_open()
+
+    def rows(rungs):
+        return [{"name": r.name, "strike": round(r.price, 4), "price": scalp.round_to_tick(symbol, xf(r.price)),
+                 "color": rung_color(r), "kind": r.kind, "gex": r.gex} for r in rungs]
+    out = {"symbol": symbol, "underlying": underlying, "as_of": native["as_of"], "mode": mode,
+           # heure de mesure de la conversion : maintenant si le cash cote, sinon
+           # celle de la chaîne de l'indice dont vient le basis figé
+           "basis_as_of": (datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ") if live
+                           else _scalp_as_of(scales.scale_by_key(symbol).source)),
+           "basis_live": live,
+           "levels": rows(native["levels"]), "levels_0dte": rows(native["levels_0dte"])}
+    if mode == "basis":
+        out["basis"] = round(xf(0.0), 2)
+    else:
+        out["ratio"] = round(ratio, 6)
+    return out
+
+
+def scalp_linked_channel(symbol: str, underlying: str) -> broadcast.Channel:
+    def factory():
+        last = {"j": None}
+
+        def produce():
+            content = scalp_feed_linked(symbol, underlying)
+            if content is None:
+                return None
+            j = json.dumps(content, allow_nan=False)
+            if j == last["j"]:
+                return None
+            last["j"] = j
+            return f"data: {j}\n\n"
+        return produce
+    return broadcast.channel(("scalp-linked", symbol, underlying), factory, LINKED_FEED_INTERVAL_S)
+
+
+def scalp_linked_channels(products: str | None, cash: str | None) -> dict[str, broadcast.Channel]:
+    """Canaux `levels:<FUTURE>:<SOUS-JACENT>` : tous les sous-jacents des futures
+    de `products`, et le sous-jacent de chaque graphique cash de `cash`."""
+    futures = [] if products is None and cash is not None else (
+        SCALP_SCHED_SYMBOLS if products is None else products.split(","))
+    wanted = {(f, u) for f in futures for u in LINKED_UNDERLYINGS.get(f, ())}
+    asked = (cash or "").split(",")
+    wanted |= {(f, u) for f, us in LINKED_UNDERLYINGS.items() for u in us if u in asked}
+    return {f"levels:{f}:{u}": scalp_linked_channel(f, u) for f, u in sorted(wanted)}
+
+
 _SCALP_INDICATOR_SCHED = None
 
 

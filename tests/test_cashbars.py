@@ -183,3 +183,39 @@ def test_regroupement_du_flux_spot(monkeypatch):
     assert rtquote.spot_aggregation() == 10.0                  # retour arrière sans code
     monkeypatch.setattr(rtquote, "_env", lambda name: "abc")
     assert rtquote.spot_aggregation() == 0.0
+
+
+def test_niveaux_lies_strike_natif_et_prix_du_future(monkeypatch):
+    from gex import app, scalp
+    rungs = scalp.build_ladder("QQQ", 690.0, 688.123456, None, {"call_wall": 700.0},
+                               [("GEX1", 695.0, -2.5e8)])
+    monkeypatch.setattr(app, "_linked_native",
+                        lambda u: {"as_of": "2026-11-11T19:49:07Z", "levels": rungs, "levels_0dte": []})
+    monkeypatch.setattr(app, "_scalp_as_of", lambda s: "2026-11-11T21:00:00Z")
+    monkeypatch.setattr(app, "market_is_open", lambda: False)
+    monkeypatch.setattr(app, "_transform_for", lambda u, s: ((lambda x: x * 41.25), 41.25, "ratio"))
+    m = app.scalp_feed_linked("NQ", "QQQ")
+    assert (m["symbol"], m["underlying"], m["mode"], m["ratio"]) == ("NQ", "QQQ", "ratio", 41.25)
+    assert "basis" not in m and m["basis_live"] is False
+    assert m["basis_as_of"] == "2026-11-11T21:00:00Z"          # marché fermé : heure de la chaîne
+    assert [(r["name"], r["strike"], r["price"]) for r in m["levels"]] == [
+        ("Call Wall", 700.0, 28875.0), ("GEX1", 695.0, 28668.75), ("Gamma Flip", 688.1235, 28385.0)]
+    assert m["levels"][1]["gex"] == -2.5e8 and m["levels_0dte"] == []
+    monkeypatch.setattr(app, "_transform_for", lambda u, s: ((lambda x: x + 100.58), 1.0, "basis"))
+    m = app.scalp_feed_linked("NQ", "NDX")
+    assert m["mode"] == "basis" and m["basis"] == 100.58 and "ratio" not in m
+    monkeypatch.setattr(app, "_transform_for", lambda u, s: ((lambda x: x), 1.0, "native"))
+    assert app.scalp_feed_linked("NQ", "QQQ") is None          # conversion impossible : rien
+
+
+def test_canaux_lies(monkeypatch):
+    from gex import app
+    monkeypatch.setattr(app, "scalp_feed_channels", lambda products: {"levels:NQ": object()})
+    monkeypatch.setattr(app, "scalp_linked_channel", lambda f, u: object())
+    assert set(ticksapi.stream_channels("NQ", None)) == {"levels:NQ"}           # sans linked : inchangé
+    assert set(ticksapi.stream_channels("NQ", None, "1")) == {
+        "levels:NQ", "levels:NQ:QQQ", "levels:NQ:NDX"}
+    assert set(ticksapi.stream_channels(None, "QQQ,SPX", "1")) == {
+        "bar:QQQ", "bar:SPX", "levels:NQ:QQQ", "levels:ES:SPX"}                # graphiques cash seuls
+    assert set(app.scalp_linked_channels("ES,CL", None)) == {"levels:ES:SPX", "levels:ES:SPY"}
+    assert "levels:NQ:QQQ" not in ticksapi.stream_channels("NQ", None, "full")  # pas encore servi

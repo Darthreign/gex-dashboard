@@ -7,6 +7,7 @@ dans l'application : https://<hôte>/api/v1
     GET {base}/ticks/{PRODUIT}/{AAAA-MM-JJ}.parquet
     GET {base}/ticks/stream?products=NQ,ES      (niveaux et profil de /scalp, en SSE)
     GET {base}/ticks/stream?cash=QQQ,SPX        (bougie 1 min en cours, `bar:<SYMBOLE>`)
+    GET {base}/ticks/stream?products=NQ&linked=1  (niveaux des sous-jacents liés, `levels:NQ:QQQ`)
     GET {base}/ticks/bars/{SYMBOLE}/days        (bougies 1 min cash, cf. gex/cashbars.py)
     GET {base}/ticks/bars/{SYMBOLE}/{AAAA-MM-JJ}.parquet
 
@@ -291,13 +292,16 @@ def _matches(etag: str) -> bool:
     return sent.strip() == "*" or etag in [t.strip().removeprefix("W/") for t in sent.split(",")]
 
 
-def stream_channels(products: str | None, cash: str | None) -> dict:
+def stream_channels(products: str | None, cash: str | None, linked: str | None = None) -> dict:
     """Canaux d'un flux : niveaux et profil des `products`, bougies des `cash`.
-    Sans `products`, NQ et ES par défaut, sauf si `cash` est demandé seul."""
-    from . import cashbars
-    from .app import scalp_feed_channels
-    chs = {} if products is None and cash is not None else scalp_feed_channels(products)
-    return {**chs, **cashbars.feed_channels(cash)}
+    Sans `products`, NQ et ES par défaut, sauf si `cash` est demandé seul.
+    `linked=1` ajoute les niveaux des sous-jacents cash liés (`levels:NQ:QQQ`...)."""
+    from . import app, cashbars
+    chs = {} if products is None and cash is not None else app.scalp_feed_channels(products)
+    chs = {**chs, **cashbars.feed_channels(cash)}
+    if linked == "1":
+        chs.update(app.scalp_linked_channels(products, cash))
+    return chs
 
 
 def register_ticks_api(server: Flask) -> None:
@@ -312,7 +316,8 @@ def register_ticks_api(server: Flask) -> None:
         slot, refusal = open_stream(header)
         if slot is None:
             return Response(status=refusal[0], headers=refusal[1])
-        chs = stream_channels(request.args.get("products"), request.args.get("cash"))
+        chs = stream_channels(request.args.get("products"), request.args.get("cash"),
+                              request.args.get("linked"))
         if not chs:
             slot.release()
             return Response(status=404)
