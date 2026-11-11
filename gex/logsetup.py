@@ -25,12 +25,26 @@ REPORTS_FILE = LOG_DIR / "reports.md"
 _FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 
+def _ensure_std_streams() -> None:
+    """Sous pythonw.exe (tâches planifiées, sans console) sys.stdout et
+    sys.stderr valent None : toute bibliothèque qui y écrit ou appelle
+    .isatty() plante (uvicorn au démarrage, cf. gex/run.py). On les redirige
+    vers le néant ; les vrais logs vont dans logs/*.log."""
+    import os
+    import sys
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
+
 def setup_logging(level: int = logging.INFO, console: bool = True,
                   filename: str = "gex.log") -> None:
     """Configure le logging racine : console + fichier rotatif (5 Mo × 3).
 
     `filename` : un fichier PAR process (le process capture écrit capture.log) —
     deux process sur un même fichier rotatif se disputeraient la rotation."""
+    _ensure_std_streams()
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     root = logging.getLogger()
     root.setLevel(level)

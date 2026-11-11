@@ -23,7 +23,7 @@ import os
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 
 import requests
@@ -145,12 +145,26 @@ def decode_compact_feed_data(data: list) -> list[dict]:
     return out
 
 
-def feed_setup_message(channel: int) -> dict:
+def feed_setup_message(channel: int, period: float = 10) -> dict:
     """Trame FEED_SETUP commune aux deux collecteurs (rtquote, futopt) — même
-    configuration que le SDK officiel tastytrade, cf. COMPACT_FIELDS."""
+    configuration que le SDK officiel tastytrade, cf. COMPACT_FIELDS. `period` :
+    regroupement demandé à dxFeed, en secondes (10 = un prix toutes les 10 s)."""
     return {"type": "FEED_SETUP", "channel": channel,
-            "acceptAggregationPeriod": 10, "acceptDataFormat": "COMPACT",
+            "acceptAggregationPeriod": period, "acceptDataFormat": "COMPACT",
             "acceptEventFields": COMPACT_FIELDS}
+
+
+def spot_aggregation() -> float:
+    """Regroupement du flux SPOT, en secondes. 0 par défaut : aucun regroupement,
+    soit ~2 prix par seconde et par symbole (plancher du flux courtier, mesuré le
+    11/11/2026 : 46 symboles = 2 100 messages/min, 5 Ko/s, aucun refus de dxFeed).
+    À 10 s, les bougies cash poussées à Squirrel X avançaient par à-coups.
+    `GEX_SPOT_AGGREGATION=10` revient à l'ancien réglage sans toucher au code.
+    Les chaînes d'options (futopt) gardent 10 s : des milliers de symboles."""
+    try:
+        return max(0.0, float(_env("GEX_SPOT_AGGREGATION") or 0))
+    except ValueError:
+        return 0.0
 
 
 def quote_token() -> tuple[str, str, str]:
@@ -288,6 +302,8 @@ class RealtimeQuotes:
     # manquait au backtest de niveaux.
     _bar: dict[str, Bar] = field(default_factory=dict)
     _done: list[tuple[str, Bar]] = field(default_factory=list)
+    # dernière bougie close par clé, gardée après le vidage (cf. bar_state)
+    _closed: dict[str, Bar] = field(default_factory=dict)
 
     # ------------------------------------------------------------- démarrage
     def start(self) -> None:
@@ -402,7 +418,7 @@ class RealtimeQuotes:
                                     "service": "FEED",
                                     "parameters": {"contract": "AUTO"}})
                 elif typ == "CHANNEL_OPENED":
-                    await send(feed_setup_message(1))
+                    await send(feed_setup_message(1, spot_aggregation()))
                 elif typ == "FEED_CONFIG" and not subscribed:
                     subscribed = True
                     subs = [{"type": "Quote", "symbol": s} for s in symbols.values()]
@@ -458,6 +474,7 @@ class RealtimeQuotes:
             cur.update(px)
         else:
             self._done.append((key, cur))
+            self._closed[key] = cur
             self._bar[key] = Bar(minute, px, px, px, px)
 
     def drain_bars(self, flush: bool = False, now: float | None = None
@@ -476,8 +493,17 @@ class RealtimeQuotes:
             out, self._done = self._done, []
             for key in list(self._bar):
                 if flush or self._bar[key].minute < current:
+                    self._closed[key] = self._bar[key]
                     out.append((key, self._bar.pop(key)))
         return out
+
+    def bar_state(self, key: str) -> tuple[Bar | None, Bar | None]:
+        """(bougie en cours, dernière bougie close) de `key`, en copies. La
+        seconde survit à `drain_bars` : un flux poussé peut l'annoncer close
+        même si le vidage périodique est passé entre deux lectures."""
+        with self.lock:
+            cur, done = self._bar.get(key), self._closed.get(key)
+            return (replace(cur) if cur else None, replace(done) if done else None)
 
 
 QUOTES = RealtimeQuotes()

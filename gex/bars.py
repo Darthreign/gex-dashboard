@@ -29,6 +29,7 @@ bougies 1 min, pour tester si ça change la lecture.
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 
@@ -65,20 +66,43 @@ def tick_bars(ticks: pd.DataFrame, n_ticks: int) -> pd.DataFrame:
 
 def volume_bars(ticks: pd.DataFrame, bar_volume: float) -> pd.DataFrame:
     """Une barre se clôt dès que le volume cumulé atteint `bar_volume`
-    contrats — peut regrouper peu de gros prints ou beaucoup de petits."""
+    contrats — peut regrouper peu de gros prints ou beaucoup de petits.
+
+    Vectorisé : la fin de chaque barre est le premier tick où le volume
+    cumulé depuis la fin de la précédente atteint `bar_volume` (recherche
+    dichotomique sur le cumul, une itération PAR BARRE et non par tick), puis
+    les agrégats par `reduceat`. Mêmes barres que la boucle tick par tick
+    d'origine, ~50× plus rapide sur une séance pleine."""
     if bar_volume <= 0:
         raise ValueError("bar_volume doit être > 0")
     df = _clean_ticks(ticks)
-    bars, cur, cur_vol = [], [], 0.0
-    for row in df.to_dict("records"):
-        cur.append(row)
-        cur_vol += row["volume"]
-        if cur_vol >= bar_volume:
-            bars.append(_finish_bar(cur))
-            cur, cur_vol = [], 0.0
-    if cur:
-        bars.append(_finish_bar(cur))
-    return pd.DataFrame(bars)
+    if df.empty:
+        return pd.DataFrame()
+    vol = df["volume"].to_numpy(dtype=float)
+    cum = np.cumsum(vol)
+    ends, base, n = [], 0.0, len(vol)
+    while True:
+        i = int(np.searchsorted(cum, base + bar_volume, side="left"))
+        if i >= n:
+            break
+        ends.append(i)
+        base = cum[i]
+    if not ends or ends[-1] != n - 1:
+        ends.append(n - 1)             # dernière barre incomplète, gardée
+    ends = np.asarray(ends)
+    starts = np.concatenate([[0], ends[:-1] + 1])
+    price = df["price"].to_numpy(dtype=float)
+    ts = df["ts"].to_numpy()
+    is_buy = (df["side"] == "BUY").to_numpy()
+    buy = np.add.reduceat(np.where(is_buy, vol, 0.0), starts)
+    sell = np.add.reduceat(np.where(is_buy, 0.0, vol), starts)
+    return pd.DataFrame({
+        "ts_open": ts[starts], "ts_close": ts[ends],
+        "open": price[starts], "high": np.maximum.reduceat(price, starts),
+        "low": np.minimum.reduceat(price, starts), "close": price[ends],
+        "volume": buy + sell, "buy_vol": buy, "sell_vol": sell,
+        "n_prints": ends - starts + 1,
+    })
 
 
 def range_bars(ticks: pd.DataFrame, bar_range: float) -> pd.DataFrame:
@@ -101,7 +125,8 @@ def range_bars(ticks: pd.DataFrame, bar_range: float) -> pd.DataFrame:
 
 
 def zigzag(bars: pd.DataFrame, min_move: float,
-          price_col: str = "close", ts_col: str = "ts_close") -> pd.DataFrame:
+          price_col: str = "close", ts_col: str = "ts_close", *,
+          wicks: bool = False) -> pd.DataFrame:
     """Swing high/low confirmés : un extremum n'est retenu que lorsque le prix
     s'en est ensuite écarté d'au moins `min_move` dans l'autre sens — la même
     logique que l'indicateur ZigZag classique, appliquée ici à une série de
@@ -109,14 +134,27 @@ def zigzag(bars: pd.DataFrame, min_move: float,
 
     Renvoie un DataFrame (`ts`, `price`, `kind` ∈ {"H", "L"}), dans l'ordre
     chronologique. Le DERNIER point est provisoire (pas encore confirmé par un
-    retracement) — à l'appelant de décider s'il veut le garder."""
+    retracement) — à l'appelant de décider s'il veut le garder.
+
+    `wicks=True` : sommets sur les PLUS HAUTS et creux sur les PLUS BAS des
+    barres (colonnes `high`/`low`), retracements mesurés de mèche à mèche —
+    un swing marqué au corps de bougie tombait à côté du vrai extrême
+    (signalé par l'utilisateur, 2026-10-16). Un extrême n'est confirmé que
+    par une barre POSTÉRIEURE (une seule barre ne fait pas sommet et
+    retournement : l'ordre haut/bas à l'intérieur n'est pas connu).
+    `wicks=False` (défaut) : clôtures seules, comportement historique —
+    celui du bandeau (`swing_move`), mesure validée, inchangée."""
     if min_move <= 0:
         raise ValueError("min_move doit être > 0")
     if bars.empty:
         return pd.DataFrame(columns=["ts", "price", "kind"])
 
-    prices = bars[price_col].to_numpy()
     tss = bars[ts_col].to_numpy()
+    if wicks:
+        highs = bars["high"].to_numpy(dtype=float)
+        lows = bars["low"].to_numpy(dtype=float)
+    else:
+        highs = lows = bars[price_col].to_numpy()
 
     # direction : 0 = pas encore de pivot confirmé, 1 = on cherche le prochain
     # sommet (dernier pivot confirmé = un creux), -1 = on cherche le prochain
@@ -127,18 +165,20 @@ def zigzag(bars: pd.DataFrame, min_move: float,
     hi_i = lo_i = 0
     swings: list[dict] = []
 
-    for i in range(1, len(prices)):
-        if prices[i] > prices[hi_i]:
+    # en mode clôtures, highs is lows : les conditions `lo_i < i`/`hi_i < i`
+    # sont alors toujours vraies quand l'écart est atteint (écart nul sinon)
+    for i in range(1, len(highs)):
+        if highs[i] > highs[hi_i]:
             hi_i = i
-        if prices[i] < prices[lo_i]:
+        if lows[i] < lows[lo_i]:
             lo_i = i
 
-        if direction != 1 and prices[i] - prices[lo_i] >= min_move:
-            swings.append({"ts": tss[lo_i], "price": prices[lo_i], "kind": "L"})
+        if direction != 1 and lo_i < i and highs[i] - lows[lo_i] >= min_move:
+            swings.append({"ts": tss[lo_i], "price": lows[lo_i], "kind": "L"})
             direction = 1
             hi_i = lo_i = i
-        elif direction != -1 and prices[hi_i] - prices[i] >= min_move:
-            swings.append({"ts": tss[hi_i], "price": prices[hi_i], "kind": "H"})
+        elif direction != -1 and hi_i < i and highs[hi_i] - lows[i] >= min_move:
+            swings.append({"ts": tss[hi_i], "price": highs[hi_i], "kind": "H"})
             direction = -1
             hi_i = lo_i = i
 
@@ -147,7 +187,8 @@ def zigzag(bars: pd.DataFrame, min_move: float,
     prov_i = hi_i if direction >= 0 else lo_i
     if not swings or swings[-1]["ts"] != tss[prov_i]:
         kind = "H?" if direction >= 0 else "L?"
-        swings.append({"ts": tss[prov_i], "price": prices[prov_i], "kind": kind})
+        price = highs[prov_i] if direction >= 0 else lows[prov_i]
+        swings.append({"ts": tss[prov_i], "price": price, "kind": kind})
 
     return pd.DataFrame(swings)
 

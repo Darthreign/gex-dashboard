@@ -135,6 +135,7 @@ def load_definitions(path: Path) -> pd.DataFrame:
     out = pd.DataFrame(
         {
             "instrument_id": df["instrument_id"],
+            "root": root,
             "symbol": root.map(ROOT_TO_SYMBOL),
             "type": df["instrument_class"],
             "strike": df["strike_price"].astype(float),
@@ -195,11 +196,13 @@ def load_spots() -> dict[str, dict[date, float]]:
         log.info("Spots %s : %d jours (dernier %s)", sym, len(out[sym]), max(out[sym]))
     return out
 
-def _t_years(expiries: pd.Series, day: date) -> np.ndarray:
+def _seconds_at_close(expiries: pd.Series, day: date, am: np.ndarray | None = None) -> np.ndarray:
     close_dt = datetime.combine(day, time(16, 0), tzinfo=ET)
-    exp_dt = pd.to_datetime(expiries).dt.tz_localize(ET) + pd.Timedelta(hours=16)
-    secs = (exp_dt - close_dt).dt.total_seconds().to_numpy()
-    return np.maximum(secs, 300.0) / YEAR_SECONDS
+    return metrics.seconds_to_expiry(expiries, close_dt, am)
+
+
+def _t_years(expiries: pd.Series, day: date, am: np.ndarray | None = None) -> np.ndarray:
+    return np.maximum(_seconds_at_close(expiries, day, am), 300.0) / YEAR_SECONDS
 
 
 def spot_from_parity(chain: pd.DataFrame, day: date) -> float | None:
@@ -250,23 +253,34 @@ def build_day(chain: pd.DataFrame, symbol: str, day: date,
         log.warning("%s %s : spot indisponible (source externe et parité), jour ignoré",
                     symbol, day)
         return None
-    t = _t_years(chain["expiry"], day)
-    iv = greeks.implied_vol(
-        chain["close"].to_numpy(), spot, chain["strike"].to_numpy(),
-        t, RISK_FREE_RATE, (chain["type"] == "C").to_numpy(),
-    )
-    valid = np.isfinite(iv)
-    d = chain.loc[valid].copy()
-    d["iv"] = iv[valid]
-    d["t_years"] = t[valid]
+    am = metrics.am_settled(chain)
+    alive = _seconds_at_close(chain["expiry"], day, am) > 0
+    # Même calibration que le live (forward par parité, IV du côté hors de la
+    # monnaie) sur les prix de clôture ; sans IV de flux, pas de repli.
+    cal = metrics.calibrate_chain(
+        chain.drop(columns=["iv"], errors="ignore").assign(
+            t_years=_t_years(chain["expiry"], day, am),
+            t_var=metrics.t_var_years(datetime.combine(day, time(16, 0), tzinfo=ET),
+                                      chain["expiry"], am)), spot, RISK_FREE_RATE)
+    valid = (cal["iv"] > 1e-4).to_numpy()
+    full = cal.loc[valid].copy()
+    q = full["carry_q"].to_numpy()
+    args = (spot, full["strike"], full["t_years"], RISK_FREE_RATE, full["iv"], q)
+    full["delta_bs"] = np.where((full["type"] == "C").to_numpy(),
+                                greeks.call_delta(*args), greeks.put_delta(*args))
+    # Les flux intraday (_deltas) gardent les contrats du jour, qui se
+    # traitaient en séance. Le GEX et le snapshot, eux, décrivent la structure
+    # à 16:00, comme le live (metrics.enrich) : un contrat déjà réglé — 0DTE PM
+    # du jour, ou série AM réglée à l'ouverture — n'a plus de gamma.
+    d = full.loc[alive[valid]].copy()
     is_call = (d["type"] == "C").to_numpy()
-    g = greeks.gamma(spot, d["strike"], d["t_years"], RISK_FREE_RATE, d["iv"])
-    dc = greeks.call_delta(spot, d["strike"], d["t_years"], RISK_FREE_RATE, d["iv"])
+    g = greeks.gamma(spot, d["strike"], d["t_years"], RISK_FREE_RATE, d["iv"],
+                     d["carry_q"].to_numpy())
     d["gamma_bs"] = g
-    d["delta_bs"] = np.where(is_call, dc, dc - 1.0)
     sign = np.where(is_call, 1.0, -1.0)
-    d["gex"] = sign * g * d["open_interest"] * CONTRACT_MULTIPLIER * spot**2 * 0.01
-    d["dex"] = d["delta_bs"] * d["open_interest"] * CONTRACT_MULTIPLIER * spot
+    d["gex"] = greeks.gex_dollars(sign, g, d["open_interest"], CONTRACT_MULTIPLIER, spot)
+    # même convention que metrics.enrich : dealers courts calls ET puts
+    d["dex"] = -1.0 * d["delta_bs"] * d["open_interest"] * CONTRACT_MULTIPLIER * spot
     d["spot"] = float(spot)
     zg = metrics.zero_gamma(d, spot)
     if persist_chain:
@@ -286,11 +300,11 @@ def build_day(chain: pd.DataFrame, symbol: str, day: date,
         "zero_gamma": zg,
         "pc_oi": float(oi_p / oi_c) if oi_c else float("nan"),
         "pc_volume": float(v_p / v_c) if v_c else float("nan"),
-        "net_gex_0dte": float(d.loc[d["expiry"] == day, "gex"].sum()),
+        "net_gex_0dte": float(d.loc[metrics.bucket_mask(d, "0DTE", day), "gex"].sum()),
         # provenance : données payantes sous licence d'usage personnel,
         # exclues de tout export partageable (voir gex/export.py)
         "source": "databento",
-        "_deltas": d[["instrument_id", "delta_bs", "expiry"]],
+        "_deltas": full[["instrument_id", "delta_bs", "expiry"]],
         "_spot": spot,
     }
 
@@ -301,7 +315,7 @@ def build_flows(minute_df: pd.DataFrame, deltas: pd.DataFrame, spot: float,
                 symbol: str, day: date) -> pd.DataFrame:
     m = minute_df.merge(deltas, on="instrument_id", how="inner")
     signed = m["volume"] * m["delta_bs"] * CONTRACT_MULTIPLIER * spot
-    m = m.assign(signed=signed, is_0dte=m["expiry"] == day)
+    m = m.assign(signed=signed, is_0dte=metrics.bucket_mask(m, "0DTE", day))
     grouped = m.groupby("minute").agg(
         flow_total=("signed", "sum"),
         contracts_traded=("volume", "sum"),
