@@ -295,12 +295,13 @@ def _matches(etag: str) -> bool:
 def stream_channels(products: str | None, cash: str | None, linked: str | None = None) -> dict:
     """Canaux d'un flux : niveaux et profil des `products`, bougies des `cash`.
     Sans `products`, NQ et ES par défaut, sauf si `cash` est demandé seul.
-    `linked=1` ajoute les niveaux des sous-jacents cash liés (`levels:NQ:QQQ`...)."""
+    `linked=1` ajoute les niveaux des sous-jacents cash liés (`levels:NQ:QQQ`...),
+    `linked=full` y ajoute la grille de tous leurs strikes (`strikes:NQ:QQQ`...)."""
     from . import app, cashbars
     chs = {} if products is None and cash is not None else app.scalp_feed_channels(products)
     chs = {**chs, **cashbars.feed_channels(cash)}
-    if linked == "1":
-        chs.update(app.scalp_linked_channels(products, cash))
+    if linked in ("1", "full"):
+        chs.update(app.scalp_linked_channels(products, cash, full=linked == "full"))
     return chs
 
 

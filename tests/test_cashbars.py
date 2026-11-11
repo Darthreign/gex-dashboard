@@ -218,4 +218,32 @@ def test_canaux_lies(monkeypatch):
     assert set(ticksapi.stream_channels(None, "QQQ,SPX", "1")) == {
         "bar:QQQ", "bar:SPX", "levels:NQ:QQQ", "levels:ES:SPX"}                # graphiques cash seuls
     assert set(app.scalp_linked_channels("ES,CL", None)) == {"levels:ES:SPX", "levels:ES:SPY"}
-    assert "levels:NQ:QQQ" not in ticksapi.stream_channels("NQ", None, "full")  # pas encore servi
+    monkeypatch.setattr(app, "scalp_strikes_channel", lambda f, u: object())
+    assert set(ticksapi.stream_channels(None, "QQQ", "full")) == {
+        "bar:QQQ", "levels:NQ:QQQ", "strikes:NQ:QQQ"}
+    assert set(ticksapi.stream_channels("NQ", None, "x")) == {"levels:NQ"}      # valeur inconnue
+
+
+def test_grille_des_strikes(monkeypatch):
+    from types import SimpleNamespace
+    from datetime import date
+    from gex import app
+    df = pd.DataFrame({
+        "strike": [690.0, 690.0, 700.0, 700.0, 710.0],
+        "type": ["C", "P", "C", "C", "P"],
+        "expiry": [date(2026, 11, 11), date(2026, 11, 11), date(2026, 11, 11), date(2026, 12, 18),
+                   date(2026, 12, 18)],
+        "open_interest": [100.0, 40.0, 10.0, 5.0, 0.0],
+        "gex": [3e6, -1e6, 2e5, 1e5, 0.0]})
+    st = SimpleNamespace(enriched=df, snapshot=SimpleNamespace(spot=694.0))
+    monkeypatch.setattr(app, "chain_state", lambda u: st)
+    monkeypatch.setattr(app, "_scalp_as_of", lambda u: "2026-11-11T19:49:07Z")
+    app._LINKED_STRIKES.clear()
+    m = app.scalp_feed_strikes("NQ", "QQQ")
+    assert (m["symbol"], m["underlying"], m["expiry_0dte"]) == ("NQ", "QQQ", "2026-11-11")
+    assert m["columns"] == ["strike", "call_oi", "put_oi", "gex", "call_oi_0dte", "put_oi_0dte",
+                            "gex_0dte"]
+    assert m["rows"] == [[690.0, 100, 40, 2000000, 100, 40, 2000000],
+                         [700.0, 15, 0, 300000, 10, 0, 200000]]       # 710 : aucun OI, écarté
+    st.enriched = df.iloc[:1]
+    assert app.scalp_feed_strikes("NQ", "QQQ")["rows"] == m["rows"]   # en cache 5 min

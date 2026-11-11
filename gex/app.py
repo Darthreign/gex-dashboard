@@ -3119,12 +3119,53 @@ def scalp_feed_linked(symbol: str, underlying: str) -> dict | None:
     return out
 
 
-def scalp_linked_channel(symbol: str, underlying: str) -> broadcast.Channel:
+# Grille complète des strikes (linked=full) : lourde (des centaines de lignes),
+# donc refaite au plus toutes les 5 min. L'open interest ne change qu'une fois
+# par jour ; seul le gamma glisse avec le prix.
+LINKED_STRIKES_TTL_S = 300.0
+LINKED_STRIKES_INTERVAL_S = 60.0
+STRIKES_COLUMNS = ["strike", "call_oi", "put_oi", "gex", "call_oi_0dte", "put_oi_0dte", "gex_0dte"]
+_LINKED_STRIKES: dict[str, tuple[float, dict]] = {}
+
+
+def scalp_feed_strikes(symbol: str, underlying: str) -> dict | None:
+    """Tous les strikes de `underlying` portant de l'open interest : OI des calls
+    et des puts et GEX net ($ par 1 % de mouvement, dealers longs calls et courts
+    puts), toutes échéances puis échéance la plus proche (0DTE). Strikes NATIFS :
+    la conversion vers le future est celle du message `levels:` de la même paire
+    (`mode`, `basis` ou `ratio`), que le client applique lui-même — l'inclure ici
+    ferait renvoyer toute la grille à chaque variation du basis."""
+    now = time.time()
+    hit = _LINKED_STRIKES.get(underlying)
+    if hit is None or now - hit[0] >= LINKED_STRIKES_TTL_S:
+        st = chain_state(underlying)
+        with STATE.lock:
+            df, snap = st.enriched, st.snapshot
+        if df is None or snap is None or df.empty:
+            return None
+
+        def per_strike(d):
+            calls = d["type"] == "C"
+            return pd.DataFrame({
+                "call_oi": d["open_interest"].where(calls, 0.0).groupby(d["strike"]).sum(),
+                "put_oi": d["open_interest"].where(~calls, 0.0).groupby(d["strike"]).sum(),
+                "gex": d["gex"].groupby(d["strike"]).sum()})
+        near = df["expiry"].min()
+        grid = per_strike(df).join(per_strike(df[df["expiry"] == near]).add_suffix("_0dte")).fillna(0.0)
+        grid = grid[(grid["call_oi"] + grid["put_oi"]) > 0].round(0).astype("int64")
+        hit = (now, {"as_of": _scalp_as_of(underlying), "expiry_0dte": str(near)[:10],
+                     "columns": STRIKES_COLUMNS,
+                     "rows": [[float(k), *map(int, r)] for k, r in zip(grid.index, grid.to_numpy())]})
+        _LINKED_STRIKES[underlying] = hit
+    return {"symbol": symbol, "underlying": underlying, **hit[1]}
+
+
+def _linked_channel(key: str, builder, symbol: str, underlying: str, interval: float) -> broadcast.Channel:
     def factory():
         last = {"j": None}
 
         def produce():
-            content = scalp_feed_linked(symbol, underlying)
+            content = builder(symbol, underlying)
             if content is None:
                 return None
             j = json.dumps(content, allow_nan=False)
@@ -3133,18 +3174,32 @@ def scalp_linked_channel(symbol: str, underlying: str) -> broadcast.Channel:
             last["j"] = j
             return f"data: {j}\n\n"
         return produce
-    return broadcast.channel(("scalp-linked", symbol, underlying), factory, LINKED_FEED_INTERVAL_S)
+    return broadcast.channel((key, symbol, underlying), factory, interval)
 
 
-def scalp_linked_channels(products: str | None, cash: str | None) -> dict[str, broadcast.Channel]:
+def scalp_linked_channel(symbol: str, underlying: str) -> broadcast.Channel:
+    return _linked_channel("scalp-linked", scalp_feed_linked, symbol, underlying, LINKED_FEED_INTERVAL_S)
+
+
+def scalp_strikes_channel(symbol: str, underlying: str) -> broadcast.Channel:
+    return _linked_channel("scalp-strikes", scalp_feed_strikes, symbol, underlying,
+                           LINKED_STRIKES_INTERVAL_S)
+
+
+def scalp_linked_channels(products: str | None, cash: str | None,
+                          full: bool = False) -> dict[str, broadcast.Channel]:
     """Canaux `levels:<FUTURE>:<SOUS-JACENT>` : tous les sous-jacents des futures
-    de `products`, et le sous-jacent de chaque graphique cash de `cash`."""
+    de `products`, et le sous-jacent de chaque graphique cash de `cash`. Avec
+    `full`, la grille `strikes:<FUTURE>:<SOUS-JACENT>` des mêmes paires en plus."""
     futures = [] if products is None and cash is not None else (
         SCALP_SCHED_SYMBOLS if products is None else products.split(","))
     wanted = {(f, u) for f in futures for u in LINKED_UNDERLYINGS.get(f, ())}
     asked = (cash or "").split(",")
     wanted |= {(f, u) for f, us in LINKED_UNDERLYINGS.items() for u in us if u in asked}
-    return {f"levels:{f}:{u}": scalp_linked_channel(f, u) for f, u in sorted(wanted)}
+    chs = {f"levels:{f}:{u}": scalp_linked_channel(f, u) for f, u in sorted(wanted)}
+    if full:
+        chs.update({f"strikes:{f}:{u}": scalp_strikes_channel(f, u) for f, u in sorted(wanted)})
+    return chs
 
 
 _SCALP_INDICATOR_SCHED = None
