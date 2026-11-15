@@ -149,6 +149,10 @@ class TickCapture:
         # contrairement à rtquote.QUOTES qui est CONFLATÉ côté dxFeed). Exposé au
         # dashboard via capturebus pour le ticker de prix de la page /scalp.
         self._last: dict[str, float] = {}
+        # Dernière transaction du contrat ACTIF de chaque produit suivi, y compris
+        # ceux sans /scalp (MNQ, CL...) : (prix, taille, heure d'échange). Sert au
+        # canal `quote:<PRODUIT>` de Squirrel X (cf. live_quote, gex/livequote.py).
+        self._trade: dict[str, tuple[float, int, float]] = {}
         # second test d'un excès, détecté en direct (cf. gex/secondtest.py) —
         # NQ seulement, comme l'étude ; remis à zéro au changement de séance
         self._second: dict[str, tuple[str, object]] = {}
@@ -176,6 +180,25 @@ class TickCapture:
         """Dernier prix échangé pour `symbol` ("NQ" ou "ES"), ou None."""
         with self._lock:
             return self._last.get(symbol)
+
+    def live_quote(self, symbol: str) -> dict | None:
+        """Meilleur bid / ask (avec tailles) et dernière transaction du contrat
+        ACTIF de `symbol`, tels que reçus de dxFeed sans regroupement. None tant
+        que ni cotation ni transaction ne sont arrivées."""
+        with self._lock:
+            pair = self._pairs.get(symbol)
+            if not pair:
+                return None
+            streamer, code = pair[0]
+            q, t = self._quotes.get(streamer), self._trade.get(symbol)
+            if not q and not t:
+                return None
+            out: dict = {"contract": code}
+            if q:
+                out.update(bid=q["bid"], ask=q["ask"], bid_size=q["bid_size"], ask_size=q["ask_size"])
+            if t:
+                out.update(last=t[0], last_size=t[1], last_t=t[2])
+            return out
 
     def recent_rows(self, symbol: str) -> list[dict]:
         """Copie des lignes des `ICEBERG_WINDOW_S` dernières secondes pour
@@ -346,6 +369,9 @@ class TickCapture:
             # TOUJOURS bufferisé, même le contrat SUIVANT : c'est la comparaison
             # de volume des deux qui décide du dominant (cf. gex/roll), après coup.
             self._buf.setdefault(symbol, {}).setdefault(contract, []).append(row)
+            active = self._order.get(symbol)
+            if (not active or contract == active[0]) and row["side"] in ("BUY", "SELL"):
+                self._trade[symbol] = (row["price"], row["volume"], row["ts"])
             if symbol in TICK_ONLY_FUTURES:
                 return
             # ⚠️ Tout ce qui suit (spot affiché, absorption, volume profile,

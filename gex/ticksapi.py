@@ -8,6 +8,7 @@ dans l'application : https://<hôte>/api/v1
     GET {base}/ticks/stream?products=NQ,ES      (niveaux et profil de /scalp, en SSE)
     GET {base}/ticks/stream?cash=QQQ,SPX        (bougie 1 min en cours, `bar:<SYMBOLE>`)
     GET {base}/ticks/stream?products=NQ&linked=1  (niveaux des sous-jacents liés, `levels:NQ:QQQ`)
+    GET {base}/ticks/stream?quotes=NQ,ES        (bid / ask / dernier prix en direct, `quote:<PRODUIT>`)
     GET {base}/ticks/bars/{SYMBOLE}/days        (bougies 1 min cash, cf. gex/cashbars.py)
     GET {base}/ticks/bars/{SYMBOLE}/{AAAA-MM-JJ}.parquet
 
@@ -292,14 +293,17 @@ def _matches(etag: str) -> bool:
     return sent.strip() == "*" or etag in [t.strip().removeprefix("W/") for t in sent.split(",")]
 
 
-def stream_channels(products: str | None, cash: str | None, linked: str | None = None) -> dict:
-    """Canaux d'un flux : niveaux et profil des `products`, bougies des `cash`.
-    Sans `products`, NQ et ES par défaut, sauf si `cash` est demandé seul.
+def stream_channels(products: str | None, cash: str | None, linked: str | None = None,
+                    quotes: str | None = None) -> dict:
+    """Canaux d'un flux : niveaux et profil des `products`, bougies des `cash`,
+    meilleur bid / ask et dernière transaction des `quotes` (`quote:NQ`...).
+    Sans `products`, NQ et ES par défaut, sauf si `cash` ou `quotes` est demandé seul.
     `linked=1` ajoute les niveaux des sous-jacents cash liés (`levels:NQ:QQQ`...),
     `linked=full` y ajoute la grille de tous leurs strikes (`strikes:NQ:QQQ`...)."""
-    from . import app, cashbars
-    chs = {} if products is None and cash is not None else app.scalp_feed_channels(products)
-    chs = {**chs, **cashbars.feed_channels(cash)}
+    from . import app, cashbars, livequote
+    alone = products is None and (cash is not None or quotes is not None)
+    chs = {} if alone else app.scalp_feed_channels(products)
+    chs = {**chs, **cashbars.feed_channels(cash), **livequote.feed_channels(quotes)}
     if linked in ("1", "full"):
         chs.update(app.scalp_linked_channels(products, cash, full=linked == "full"))
     return chs
@@ -318,7 +322,7 @@ def register_ticks_api(server: Flask) -> None:
         if slot is None:
             return Response(status=refusal[0], headers=refusal[1])
         chs = stream_channels(request.args.get("products"), request.args.get("cash"),
-                              request.args.get("linked"))
+                              request.args.get("linked"), request.args.get("quotes"))
         if not chs:
             slot.release()
             return Response(status=404)

@@ -85,6 +85,12 @@ async def _handler(ws, tape: FlowTape, ticks=None) -> None:
             # toujours inclus, même vide, pour que le miroir l'efface à temps
             payload["second_test"] = {s: e for s in ("NQ",)
                                       if (e := ticks.second_test(s)) is not None}
+            # meilleur bid / ask et dernière transaction de chaque produit suivi,
+            # pour le canal `quote:<PRODUIT>` de Squirrel X (cf. gex/livequote.py)
+            live_quote = getattr(ticks, "live_quote", None)
+            if live_quote is not None:
+                payload["quotes"] = {s: q for s in getattr(ticks, "symbols", ())
+                                     if (q := live_quote(s)) is not None}
         await ws.send(json.dumps(payload))
         await asyncio.sleep(PUSH_INTERVAL_S)
 
@@ -168,6 +174,7 @@ class RemoteTape:
         self._absorption: dict[str, dict] = {}
         self._absorption_recent: dict[str, list] = {}
         self._second_test: dict[str, dict] = {}
+        self._quotes: dict[str, dict] = {}
         self._status: tuple[str, int] = ("connecting", 0)
         self._vol: dict[str, float] = {}
         self._vol_day = ""
@@ -245,6 +252,8 @@ class RemoteTape:
                 self._absorption_recent = msg["absorption_recent"] or {}
             if "second_test" in msg:
                 self._second_test = msg["second_test"] or {}
+            if "quotes" in msg:
+                self._quotes = msg["quotes"] or {}
             self._last_msg = time.time() if now is None else now
 
     # -- lecture (même interface que FlowTape) ----------------------------
@@ -292,6 +301,12 @@ class RemoteTape:
         n'est encore arrivé."""
         with self.lock:
             return self._last_price.get(symbol)
+
+    def live_quote(self, symbol: str) -> dict | None:
+        """Meilleur bid / ask et dernière transaction de `symbol`, relayés depuis
+        `tickcapture.TickCapture.live_quote` du process capture."""
+        with self.lock:
+            return self._quotes.get(symbol)
 
     def absorption(self, symbol: str) -> dict | None:
         """Salve d'absorption fraîche relayée depuis `TickCapture.absorption_now`,
