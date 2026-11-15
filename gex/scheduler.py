@@ -582,6 +582,26 @@ def flush_ticks() -> None:
                 log.exception("Capture tick : échec écriture %s", symbol)
 
 
+def flush_quotes() -> None:
+    """Écrit sur disque les cotations accumulées par la capture (cf.
+    tickcapture.QUOTE_COLUMNS), rangées par séance CME comme les ticks et par
+    heure UTC. Sans GEX_QUOTE_RECORD=1 le tampon reste vide : rien n'est écrit."""
+    from .tickcapture import QUOTE_COLUMNS, _session_day
+    buf, dropped = CAPTURE.drain_quotes()
+    if dropped:
+        log.warning("Cotations : %d abandonnées (tampon plein)", dropped)
+    for symbol, rows in buf.items():
+        groups: dict[tuple[str, str], list] = {}
+        for r in rows:
+            hour = datetime.fromtimestamp(r[0], tz=UTC).strftime("%H")
+            groups.setdefault((_session_day(r[0]), hour), []).append(r)
+        for (day, hour), part in groups.items():
+            try:
+                store.append_quotes(symbol, day, hour, part, QUOTE_COLUMNS)
+            except Exception:  # noqa: BLE001 — une écriture ratée ne doit rien casser
+                log.exception("Cotations : échec écriture %s", symbol)
+
+
 def add_flush_jobs(sched: BackgroundScheduler) -> None:
     """Jobs d'écriture disque des flux temps réel (bougies, tape, ticks). Portés
     par le process qui possède les collecteurs : le dashboard en mode autonome,
@@ -594,6 +614,7 @@ def add_flush_jobs(sched: BackgroundScheduler) -> None:
     # job vide vers le parquet journalier de NQ/ES toutes les 60 s. Session dxLink
     # dédiée, sans jamais toucher le flux spot du dashboard.
     sched.add_job(flush_ticks, "interval", seconds=60, max_instances=1, coalesce=True)
+    sched.add_job(flush_quotes, "interval", seconds=60, max_instances=1, coalesce=True)
     # prints bruts d'options : la reconstruction à l'identique du tape
     sched.add_job(flush_optprints, "interval", seconds=60, max_instances=1, coalesce=True)
 

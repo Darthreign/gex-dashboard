@@ -60,6 +60,7 @@ from .metrics import ET
 from .rtquote import (
     BACKOFF_MAX,
     BACKOFF_START,
+    _env,
     credentials_present,
     quote_token,
 )
@@ -87,6 +88,18 @@ def _session_day(ts: float) -> str:
 
 
 ABSORPTION_FRESH_S = 20.0
+
+# Enregistrement de CHAQUE changement de cotation (meilleur bid / ask et tailles)
+# du contrat actif, pour rejouer le premier niveau du carnet entre deux
+# transactions (replay Squirrel X). Désactivé par défaut : GEX_QUOTE_RECORD=1.
+QUOTE_COLUMNS = ("ts", "ts_exch", "bid", "bid_size", "ask", "ask_size")
+# Plafond du tampon entre deux vidanges (60 s) : au-delà, les cotations sont
+# abandonnées et comptées plutôt que de laisser gonfler la mémoire de la capture.
+QUOTE_BUFFER_MAX = 2_000_000
+
+
+def quote_recording_enabled() -> bool:
+    return (_env("GEX_QUOTE_RECORD") or "").strip() == "1"
 
 # Les deux futures suivis : le libellé sert de dossier de stockage
 # (data/ticks/NQ) et de code produit pour résoudre les contrats (cf. gex/roll).
@@ -153,6 +166,13 @@ class TickCapture:
         # ceux sans /scalp (MNQ, CL...) : (prix, taille, heure d'échange). Sert au
         # canal `quote:<PRODUIT>` de Squirrel X (cf. live_quote, gex/livequote.py).
         self._trade: dict[str, tuple[float, int, float]] = {}
+        # Enregistrement des cotations (cf. QUOTE_COLUMNS) : tampon par produit,
+        # contrat actif seulement ; `_active` = streamer du contrat actif -> produit.
+        self._record_quotes = quote_recording_enabled()
+        self._active: dict[str, str] = {}
+        self._qbuf: dict[str, list[tuple]] = {}
+        self._qcount = 0
+        self._qdropped = 0
         # second test d'un excès, détecté en direct (cf. gex/secondtest.py) —
         # NQ seulement, comme l'étude ; remis à zéro au changement de séance
         self._second: dict[str, tuple[str, object]] = {}
@@ -267,7 +287,7 @@ class TickCapture:
         flags = self._absorption_flags(symbol, now)
         return [self._sweep_dict(f, symbol) for f in flags[-limit:][::-1]]
 
-    def quote(self, item: dict) -> None:
+    def quote(self, item: dict, now: float | None = None) -> None:
         """Retient l'état de la cotation d'un contrat (bid/ask, tailles).
 
         On garde AUSSI l'état précédent des tailles : une transaction et la mise
@@ -291,6 +311,29 @@ class TickCapture:
             else:
                 cur.update(prev_bid_size=old["bid_size"], prev_ask_size=old["ask_size"])
             self._quotes[sym] = cur
+            if self._record_quotes:
+                symbol = self._active.get(sym)
+                if symbol is None:
+                    return
+                if self._qcount >= QUOTE_BUFFER_MAX:
+                    self._qdropped += 1
+                    return
+                exch = max((v for k in ("time", "bidTime", "askTime")
+                            if isinstance(v := item.get(k), (int, float)) and v == v and v > 0),
+                           default=None)
+                self._qbuf.setdefault(symbol, []).append((
+                    time.time() if now is None else float(now),
+                    None if exch is None else exch / 1000.0,
+                    cur["bid"], cur["bid_size"], cur["ask"], cur["ask_size"]))
+                self._qcount += 1
+
+    def drain_quotes(self) -> tuple[dict[str, list[tuple]], int]:
+        """Récupère et vide le tampon des cotations : ({produit: lignes dans l'ordre
+        de `QUOTE_COLUMNS`}, nombre de cotations abandonnées faute de place)."""
+        with self._lock:
+            out, self._qbuf = self._qbuf, {}
+            dropped, self._qdropped, self._qcount = self._qdropped, 0, 0
+        return out, dropped
 
     def contract_order(self, symbol: str) -> list[str]:
         """[contrat actif, contrat suivant] pour `symbol`, ordre du courtier."""
@@ -500,6 +543,8 @@ class TickCapture:
                 out[streamer] = (label, code)
             with self._lock:
                 self._order[label] = [code for _, code in pair]
+                self._active = {s: l for s, l in self._active.items() if l != label}
+                self._active[pair[0][0]] = label
         return out
 
     def _run(self) -> None:
@@ -593,7 +638,7 @@ class TickCapture:
                         if et == "TimeAndSale":
                             self.record(universe, item, now)
                         elif et == "Quote":
-                            self.quote(item)
+                            self.quote(item, now)
 
                 # Recyclage périodique : reconnexion + univers reconstruit (roll).
                 if time.monotonic() > deadline:

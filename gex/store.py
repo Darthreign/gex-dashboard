@@ -319,6 +319,22 @@ def append_ticks(symbol: str, rows: list[dict], ts: datetime) -> Path | None:
     return path
 
 
+def append_quotes(symbol: str, day: str, hour: str, rows: list[tuple], columns) -> Path | None:
+    """Ajoute des cotations au parquet HORAIRE `quotes/<produit>/<séance>/<HH>.parquet`
+    (HH = heure UTC). Un fichier par heure et non par jour : les cotations sont
+    bien plus nombreuses que les transactions, et relire-réécrire la journée
+    entière à chaque vidange coûterait de plus en plus cher au fil de la séance."""
+    if not rows:
+        return None
+    path = _ensure(SETTINGS.data_dir / "quotes" / symbol / day / f"{hour}.parquet")
+    with _lock_for(path):
+        new = pd.DataFrame(rows, columns=list(columns))
+        if path.exists():
+            new = pd.concat([pd.read_parquet(path), new], ignore_index=True)
+        _write_atomic(new, path)
+    return path
+
+
 def load_ticks(symbol: str, day: str) -> pd.DataFrame:
     path = SETTINGS.data_dir / "ticks" / symbol / f"{day}.parquet"
     return pd.read_parquet(path) if path.exists() else pd.DataFrame()
