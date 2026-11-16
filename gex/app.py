@@ -3792,11 +3792,19 @@ def _transform_for(symbol: str, scale_key: str | None):
     #
     # Marché fermé, on garde donc le basis de parité call-put du dernier pull,
     # qui est un vrai coût de portage et reste stable.
+    #
+    # Les sous-jacents SANS future (QQQ, SPY) prennent eux aussi leur prix temps
+    # réel en séance : le spot de leur chaîne CBOE est différé, et le marier au
+    # future du moment décalait tous leurs niveaux transposés du mouvement fait
+    # pendant ce retard (82 points sur NQ le 16/11/2026).
     if market_is_open():
         for u in UNDERLYINGS.values():
+            idx = QUOTES.price(u.key)
             if not u.future:
+                if idx:
+                    spots[u.key] = idx
                 continue
-            idx, fut = QUOTES.price(u.key), QUOTES.price(u.future)
+            fut = QUOTES.price(u.future)
             if idx and fut:
                 spots[u.key] = idx
                 bases[u.key] = fut - idx
