@@ -316,3 +316,22 @@ def test_fichier_tronque_ignore_sans_erreur_500(env):
     assert client.get("/api/v1/ticks/NQ/2026-10-30.parquet", headers=AUTH).status_code == 404
     r = client.get("/api/v1/ticks/NQ/2026-10-31.parquet", headers=AUTH)
     assert r.data == (full / "NQ" / "2026-10-31.parquet").read_bytes()
+
+
+def test_stream_journalise_ouverture_refus_fermeture(monkeypatch, caplog):
+    """Sans ces lignes, une coupure de flux ne laisse aucune trace côté serveur."""
+    ticksapi._hits.clear()
+    ticksapi._conns.clear()
+    monkeypatch.setattr(ticksapi, "key_of", lambda header: {"Bearer x": "perso:a@b.c"}.get(header))
+    monkeypatch.setattr(ticksapi, "STREAM_MAX_CONN", 1)
+    with caplog.at_level("INFO", logger="gex.ticksapi"):
+        slot, _ = ticksapi.open_stream("Bearer x")
+        ticksapi.open_stream("Bearer x")
+        ticksapi.open_stream("Bearer secret-invalide")
+        slot.release()
+    lignes = [r.getMessage() for r in caplog.records]
+    assert lignes[0] == "FLUX ouvert — clé perso:a@b.c, 1 ouvert(s)"
+    assert lignes[1] == "FLUX refusé 429 — clé perso:a@b.c, 1 flux déjà ouverts"
+    assert lignes[2].startswith("FLUX refusé 401")
+    assert lignes[3].startswith("FLUX fermé — clé perso:a@b.c, durée 0 s, 0 encore")
+    assert "secret-invalide" not in " ".join(lignes)      # jamais la valeur d'un jeton

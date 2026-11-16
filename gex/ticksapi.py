@@ -203,6 +203,7 @@ class StreamSlot:
     def __init__(self, key: str) -> None:
         self.key = key
         self._held = True
+        self._opened = time.monotonic()
 
     def release(self) -> None:
         with _hits_lock:
@@ -210,8 +211,14 @@ class StreamSlot:
                 return
             self._held = False
             _conns[self.key] -= 1
-            if not _conns[self.key]:
+            left = _conns[self.key]
+            if not left:
                 del _conns[self.key]
+        try:
+            log.info("FLUX fermé — clé %s, durée %.0f s, %d encore ouvert(s)",
+                     self.key, time.monotonic() - self._opened, left)
+        except Exception:  # noqa: BLE001 — appelé aussi par le ramasse-miettes
+            pass
 
     __del__ = release
 
@@ -221,14 +228,22 @@ def open_stream(header: str) -> tuple[StreamSlot | None, tuple[int, dict] | None
     l'ouverture compte dans le quota, jamais les événements."""
     key = key_of(header)
     if key is None:
+        log.info("FLUX refusé 401 — clé absente ou invalide")
         return None, (401, {})
     if _over_quota(key):
+        log.info("FLUX refusé 429 — clé %s, quota de requêtes atteint", key)
         return None, (429, {"Retry-After": str(int(RATE_WINDOW_S))})
     with _hits_lock:
-        if _conns.get(key, 0) >= STREAM_MAX_CONN:
-            return None, (429, {"Retry-After": str(STREAM_RETRY_S)})
-        _conns[key] = _conns.get(key, 0) + 1
-        return StreamSlot(key), None
+        held = _conns.get(key, 0)
+        if held < STREAM_MAX_CONN:
+            _conns[key] = held + 1
+            slot = StreamSlot(key)
+    # La clé d'un jeton personnel est `perso:<e-mail>` : jamais la valeur du jeton.
+    if held >= STREAM_MAX_CONN:
+        log.info("FLUX refusé 429 — clé %s, %d flux déjà ouverts", key, held)
+        return None, (429, {"Retry-After": str(STREAM_RETRY_S)})
+    log.info("FLUX ouvert — clé %s, %d ouvert(s)", key, held + 1)
+    return slot, None
 
 
 def guarded_stream(events, header: str, slot: StreamSlot):
