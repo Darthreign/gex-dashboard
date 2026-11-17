@@ -27,12 +27,14 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import itertools
 import json
 import logging
 import os
 import re
 import threading
 import time
+import weakref
 from collections import deque
 from datetime import date
 from pathlib import Path
@@ -61,6 +63,10 @@ STREAM_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
 _hits: dict[str, deque[float]] = {}
 _conns: dict[str, int] = {}
+# Flux vivants par clé, en références faibles : une place jamais démarrée doit
+# rester libérable par le ramasse-miettes.
+_slots: dict[str, "weakref.WeakSet[StreamSlot]"] = {}
+_slot_seq = itertools.count()
 # RLock : StreamSlot.__del__ peut se déclencher pendant que le verrou est tenu.
 _hits_lock = threading.RLock()
 _schema_ok: dict[Path, tuple[int, int, bool]] = {}
@@ -204,6 +210,12 @@ class StreamSlot:
         self.key = key
         self._held = True
         self._opened = time.monotonic()
+        self._seq = next(_slot_seq)
+
+    @property
+    def closed(self) -> bool:
+        """Place rendue : le flux doit s'arrêter (remplacé par une ouverture plus récente)."""
+        return not self._held
 
     def release(self) -> None:
         with _hits_lock:
@@ -214,6 +226,7 @@ class StreamSlot:
             left = _conns[self.key]
             if not left:
                 del _conns[self.key]
+                _slots.pop(self.key, None)
         try:
             log.info("FLUX fermé — clé %s, durée %.0f s, %d encore ouvert(s)",
                      self.key, time.monotonic() - self._opened, left)
@@ -234,10 +247,22 @@ def open_stream(header: str) -> tuple[StreamSlot | None, tuple[int, dict] | None
         log.info("FLUX refusé 429 — clé %s, quota de requêtes atteint", key)
         return None, (429, {"Retry-After": str(int(RATE_WINDOW_S))})
     with _hits_lock:
+        # Limite atteinte : le plus ancien flux de la clé cède sa place. À travers le
+        # tunnel, une connexion abandonnée par le client reste ouverte 15 à 20 min ;
+        # un refus laissait alors le client dehors (42 refus de suite le 16/11/2026).
+        while _conns.get(key, 0) >= STREAM_MAX_CONN:
+            live = [s for s in _slots.get(key, ()) if not s.closed]
+            if not live:
+                break
+            oldest = min(live, key=lambda s: s._seq)
+            log.info("FLUX remplacé — clé %s, le plus ancien (ouvert depuis %.0f s) cède sa place",
+                     key, time.monotonic() - oldest._opened)
+            oldest.release()
         held = _conns.get(key, 0)
         if held < STREAM_MAX_CONN:
             _conns[key] = held + 1
             slot = StreamSlot(key)
+            _slots.setdefault(key, weakref.WeakSet()).add(slot)
     # La clé d'un jeton personnel est `perso:<e-mail>` : jamais la valeur du jeton.
     if held >= STREAM_MAX_CONN:
         log.info("FLUX refusé 429 — clé %s, %d flux déjà ouverts", key, held)
@@ -252,6 +277,8 @@ def guarded_stream(events, header: str, slot: StreamSlot):
     next_check = time.monotonic() + STREAM_RECHECK_S
     try:
         for chunk in events:
+            if slot.closed:
+                return
             if time.monotonic() >= next_check:
                 if key_of(header) != slot.key:
                     return
@@ -268,6 +295,8 @@ async def guarded_stream_async(events, header: str, slot: StreamSlot):
     next_check = time.monotonic() + STREAM_RECHECK_S
     try:
         async for chunk in events:
+            if slot.closed:
+                return
             if time.monotonic() >= next_check:
                 if await asyncio.to_thread(key_of, header) != slot.key:
                     return

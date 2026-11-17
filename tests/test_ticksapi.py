@@ -250,12 +250,19 @@ def test_stream_trois_connexions_par_cle(monkeypatch):
     monkeypatch.setattr(ticksapi, "key_of", lambda header: "partage" if header == h else "perso:a")
     slots = [ticksapi.open_stream(h)[0] for _ in range(3)]
     assert all(slots)
-    slot, refus = ticksapi.open_stream(h)
-    assert slot is None and refus[0] == 429 and refus[1]["Retry-After"] == "15"
+    # 4e ouverture : le plus ancien flux cède sa place (connexion fantôme du tunnel),
+    # la limite de 3 flux vivants tient toujours.
+    quatrieme, refus = ticksapi.open_stream(h)
+    assert quatrieme is not None and refus is None
+    assert slots[0].closed and not slots[1].closed and not slots[2].closed
+    assert ticksapi._conns["partage"] == 3
     autre, _ = ticksapi.open_stream("Bearer y")
     assert autre is not None        # une autre clé garde ses places
-    slots[0].release()
-    slots[0].release()              # une seule libération compte
+    assert not slots[1].closed      # ... et ne remplace personne
+    slots[0].release()              # le `finally` du flux remplacé : déjà compté
+    assert ticksapi._conns["partage"] == 3
+    slots[1].release()
+    slots[1].release()              # une seule libération compte
     assert ticksapi._conns["partage"] == 2
     dernier, _ = ticksapi.open_stream(h)
     assert dernier is not None
@@ -279,6 +286,48 @@ def test_stream_ferme_si_la_cle_est_revoquee(monkeypatch):
     cle["v"] = None
     assert list(flux) == []
     assert not ticksapi._conns
+
+
+def test_stream_remplace_s_arrete(monkeypatch):
+    """Le flux évincé doit cesser d'écrire : c'est lui la connexion fantôme."""
+    import asyncio
+    ticksapi._conns.clear()
+    ticksapi._hits.clear()
+    monkeypatch.setattr(ticksapi, "key_of", lambda header: "partage")
+    monkeypatch.setattr(ticksapi, "STREAM_MAX_CONN", 1)
+    fermes = []
+
+    def evenements():
+        try:
+            while True:
+                yield "ev"
+        finally:
+            fermes.append("sync")
+
+    async def aevenements():
+        try:
+            while True:
+                yield "ev"
+        finally:
+            fermes.append("async")
+
+    ancien, _ = ticksapi.open_stream("Bearer x")
+    flux = ticksapi.guarded_stream(evenements(), "Bearer x", ancien)
+    assert next(flux) == "ev"
+    suivant, _ = ticksapi.open_stream("Bearer x")
+    assert list(flux) == [] and fermes == ["sync"]
+
+    async def scenario():
+        aflux = ticksapi.guarded_stream_async(aevenements(), "Bearer x", suivant)
+        assert await anext(aflux) == "ev"
+        dernier, _ = ticksapi.open_stream("Bearer x")
+        assert [c async for c in aflux] == []
+        return dernier
+    dernier = asyncio.run(scenario())
+    assert fermes == ["sync", "async"]
+    assert ticksapi._conns == {"partage": 1} and not dernier.closed
+    dernier.release()
+    assert not ticksapi._conns and not ticksapi._slots
 
 
 @pytest.mark.parametrize("path", ["", "days", "x/y", "levels", "session_context", "NQ/autre"])
@@ -326,12 +375,13 @@ def test_stream_journalise_ouverture_refus_fermeture(monkeypatch, caplog):
     monkeypatch.setattr(ticksapi, "STREAM_MAX_CONN", 1)
     with caplog.at_level("INFO", logger="gex.ticksapi"):
         slot, _ = ticksapi.open_stream("Bearer x")
-        ticksapi.open_stream("Bearer x")
+        suivant, _ = ticksapi.open_stream("Bearer x")
         ticksapi.open_stream("Bearer secret-invalide")
-        slot.release()
+        slot.release()                                    # déjà remplacé : aucune ligne
     lignes = [r.getMessage() for r in caplog.records]
     assert lignes[0] == "FLUX ouvert — clé perso:a@b.c, 1 ouvert(s)"
-    assert lignes[1] == "FLUX refusé 429 — clé perso:a@b.c, 1 flux déjà ouverts"
-    assert lignes[2].startswith("FLUX refusé 401")
-    assert lignes[3].startswith("FLUX fermé — clé perso:a@b.c, durée 0 s, 0 encore")
+    assert lignes[1].startswith("FLUX remplacé — clé perso:a@b.c, le plus ancien")
+    assert lignes[2].startswith("FLUX fermé — clé perso:a@b.c, durée 0 s, 0 encore")
+    assert lignes[3] == "FLUX ouvert — clé perso:a@b.c, 1 ouvert(s)"
+    assert lignes[4].startswith("FLUX refusé 401")
     assert "secret-invalide" not in " ".join(lignes)      # jamais la valeur d'un jeton
