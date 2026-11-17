@@ -8,6 +8,10 @@ Convention GEX (SpotGamma "naive") :
 """
 from __future__ import annotations
 
+import logging
+import threading
+import time as time_mod
+import weakref
 from dataclasses import dataclass, field
 from datetime import datetime, date, time, timedelta
 from zoneinfo import ZoneInfo
@@ -19,52 +23,297 @@ from . import greeks, rates
 from .config import CONTRACT_MULTIPLIER, SETTINGS
 from .ingest import ChainSnapshot
 
+log = logging.getLogger(__name__)
+
 ET = ZoneInfo("America/New_York")
 YEAR_SECONDS = 365.0 * 24 * 3600
 
-EXPIRY_BUCKETS = ["0DTE", "Semaine", "Mois", "Tout"]
+EXPIRY_BUCKETS = ["0DTE", "Semaine", "Mois", "Tout", "Pondéré"]
 
 
-def seconds_to_expiry(expiries: pd.Series, now_et: datetime) -> np.ndarray:
-    """Secondes jusqu'à l'expiration, échéance posée à 16:00 ET.
+# Racines réglées sur la cotation d'ouverture (SOQ) du jour d'échéance : leur
+# gamma disparaît à 9:30 ET, pas à 16:00. Les séries PM ont leur propre racine
+# (SPXW, NDXP, RUTW).
+AM_SETTLED_ROOTS = frozenset({"SPX", "NDX", "RUT"})
+AM_SETTLE = pd.Timedelta(hours=9, minutes=30)
+PM_SETTLE = pd.Timedelta(hours=16)
 
-    Négatif = contrat expiré (0DTE après la cloche) — à exclure.
+
+def am_settled(df: pd.DataFrame) -> np.ndarray:
+    """Contrats réglés à l'ouverture : colonne `settle_am` fournie par la source
+    si elle existe, sinon déduite de la racine (`root` ou `underlying_symbol`)."""
+    if "settle_am" in df.columns:
+        return df["settle_am"].fillna(False).astype(bool).to_numpy()
+    for col in ("root", "underlying_symbol"):
+        if col in df.columns:
+            return df[col].isin(AM_SETTLED_ROOTS).to_numpy()
+    return np.zeros(len(df), dtype=bool)
+
+
+def expiry_datetimes(expiries: pd.Series, am: np.ndarray | None = None) -> pd.Series:
+    """Instant de règlement en ET : 9:30 pour les séries AM, 16:00 sinon."""
+    base = pd.to_datetime(pd.Series(expiries).reset_index(drop=True)).dt.tz_localize(ET)
+    if am is None:
+        return base + PM_SETTLE
+    minutes = np.where(am, AM_SETTLE.total_seconds(), PM_SETTLE.total_seconds()) / 60
+    return base + pd.to_timedelta(pd.Series(minutes), unit="min")
+
+
+def seconds_to_expiry(expiries: pd.Series, now_et: datetime,
+                      am: np.ndarray | None = None) -> np.ndarray:
+    """Secondes jusqu'au règlement (cf. `expiry_datetimes`).
+
+    Négatif = contrat expiré (0DTE après la cloche, ou série AM après
+    l'ouverture le jour de l'opex) — à exclure.
     """
-    expiry_dt = pd.to_datetime(expiries).dt.tz_localize(ET) + pd.Timedelta(hours=16)
-    return (expiry_dt - now_et).dt.total_seconds().to_numpy()
+    return (expiry_datetimes(expiries, am) - now_et).dt.total_seconds().to_numpy()
+
+
+# Horloge de variance : la variance ne s'écoule pas au rythme du calendrier.
+# Une journée de bourse (16:00 → 16:00) vaut 1 unité : la séance en porte
+# RTH_SHARE, en U (ouverture et clôture plus actives), la nuit le reste ;
+# un jour de week-end vaut WEEKEND_FACTOR d'une heure de nuit. 252 unités par
+# an. Jours fériés non modélisés (traités comme des jours ouvrés).
+TRADING_DAYS = 252
+RTH_SHARE = 0.80
+WEEKEND_FACTOR = 0.25
+U_SHAPE = 1.0
+VAR_CLOCK_HORIZON_DAYS = 60
+_RTH_OPEN_MIN, _RTH_LEN_MIN = 9 * 60 + 30, 390
+_OVN_RATE = (1 - RTH_SHARE) / ((24 * 60) - _RTH_LEN_MIN)
+_RTH_BASE = RTH_SHARE / (_RTH_LEN_MIN * (1 + U_SHAPE / 3))
+
+
+def _variance_per_minute(start: pd.Timestamp, n: int) -> np.ndarray:
+    m = start + pd.to_timedelta(np.arange(n), unit="min")
+    mins = (m.hour * 60 + m.minute).to_numpy()
+    weekday = (m.weekday < 5)
+    x = (mins - _RTH_OPEN_MIN) / _RTH_LEN_MIN
+    rth = weekday & (x >= 0) & (x < 1)
+    return np.where(rth, _RTH_BASE * (1 + U_SHAPE * (2 * x - 1) ** 2),
+                    np.where(weekday, _OVN_RATE, _OVN_RATE * WEEKEND_FACTOR))
+
+
+def variance_time_years(now_et: datetime, settle: pd.Series) -> np.ndarray:
+    """Temps restant mesuré en variance (années de 252 séances), pas en
+    calendrier : la dernière heure de séance pèse bien plus qu'une nuit ou
+    qu'un week-end. Au-delà de VAR_CLOCK_HORIZON_DAYS, le reliquat est
+    converti au prorata 252/365."""
+    if len(settle) == 0:
+        return np.zeros(0)
+    secs = (settle - now_et).dt.total_seconds().to_numpy()
+    horizon = VAR_CLOCK_HORIZON_DAYS * 86400.0
+    n = int(np.ceil(min(max(secs.max(initial=0.0), 0.0), horizon) / 60.0)) + 1
+    cum = np.concatenate([[0.0], np.cumsum(_variance_per_minute(pd.Timestamp(now_et), n))])
+    units = np.interp(np.clip(secs, 0.0, horizon) / 60.0, np.arange(n + 1), cum)
+    units += np.maximum(secs - horizon, 0.0) / 86400.0 * TRADING_DAYS / 365.0
+    return units / TRADING_DAYS
+
+
+def t_var_years(now_et: datetime, expiries: pd.Series, am: np.ndarray | None) -> np.ndarray:
+    """`variance_time_years` jusqu'au règlement, plancher de 5 min de séance
+    (même rôle que le plancher calendaire de 300 s sur t_years)."""
+    tv = variance_time_years(now_et, expiry_datetimes(expiries, am))
+    return np.maximum(tv, 5 * _RTH_BASE / TRADING_DAYS)
+
+
+def variance_clock(df: pd.DataFrame) -> tuple:
+    """(t_var, sigma, r, q) équivalents sur l'horloge de variance, avec
+    σ_eff²·t_var = σ²·t et les mêmes facteurs d'actualisation : prix, delta et
+    gamma au spot sont inchangés, seules les dérivées par rapport au temps
+    (charm) changent d'horloge. None si la chaîne n'a pas de `t_var`."""
+    if "t_var" not in df:
+        return None
+    t = df["t_years"].to_numpy(dtype=float)
+    tv = df["t_var"].to_numpy(dtype=float)
+    ratio = t / tv
+    iv = df["iv"].to_numpy(dtype=float)
+    return tv, iv * np.sqrt(ratio), rates.current_rate() * ratio, np.asarray(carry(df)) * ratio
+
+
+def quote_price(df: pd.DataFrame) -> np.ndarray:
+    """Prix de marché exploitable : milieu de fourchette si bid ET ask sont
+    cotés, à défaut le close (chaînes Databento, sans bid/ask). NaN sinon."""
+    n = len(df)
+    bid = df["bid"].to_numpy(dtype=float) if "bid" in df else np.full(n, np.nan)
+    ask = df["ask"].to_numpy(dtype=float) if "ask" in df else np.full(n, np.nan)
+    mid = np.where((bid > 0) & (ask >= bid), (bid + ask) / 2, np.nan)
+    if "close" in df:
+        close = df["close"].to_numpy(dtype=float)
+        mid = np.where(np.isnan(mid) & (close > 0), close, mid)
+    return mid
+
+
+MAX_DIV_YIELD = 0.02   # rendement de dividende annuel toléré au-delà du portage
+
+
+def implied_forwards(df: pd.DataFrame, spot: float, r: float,
+                     window: float = 0.05, min_pairs: int = 3,
+                     max_basis: float = 0.03) -> dict:
+    """Forward implicite de chaque échéance par parité call-put :
+    F = K + e^(rT)·(C − P), médiane sur les strikes à ±`window` du spot.
+
+    Le forward contient tout ce que le marché price entre spot et échéance :
+    dividendes (SPX, SPY, QQQ), portage, ou l'écart au future de livraison
+    (options sur future). Une échéance sans assez de paires cotées, ou dont
+    le forward s'écarte à la fois du spot (`max_basis`) et du forward de
+    portage S·e^(rT) (tolérance élargie avec l'échéance) — quotes aberrantes
+    ou spot figé —, est laissée de côté plutôt que devinée.
+    """
+    if df.empty:
+        return {}
+    d = df.assign(_px=quote_price(df))
+    d = d[d["_px"] > 0]
+    if "volume" in d:
+        # racines multiples (SPX/SPXW) sur une même échéance : la plus traitée
+        d = d.sort_values("volume")
+    d = d.drop_duplicates(["expiry", "type", "strike"], keep="last")
+    out = {}
+    for exp, e in d.groupby("expiry"):
+        calls = e[e["type"] == "C"].set_index("strike")
+        puts = e[e["type"] == "P"].set_index("strike")
+        common = [k for k in calls.index.intersection(puts.index)
+                  if abs(k - spot) / spot < window]
+        if len(common) < min_pairs:
+            continue
+        t = calls.loc[common, "t_years"].to_numpy()
+        k = np.asarray(common, dtype=float)
+        f = float(np.median(k + np.exp(r * t) * (calls.loc[common, "_px"].to_numpy()
+                                                  - puts.loc[common, "_px"].to_numpy())))
+        # Référence = le spot (options sur future) OU le forward de portage
+        # S·e^(rT) (indices, ETF, actions) : sur 1 à 4 ans, le portage écarte
+        # légitimement le forward du spot de 5 à 20 %. La tolérance s'élargit
+        # avec l'échéance (dividendes jusqu'à ~2 %/an) ; un écart à court
+        # terme reste suspect (spot figé ou quotes aberrantes).
+        t_med = float(np.median(t))
+        carry_fwd = spot * np.exp(r * t_med)
+        if (abs(f / spot - 1) > max_basis
+                and abs(f / carry_fwd - 1) > max_basis + MAX_DIV_YIELD * t_med):
+            log.warning("Forward %s aberrant ignoré : %.2f pour spot %.2f (portage %.2f)",
+                        exp, f, spot, carry_fwd)
+            continue
+        out[exp] = f
+    return out
+
+
+def carry_rates(df: pd.DataFrame, spot: float, r: float,
+                forwards: dict) -> tuple[np.ndarray, np.ndarray]:
+    """(forward, q) par contrat, avec F = S·e^((r−q)t).
+
+    Une échéance sans forward mesuré reprend le q médian des échéances d'au
+    moins 2 jours (un q de 0DTE, très bruité ramené à l'année, ne se
+    transpose pas), ou 0 s'il n'y en a aucune.
+    """
+    t = df["t_years"].to_numpy(dtype=float)
+    f = df["expiry"].map(forwards).to_numpy(dtype=float)
+    q = r - np.log(f / spot) / t
+    ref = q[np.isfinite(q) & (t >= 2 / 365)]
+    fallback = float(np.median(ref)) if len(ref) else 0.0
+    q = np.where(np.isfinite(q), q, fallback)
+    return spot * np.exp((r - q) * t), q
+
+
+def calibrate_chain(df: pd.DataFrame, spot: float, r: float,
+                    max_rel_spread: float = 0.5) -> pd.DataFrame:
+    """Forward, portage q et IV propres à l'outil, à partir des prix de la chaîne.
+
+    L'IV n'est plus reprise telle quelle du fournisseur : elle est inversée
+    depuis le milieu de fourchette avec le MÊME forward (donc les mêmes
+    dividendes et le même taux) que celui qui sert ensuite au gamma. Mélanger
+    l'IV d'un modèle tiers avec nos propres r et q faussait le gamma.
+
+    À chaque strike, c'est l'option HORS de la monnaie qui fixe l'IV, appliquée
+    au call comme au put (la parité garantit la même vol aux deux) : l'option
+    dans la monnaie a un prix dominé par sa valeur intrinsèque, son IV inversée
+    est bruitée. Repli sur l'IV du flux (`iv_feed`, conservée pour comparaison)
+    quand aucun prix exploitable n'existe. Colonnes ajoutées : forward,
+    carry_q, iv_feed, iv (recalibrée), iv_source.
+    """
+    d = df.copy()
+    feed = d["iv"].to_numpy(dtype=float) if "iv" in d else np.zeros(len(d))
+    d["iv_feed"] = feed
+    fwd, q = carry_rates(d, spot, r, implied_forwards(d, spot, r))
+    d["forward"], d["carry_q"] = fwd, q
+
+    px = quote_price(d)
+    if "bid" in d and "ask" in d:
+        spread = (d["ask"] - d["bid"]).to_numpy(dtype=float)
+        px = np.where(spread <= max_rel_spread * px, px, np.nan)
+    k = d["strike"].to_numpy(dtype=float)
+    t = d["t_years"].to_numpy(dtype=float)
+    is_call = (d["type"] == "C").to_numpy()
+    inv = np.full(len(d), np.nan)
+    ok = np.isfinite(px)
+    if ok.any():
+        inv[ok] = greeks.implied_vol(px[ok], spot, k[ok], t[ok], r, is_call[ok], q=q[ok])
+
+    otm = np.where(is_call, k >= fwd, k < fwd) & np.isfinite(inv)
+    keys = ["expiry", "strike", "t_years"]
+    otm_iv = d.loc[otm, keys].assign(_v=inv[otm]).drop_duplicates(keys)
+    by_strike = d[keys].merge(otm_iv, on=keys, how="left")["_v"].to_numpy()
+
+    iv = np.where(np.isfinite(by_strike), by_strike,
+                  np.where(np.isfinite(inv), inv, np.where(feed > 1e-4, feed, 0.0)))
+    d["iv"] = iv
+    d["iv_source"] = np.where(np.isfinite(by_strike), "otm",
+                              np.where(np.isfinite(inv), "quote",
+                                       np.where(feed > 1e-4, "feed", "none")))
+    return d
+
+
+def multiplier(df: pd.DataFrame):
+    """Multiplicateur $/point par contrat : 100 pour les options d'indice et
+    d'ETF, le notionnel du future pour les options sur future (20 NQ, 50 ES).
+    Les recalculs (profils, murs, vanna/charm) le relisent sur la chaîne au
+    lieu de supposer 100, qui gonflait les montants NQ ×5 et ES ×2."""
+    if "multiplier" in df:
+        return df["multiplier"].to_numpy(dtype=float)
+    return float(CONTRACT_MULTIPLIER)
+
+
+def carry(df: pd.DataFrame):
+    """q par contrat pour les recalculs de greeks (0 sur les snapshots
+    antérieurs à la calibration)."""
+    return df["carry_q"].to_numpy(dtype=float) if "carry_q" in df else 0.0
 
 
 def enrich(snapshot: ChainSnapshot, now_et: datetime | None = None) -> pd.DataFrame:
-    """Ajoute t, greeks calculés (BS sur l'IV du feed) et les colonnes GEX/DEX.
+    """Ajoute t, forward/IV calibrés (`calibrate_chain`), greeks et GEX/DEX.
 
-    Quand l'IV du feed est nulle/absente (deep ITM sans quote), on retombe
-    sur les Greeks CBOE — leur gamma est ~0 sur ces contrats de toute façon.
+    Quand aucune IV n'est disponible (deep ITM sans quote ni IV feed), on
+    retombe sur les Greeks CBOE — leur gamma est ~0 sur ces contrats.
     """
     now_et = now_et or datetime.now(ET)
     df = snapshot.options.copy()
     # exclut les contrats expirés (dont les 0DTE du jour après 16:00 ET,
     # dont les quotes résiduelles polluent GEX 0DTE et skew IV)
-    secs = seconds_to_expiry(df["expiry"], now_et)
+    secs = seconds_to_expiry(df["expiry"], now_et, am_settled(df))
     df = df[secs > 0].reset_index(drop=True)
     s = snapshot.spot
     # plancher 5 min pour éviter les gammas explosifs à la cloche
     t = np.maximum(secs[secs > 0], 300.0) / YEAR_SECONDS
+    df["t_years"] = t
+    df["t_var"] = t_var_years(now_et, df["expiry"], am_settled(df))
+    r = rates.current_rate()
+    df = calibrate_chain(df, s, r)
     iv = df["iv"].to_numpy()
     valid = iv > 1e-4
+    q = carry(df)
 
-    r = rates.current_rate()
-    g = np.where(valid, greeks.gamma(s, df["strike"], t, r, np.where(valid, iv, 1.0)), df["gamma_cboe"])
-    d_call = greeks.call_delta(s, df["strike"], t, r, np.where(valid, iv, 1.0))
+    g = np.where(valid, greeks.gamma(s, df["strike"], t, r, np.where(valid, iv, 1.0), q),
+                 df["gamma_cboe"])
     is_call = (df["type"] == "C").to_numpy()
-    d = np.where(valid, np.where(is_call, d_call, d_call - 1.0), df["delta_cboe"])
+    d_call = greeks.call_delta(s, df["strike"], t, r, np.where(valid, iv, 1.0), q)
+    d_put = greeks.put_delta(s, df["strike"], t, r, np.where(valid, iv, 1.0), q)
+    d = np.where(valid, np.where(is_call, d_call, d_put), df["delta_cboe"])
 
-    df["t_years"] = t
     df["gamma_bs"] = g
     df["delta_bs"] = d
 
     oi = df["open_interest"].to_numpy()
     sign = np.where(is_call, 1.0, -1.0)
-    df["gex"] = sign * g * oi * CONTRACT_MULTIPLIER * s**2 * 0.01
+    df["multiplier"] = float(CONTRACT_MULTIPLIER)
+    df["gex"] = greeks.gex_dollars(sign, g, oi, CONTRACT_MULTIPLIER, s)
     # Convention DIFFÉRENTE de celle du GEX, et c'est voulu. Le gamma d'une
     # option est TOUJOURS positif (call comme put) : sans un signe artificiel,
     # calls et puts seraient indiscernables — d'où le flip `sign` (dealers
@@ -111,16 +360,26 @@ def add_second_order(df: pd.DataFrame, spot: float) -> pd.DataFrame:
     t = d["t_years"].to_numpy()
     k = d["strike"].to_numpy()
     r = rates.current_rate()
-    v = greeks.vanna(spot, k, t, r, iv)
-    c = greeks.charm_per_day(spot, k, t, r, iv)
+    q = carry(d)
+    is_call = (d["type"] == "C").to_numpy()
+    v = greeks.vanna(spot, k, t, r, iv, q)
+    clock = variance_clock(d)
+    if clock is None:
+        c = greeks.charm_per_day(spot, k, t, r, iv, q, is_call)
+    else:
+        # par SÉANCE de variance (1/252 d'année sur l'horloge de variance) :
+        # le delta qui fond d'ici la prochaine clôture, nuit et week-end compris
+        tv, sv, rv, qv = clock
+        c = greeks.charm(spot, k, tv, rv, np.where(valid, sv, 1.0), qv, is_call) / TRADING_DAYS
     v = np.where(valid, v, 0.0)
     c = np.where(valid, c, 0.0)
     sign = np.where((d["type"] == "C").to_numpy(), 1.0, -1.0)
     oi = d["open_interest"].to_numpy()
     d["vanna"] = v
     d["charm"] = c
-    d["vex"] = sign * v * 0.01 * oi * CONTRACT_MULTIPLIER * spot
-    d["cex"] = sign * c * oi * CONTRACT_MULTIPLIER * spot
+    mult = multiplier(d)
+    d["vex"] = sign * v * 0.01 * oi * mult * spot
+    d["cex"] = sign * c * oi * mult * spot
     return d
 
 
@@ -139,6 +398,34 @@ def bucket_mask(df: pd.DataFrame, bucket: str, today: date) -> pd.Series:
     return pd.Series(True, index=df.index)
 
 
+def expiry_weights(df: pd.DataFrame) -> np.ndarray:
+    """Poids continu par échéance : exp(−séances restantes / τ).
+
+    Alternative aux paliers 0DTE/Semaine/Mois, qui comptent à égalité un
+    contrat à 1 jour et un à 6 jours. τ (SETTINGS.weighted_tau_sessions, 5 par
+    défaut) fixe l'horizon : à 1 séance un contrat pèse ~82 %, à 5 ~37 %, à
+    un mois ~1,5 %. Séances mesurées sur l'horloge de variance si disponible."""
+    if "t_var" in df:
+        sessions = df["t_var"].to_numpy(dtype=float) * TRADING_DAYS
+    else:
+        sessions = df["t_years"].to_numpy(dtype=float) * TRADING_DAYS
+    return np.exp(-sessions / SETTINGS.weighted_tau_sessions)
+
+
+def select_bucket(df: pd.DataFrame, bucket: str, today: date) -> pd.DataFrame:
+    """Périmètre d'échéances affiché. Pour "Pondéré", toutes les échéances
+    restent mais leur open interest et volume (les poids de tous les calculs
+    en aval : murs, profils, flip) sont multipliés par `expiry_weights`."""
+    if bucket != "Pondéré" or df.empty:
+        return df[bucket_mask(df, bucket, today)]
+    w = expiry_weights(df)
+    out = df.copy()
+    for col in ("open_interest", "volume", "gex", "dex"):
+        if col in out:
+            out[col] = out[col].to_numpy(dtype=float) * w
+    return out
+
+
 def exposure_by_strike(df: pd.DataFrame, col: str) -> pd.DataFrame:
     """Agrège gex/dex par strike, calls et puts séparés + net."""
     pivot = df.pivot_table(index="strike", columns="type", values=col, aggfunc="sum").fillna(0.0)
@@ -149,15 +436,36 @@ def exposure_by_strike(df: pd.DataFrame, col: str) -> pd.DataFrame:
     return pivot.reset_index()
 
 
+def _sticky_moneyness_iv(d: pd.DataFrame, spot: float, grid: np.ndarray) -> np.ndarray:
+    """IV (contrats × grille) si le smile suit le spot : au spot S', le strike K
+    prend l'IV que le smile actuel donne à K·S/S' (même moneyness). Une
+    interpolation par échéance ; extrapolation plate aux bords."""
+    k = d["strike"].to_numpy(dtype=float)
+    out = np.empty((len(d), len(grid)))
+    pos = np.arange(len(d))
+    for _, idx in d.groupby("t_years").indices.items():
+        e = d.iloc[idx]
+        smile = e.groupby("strike")["iv"].mean()
+        ks, ivs = smile.index.to_numpy(dtype=float), smile.to_numpy(dtype=float)
+        rows = pos[idx]
+        out[rows] = np.interp(k[rows, None] * spot / grid[None, :], ks, ivs)
+    return out
+
+
 def gamma_profile(df: pd.DataFrame, spot: float, weight_col: str = "open_interest",
-                  range_pct: float | None = None, steps: int | None = None
-                  ) -> tuple[np.ndarray, np.ndarray] | None:
+                  range_pct: float | None = None, steps: int | None = None,
+                  sticky: str = "strike") -> tuple[np.ndarray, np.ndarray] | None:
     """Profil de GEX net recalculé sur une grille de spots hypothétiques.
 
-    IV et maturités sont figées : on ne simule que le déplacement du spot, ce
-    qui isole l'effet de position. La pente au niveau du spot dit à quelle
-    vitesse le régime se dégrade ; les creux signalent les zones
-    d'accélération.
+    `sticky="strike"` (défaut) : IV et maturités figées, on ne simule que le
+    déplacement du spot, ce qui isole l'effet de position. La pente au niveau
+    du spot dit à quelle vitesse le régime se dégrade ; les creux signalent
+    les zones d'accélération.
+
+    `sticky="moneyness"` : le smile se déplace avec le spot (cf.
+    `_sticky_moneyness_iv`) — plus réaliste en marché baissier, où le skew
+    suit le prix. L'écart entre les deux flips borne l'incertitude due à la
+    dynamique de vol.
 
     Retourne (grille de spots, GEX net en $ par 1 %), ou None si rien d'exploitable.
     """
@@ -169,11 +477,16 @@ def gamma_profile(df: pd.DataFrame, spot: float, weight_col: str = "open_interes
     grid = np.linspace(spot * (1 - rng), spot * (1 + rng), n)
     k = d["strike"].to_numpy()[:, None]
     t = d["t_years"].to_numpy()[:, None]
-    iv = d["iv"].to_numpy()[:, None]
+    iv = (_sticky_moneyness_iv(d, spot, grid) if sticky == "moneyness"
+          else d["iv"].to_numpy()[:, None])
     oi = d[weight_col].to_numpy()[:, None]
     sign = np.where((d["type"] == "C").to_numpy()[:, None], 1.0, -1.0)
-    g = greeks.gamma(grid[None, :], k, t, rates.current_rate(), iv)
-    profile = (sign * g * oi * CONTRACT_MULTIPLIER * grid[None, :] ** 2 * 0.01).sum(axis=0)
+    q = np.asarray(carry(d))
+    q = q[:, None] if q.ndim else q
+    g = greeks.gamma(grid[None, :], k, t, rates.current_rate(), iv, q)
+    mult = np.asarray(multiplier(d))
+    mult = mult[:, None] if mult.ndim else mult
+    profile = greeks.gex_dollars(sign, g, oi, mult, grid[None, :]).sum(axis=0)
     return grid, profile
 
 
@@ -199,11 +512,50 @@ def gex_at_spot(df: pd.DataFrame, ref_spot: float,
     if d.empty:
         return pd.Series(dtype=float)
     g = greeks.gamma(ref_spot, d["strike"].to_numpy(), d["t_years"].to_numpy(),
-                     rates.current_rate(), d["iv"].to_numpy())
+                     rates.current_rate(), d["iv"].to_numpy(), carry(d))
     sign = np.where((d["type"] == "C").to_numpy(), 1.0, -1.0)
-    gex = (sign * g * d[weight_col].to_numpy()
-           * CONTRACT_MULTIPLIER * ref_spot ** 2 * 0.01)
+    gex = greeks.gex_dollars(sign, g, d[weight_col].to_numpy(),
+                             multiplier(d), ref_spot)
     return pd.Series(gex, index=d["strike"].to_numpy()).groupby(level=0).sum()
+
+
+def gex_by_type(df: pd.DataFrame, ref_spot: float | None = None,
+                weight_col: str = "open_interest") -> pd.DataFrame:
+    """GEX par strike, décomposé par type d'option (index = strike) :
+
+    - `gex_calls` : GEX des calls (≥ 0) — concentration de gamma call ;
+    - `gex_puts`  : GEX des puts (≤ 0, convention du projet : put négatif) —
+      sa valeur absolue est la concentration de gamma put ;
+    - `gex_net`   : calls + puts, le GEX net signé habituel ;
+    - `gex_gross` : calls + |puts| = Σ |GEX par contrat|, l'exposition brute
+      avant compensation (même définition que `positioning.book_summary`).
+
+    `ref_spot` : gamma recalculé à ce spot (cf. `gex_at_spot`, mêmes contrats
+    retenus) ; sinon le GEX déjà stocké dans `df`.
+    """
+    cols = ["gex_calls", "gex_puts", "gex_net", "gex_gross"]
+    if ref_spot:
+        d = df[(df["iv"] > 1e-4) & (df[weight_col] > 0)]
+        if d.empty:
+            return pd.DataFrame(columns=cols, dtype=float)
+        g = greeks.gamma(ref_spot, d["strike"].to_numpy(), d["t_years"].to_numpy(),
+                         rates.current_rate(), d["iv"].to_numpy(), carry(d))
+        is_call = (d["type"] == "C").to_numpy()
+        gex = greeks.gex_dollars(np.where(is_call, 1.0, -1.0), g,
+                                 d[weight_col].to_numpy(), multiplier(d), ref_spot)
+    else:
+        d = df
+        if d.empty:
+            return pd.DataFrame(columns=cols, dtype=float)
+        is_call = (d["type"] == "C").to_numpy()
+        gex = d["gex"].to_numpy(dtype=float)
+    strikes = d["strike"].to_numpy()
+    calls = pd.Series(np.where(is_call, gex, 0.0), index=strikes).groupby(level=0).sum()
+    puts = pd.Series(np.where(is_call, 0.0, gex), index=strikes).groupby(level=0).sum()
+    out = pd.DataFrame({"gex_calls": calls, "gex_puts": puts})
+    out["gex_net"] = out["gex_calls"] + out["gex_puts"]
+    out["gex_gross"] = out["gex_calls"] - out["gex_puts"]
+    return out
 
 
 def gex_by_strike_weighted(df: pd.DataFrame, spot: float,
@@ -218,8 +570,8 @@ def gex_by_strike_weighted(df: pd.DataFrame, spot: float,
     if df.empty or weight_col not in df.columns:
         return pd.Series(dtype=float)
     sign = np.where((df["type"] == "C").to_numpy(), 1.0, -1.0)
-    gex = (sign * df["gamma_bs"].to_numpy() * df[weight_col].to_numpy()
-           * CONTRACT_MULTIPLIER * spot ** 2 * 0.01)
+    gex = greeks.gex_dollars(sign, df["gamma_bs"].to_numpy(), df[weight_col].to_numpy(),
+                             multiplier(df), spot)
     return pd.Series(gex, index=df["strike"].to_numpy()).groupby(level=0).sum()
 
 
@@ -249,19 +601,122 @@ def zero_gamma(df: pd.DataFrame, spot: float, weight_col: str = "open_interest")
     weight_col="open_interest" : le flip structurel (zero gamma classique).
     weight_col="volume"        : le HVL façon volatility trigger — bascule du
     profil pondéré par ce qui se traite (et donc se hedge) aujourd'hui.
+
+    Détail du résultat (statut, pente, fenêtre) : `zero_gamma_info`.
     """
-    res = gamma_profile(df, spot, weight_col)
-    if res is None:
-        return None
-    grid, profile = res
+    return zero_gamma_info(df, spot, weight_col)["level"]
+
+
+def zero_gamma_band(df: pd.DataFrame, spot: float) -> tuple[float | None, float | None]:
+    """(flip sticky strike, flip sticky moneyness) : la fourchette du Gamma
+    Flip selon que le smile reste accroché aux strikes ou suit le spot."""
+    return (zero_gamma_info(df, spot)["level"],
+            zero_gamma_info(df, spot, sticky="moneyness")["level"])
+
+
+# Fenêtres successives de recherche du flip : la première est celle du
+# réglage (±8 % par défaut) ; un marché qui a dérivé loin de son flip le
+# retrouve dans les suivantes au lieu de renvoyer « rien » sans explication.
+ZG_FALLBACK_RANGES = (0.15, 0.25)
+
+
+def _nearest_crossing(grid: np.ndarray, profile: np.ndarray,
+                      spot: float) -> tuple[float, float] | None:
+    """(niveau interpolé, pente $/pt) du passage par zéro le plus proche du spot."""
     crossings = np.where(np.diff(np.sign(profile)) != 0)[0]
     if len(crossings) == 0:
         return None
-    # passage par zéro le plus proche du spot
     idx = crossings[np.argmin(np.abs(grid[crossings] - spot))]
     x0, x1 = grid[idx], grid[idx + 1]
     y0, y1 = profile[idx], profile[idx + 1]
-    return float(x0 - y0 * (x1 - x0) / (y1 - y0))
+    return float(x0 - y0 * (x1 - x0) / (y1 - y0)), float((y1 - y0) / (x1 - x0))
+
+
+ZG_LIVE_REFRESH_S = 30
+# chaîne réévaluée au spot live -> (réf. à elle-même, réf. à la salve, spot
+# de la salve), cf. register_live_alias
+_LIVE_ALIAS: dict[int, tuple] = {}
+
+
+def register_live_alias(live: pd.DataFrame, base: pd.DataFrame, base_spot: float) -> None:
+    """Déclare `live` comme la salve `base` réévaluée à un autre spot (mêmes
+    contrats, même OI, même IV) : son Gamma Flip est alors celui de la salve.
+    Un sous-ensemble de `live` (autre objet) n'est jamais concerné."""
+    with _ZG_LOCK:
+        for k in [k for k, v in _LIVE_ALIAS.items() if v[0]() is None]:
+            del _LIVE_ALIAS[k]
+        _LIVE_ALIAS[id(live)] = (weakref.ref(live), weakref.ref(base), float(base_spot))
+
+
+_ZG_MEMO: dict[tuple, tuple] = {}
+_ZG_MEMO_MAX = 64
+_ZG_LOCK = threading.Lock()
+
+
+def zero_gamma_info(df: pd.DataFrame, spot: float,
+                    weight_col: str = "open_interest", sticky: str = "strike") -> dict:
+    """Mémoïsé par chaîne (même objet DataFrame) et paramètres : le résumé,
+    les tuiles et l'API demandent le même flip pour la même version de chaîne
+    (réévaluée toutes les ~2 s en OPRA, cf. gex/livechain.py)."""
+    alias = _LIVE_ALIAS.get(id(df))
+    if alias is not None and alias[0]() is df and alias[1]() is not None:
+        base, base_spot = alias[1](), alias[2]
+        if weight_col == "open_interest" and sticky == "strike":
+            # IV figée : le profil ne dépend pas du spot courant (il ne fait que
+            # centrer la grille) — le flip de la salve est le bon, calculé une fois
+            return zero_gamma_info(base, base_spot, weight_col, sticky)
+        # HVL (volume live) et flip sticky moneyness (suit le spot) : recalculés
+        # sur la chaîne réévaluée, au plus toutes les ZG_LIVE_REFRESH_S
+        key = (id(base), int(time_mod.time() // ZG_LIVE_REFRESH_S), weight_col, sticky)
+    else:
+        key = (id(df), float(spot), weight_col, sticky, SETTINGS.zg_range, SETTINGS.zg_steps)
+    with _ZG_LOCK:
+        hit = _ZG_MEMO.get(key)
+    if alias is not None and hit is not None and hit[0]() is alias[1]():
+        return dict(hit[1])
+    if hit is not None and hit[0]() is df:
+        return dict(hit[1])
+    out = _zero_gamma_info(df, spot, weight_col, sticky)
+    try:
+        ref = weakref.ref(alias[1]() if alias is not None else df)
+    except TypeError:
+        return out
+    with _ZG_LOCK:
+        if len(_ZG_MEMO) >= _ZG_MEMO_MAX:
+            for k in [k for k, v in _ZG_MEMO.items() if v[0]() is None] or list(_ZG_MEMO)[:16]:
+                _ZG_MEMO.pop(k, None)
+        _ZG_MEMO[key] = (ref, dict(out))
+    return out
+
+
+def _zero_gamma_info(df: pd.DataFrame, spot: float,
+                     weight_col: str = "open_interest", sticky: str = "strike") -> dict:
+    """Zero gamma avec son contexte :
+
+    - `status` : "ok", "no_flip" (profil d'un seul signe jusqu'à ±25 % — le
+      régime est franc, ce n'est pas une panne) ou "no_data" (aucun contrat
+      exploitable) ;
+    - `slope`  : pente du GEX net au flip, en $ par point. Une pente faible
+      veut dire un flip mal défini, qu'un petit changement d'OI déplace loin ;
+    - `range`  : demi-largeur de la fenêtre (fraction du spot) où il a été trouvé.
+    """
+    out = {"level": None, "status": "no_data", "slope": None, "range": None}
+    base = SETTINGS.zg_range
+    for rng in (base, *[r for r in ZG_FALLBACK_RANGES if r > base]):
+        # pas de grille constant quelle que soit la fenêtre
+        steps = max(SETTINGS.zg_steps, int(round(SETTINGS.zg_steps * rng / base)))
+        res = gamma_profile(df, spot, weight_col, range_pct=rng, steps=steps, sticky=sticky)
+        if res is None:
+            return out
+        out["status"], out["range"] = "no_flip", rng
+        hit = _nearest_crossing(*res, spot)
+        if hit is not None:
+            out["level"], out["slope"] = hit
+            out["status"] = "ok"
+            return out
+    log.info("Zero gamma (%s) : aucun flip à ±%.0f %% du spot %.2f",
+             weight_col, out["range"] * 100, spot)
+    return out
 
 
 def vanna_profile(df: pd.DataFrame, spot: float, weight_col: str = "open_interest",
@@ -288,8 +743,12 @@ def vanna_profile(df: pd.DataFrame, spot: float, weight_col: str = "open_interes
     iv = d["iv"].to_numpy()[:, None]
     oi = d[weight_col].to_numpy()[:, None]
     sign = np.where((d["type"] == "C").to_numpy()[:, None], 1.0, -1.0)
-    v = greeks.vanna(grid[None, :], k, t, rates.current_rate(), iv)
-    profile = (sign * v * 0.01 * oi * CONTRACT_MULTIPLIER * grid[None, :]).sum(axis=0)
+    q = np.asarray(carry(d))
+    q = q[:, None] if q.ndim else q
+    v = greeks.vanna(grid[None, :], k, t, rates.current_rate(), iv, q)
+    mult = np.asarray(multiplier(d))
+    mult = mult[:, None] if mult.ndim else mult
+    profile = (sign * v * 0.01 * oi * mult * grid[None, :]).sum(axis=0)
     return grid, profile
 
 
@@ -299,14 +758,8 @@ def zero_vanna(df: pd.DataFrame, spot: float, weight_col: str = "open_interest")
     res = vanna_profile(df, spot, weight_col)
     if res is None:
         return None
-    grid, profile = res
-    crossings = np.where(np.diff(np.sign(profile)) != 0)[0]
-    if len(crossings) == 0:
-        return None
-    idx = crossings[np.argmin(np.abs(grid[crossings] - spot))]
-    x0, x1 = grid[idx], grid[idx + 1]
-    y0, y1 = profile[idx], profile[idx + 1]
-    return float(x0 - y0 * (x1 - x0) / (y1 - y0))
+    hit = _nearest_crossing(*res, spot)
+    return None if hit is None else hit[0]
 
 
 def third_friday(year: int, month: int) -> date:
@@ -344,32 +797,12 @@ def futures_basis(df: pd.DataFrame, spot: float, today: date | None = None) -> f
         return None
     target = min(exps, key=lambda e: abs((e - target_exp).days))
 
-    e = df[df["expiry"] == target]
-    # racines multiples (SPX/SPXW) sur une même échéance : garder le plus traité
-    e = e.sort_values("volume").drop_duplicates(["type", "strike"], keep="last")
-    calls = e[e["type"] == "C"].set_index("strike")
-    puts = e[e["type"] == "P"].set_index("strike")
-    common = [k for k in calls.index.intersection(puts.index)
-              if abs(k - spot) / spot < 0.05]
-    fwds = []
-    for k in common:
-        cmid = (calls.loc[k, "bid"] + calls.loc[k, "ask"]) / 2
-        pmid = (puts.loc[k, "bid"] + puts.loc[k, "ask"]) / 2
-        if cmid <= 0 or pmid <= 0:
-            continue
-        t = calls.loc[k, "t_years"]
-        fwds.append((cmid - pmid) * np.exp(rates.current_rate() * t) + k)
-    if len(fwds) < 5:
-        return None
-    basis = float(np.median(fwds)) - spot
-    # garde-fou : le basis d'un future index reste sous ~2 % du spot (portage
-    # taux - dividendes sur < 1 an). Au-delà, les quotes sont aberrantes et une
-    # conversion silencieuse fausserait tous les niveaux.
-    if abs(basis) > 0.02 * spot:
-        log.warning("Basis aberrant ignoré : %+.1f pts sur spot %.0f (%d paires)",
-                    basis, spot, len(fwds))
-        return None
-    return basis
+    fwd = implied_forwards(df[df["expiry"] == target], spot, rates.current_rate(),
+                           window=0.05, min_pairs=5, max_basis=0.02)
+    # garde-fou max_basis : le basis d'un future index reste sous ~2 % du spot
+    # (portage taux - dividendes sur < 1 an). Au-delà, les quotes sont
+    # aberrantes et une conversion silencieuse fausserait tous les niveaux.
+    return fwd[target] - spot if target in fwd else None
 
 
 def top_gex_levels(df: pd.DataFrame, n: int = 5,
@@ -401,6 +834,11 @@ def top_gex_levels(df: pd.DataFrame, n: int = 5,
     agg = agg.sort_values("gex", key=abs, ascending=False).reset_index(drop=True)
     agg["rank"] = agg.index + 1
     agg["expiry"] = nearest
+    # Décomposition des murs retenus (le classement, lui, reste sur |GEX net|) :
+    # un strike où calls et puts se compensent a un net faible mais un brut fort.
+    parts = gex_by_type(sub, ref_spot)
+    for col in ("gex_calls", "gex_puts", "gex_gross"):
+        agg[col] = agg["strike"].map(parts[col]).fillna(0.0).to_numpy(dtype=float)
     return agg
 
 
@@ -451,10 +889,20 @@ def key_levels(df: pd.DataFrame, spot: float,
                all_expiries: bool = False) -> dict[str, float | None]:
     """Niveaux directionnels (esprit MenthorQ) :
 
-    - call_wall  : plus forte concentration de gamma call AU-DESSUS du spot
-                   (résistance)
-    - put_support: plus forte concentration de gamma put SOUS le spot (support)
+    - call_wall  : plus forte concentration de gamma CALL au-dessus du spot
+                   (GEX des seuls calls, `gex_by_type`) — pas le GEX net ;
+    - put_support: plus forte concentration de gamma PUT sous le spot (|GEX
+                   des seuls puts|) — pas le GEX net ;
+    - net_gex_max_above / net_gex_min_below : strike au GEX NET le plus
+      positif au-dessus / le plus négatif en dessous (ancienne définition des
+      deux murs jusqu'au 10/10/2026, conservée sous un nom explicite) ;
     - d1_max/d1_min : bornes de move attendu (straddle ATM)
+
+    Pourquoi pas le net : un strike où beaucoup de gamma call est compensé par
+    encore plus de gamma put a un GEX net faible ou négatif — il disparaissait
+    du Call Wall alors que la concentration de calls y est réelle. Ces niveaux
+    décrivent l'open interest sous la convention de positionnement retenue ;
+    ils ne prédisent pas à eux seuls une réaction du prix.
 
     Contrairement au classement GEX1-5 (non directionnel), ces niveaux ne sont
     cherchés que du côté où ils font sens comme support/résistance.
@@ -464,6 +912,7 @@ def key_levels(df: pd.DataFrame, spot: float,
     """
     out: dict[str, float | None] = {
         "call_wall": None, "put_support": None, "d1_min": None, "d1_max": None,
+        "net_gex_max_above": None, "net_gex_min_below": None,
     }
     if df.empty:
         return out
@@ -472,20 +921,51 @@ def key_levels(df: pd.DataFrame, spot: float,
     # Le CLASSEMENT des murs se fait au spot de référence (structure figée) ;
     # le côté où on les cherche dépend en revanche du spot COURANT, une
     # résistance n'ayant de sens qu'au-dessus du marché du moment.
-    agg = gex_at_spot(sub, ref_spot) if ref_spot else sub.groupby("strike")["gex"].sum()
+    parts = gex_by_type(sub, ref_spot)
+    calls = parts.loc[parts.index >= spot, "gex_calls"]
+    calls = calls[calls > 0]
+    if len(calls):
+        out["call_wall"] = float(calls.idxmax())
+    puts = -parts.loc[parts.index <= spot, "gex_puts"]
+    puts = puts[puts > 0]
+    if len(puts):
+        out["put_support"] = float(puts.idxmax())
 
+    agg = gex_at_spot(sub, ref_spot) if ref_spot else sub.groupby("strike")["gex"].sum()
     above = agg[(agg.index >= spot) & (agg > 0)]
     if len(above):
-        out["call_wall"] = float(above.idxmax())
+        out["net_gex_max_above"] = float(above.idxmax())
     below = agg[(agg.index <= spot) & (agg < 0)]
     if len(below):
-        out["put_support"] = float(below.idxmin())
+        out["net_gex_min_below"] = float(below.idxmin())
 
     move = expected_move(df, spot)
     if move is not None:
         out["d1_min"] = spot - move
         out["d1_max"] = spot + move
     return out
+
+
+def max_pain(df: pd.DataFrame) -> float | None:
+    """Prix de règlement de l'échéance la plus proche qui minimise la valeur
+    totale versée aux détenteurs : Σ OI_call·(X−K)⁺ + Σ OI_put·(K−X)⁺.
+
+    ⚠ Heuristique faible : elle suppose que les vendeurs d'options pilotent
+    le règlement à leur avantage, ce qui n'est pas un modèle de couverture.
+    Utile comme repère d'aimantation le jour de l'échéance, sans plus.
+    """
+    if df.empty:
+        return None
+    e = df[df["expiry"] == df["expiry"].min()]
+    e = e[e["open_interest"] > 0]
+    if e.empty:
+        return None
+    k = e["strike"].to_numpy(dtype=float)
+    oi = e["open_interest"].to_numpy(dtype=float)
+    is_call = (e["type"] == "C").to_numpy()
+    x = np.unique(k)[:, None]
+    pay = np.where(is_call, np.maximum(x - k, 0.0), np.maximum(k - x, 0.0)) * oi
+    return float(x[np.argmin(pay.sum(axis=1)), 0])
 
 
 def compute_levels(chain: pd.DataFrame, structural_spot: float, live_spot: float,
@@ -506,10 +986,12 @@ def compute_levels(chain: pd.DataFrame, structural_spot: float, live_spot: float
     Renvoie {"levels": DataFrame GEX1-n, "keys": dict call_wall/put_support/1D}.
     """
     today = today or datetime.now(ET).date()
-    sub = chain[bucket_mask(chain, bucket, today)] if not chain.empty else chain
+    sub = select_bucket(chain, bucket, today)
+    keys = key_levels(sub, live_spot, ref_spot=structural_spot, all_expiries=True)
+    keys["max_pain"] = max_pain(sub)
     return {
         "levels": top_gex_levels(sub, n=n, ref_spot=structural_spot, all_expiries=True),
-        "keys": key_levels(sub, live_spot, ref_spot=structural_spot, all_expiries=True),
+        "keys": keys,
     }
 
 
@@ -671,27 +1153,27 @@ def flow_delta(prev: pd.DataFrame, cur: pd.DataFrame, spot: float) -> dict[str, 
         how="left",
     )
     dvol = (m["volume"] - m["volume_prev"].fillna(0.0)).clip(lower=0.0)
-    signed = dvol * m["delta_bs"] * CONTRACT_MULTIPLIER * spot
+    signed = dvol * m["delta_bs"] * multiplier(m) * spot
     is_call = m["type"] == "C"
     today = datetime.now(ET).date()
+    is_0dte = bucket_mask(m, "0DTE", today)
 
     # Gamma échangé sur l'intervalle : même formule que le GEX, mais pondérée
     # par le volume du pas de temps au lieu de l'open interest. Cumulé sur la
     # séance, cela montre si ce qui se traite ajoute du gamma stabilisant
     # (calls) ou déstabilisant (puts) — un « CVD » du gamma.
     gsign = np.where(is_call, 1.0, -1.0)
-    gsigned = (dvol * m["gamma_bs"] * gsign
-               * CONTRACT_MULTIPLIER * spot ** 2 * 0.01)
+    gsigned = greeks.gex_dollars(gsign, m["gamma_bs"], dvol, multiplier(m), spot)
     return {
         "flow_total": float(signed.sum()),
         "flow_calls": float(signed[is_call].sum()),
         "flow_puts": float(signed[~is_call].sum()),
-        "flow_0dte": float(signed[m["expiry"] == today].sum()),
+        "flow_0dte": float(signed[is_0dte].sum()),
         # gflow_calls est positif, gflow_puts négatif : leur somme est le net
         "gflow_total": float(gsigned.sum()),
         "gflow_calls": float(gsigned[is_call].sum()),
         "gflow_puts": float(gsigned[~is_call].sum()),
-        "gflow_0dte": float(gsigned[m["expiry"] == today].sum()),
+        "gflow_0dte": float(gsigned[is_0dte].sum()),
         "contracts_traded": float(dvol.sum()),
         "source": "cboe",   # collecté en direct sur la source publique
     }

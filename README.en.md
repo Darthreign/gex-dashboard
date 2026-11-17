@@ -213,15 +213,32 @@ without redistributing a personally-licensed feed. Setup in the
 
 ## Computation conventions
 
-- **GEX** ($ per 1 % move) = γ × OI × 100 × spot² × 0.01 — calls positive,
-  puts negative (SpotGamma's "naive" convention: dealers long calls, short puts).
-- **Gamma Flip**: net GEX profile recomputed over a ±8 % spot grid (IV and
-  maturities frozen), zero crossing nearest to spot interpolated.
-- **Delta flow** (proxy) = Δvolume between pulls × δ × 100 × spot. Taker
-  direction is not observable in this feed: delta-weighted pressure, not
-  true signed order flow.
-- Expiries set at 16:00 ET; expired contracts excluded; 0DTE kept intraday
-  with a 5-minute floor on t.
+- **GEX** ($ per 1 % move) = γ × OI × multiplier × spot² × 0.01 — multiplier
+  100 (indices, ETFs) or the future's notional (20 NQ, 50 ES); calls positive,
+  puts negative (SpotGamma's "naive" convention: dealers long calls, short
+  puts). Single formula: `greeks.gex_dollars`.
+- **Forward and IV**: each expiry's forward from put-call parity (it carries
+  dividends and carry, hence Black-76 on futures options); IV inverted from
+  the mid of the out-of-the-money option and applied to both call and put.
+  Falls back to the feed IV (`iv_feed`) without a usable quote.
+- **GEX on an estimated book** ("signed flow" tile, `/api/v1/<sym>/book`):
+  start-of-day inventory per the convention above, minus today's taker flow
+  read from the prints; GEX and DEX share a single assumption there.
+- **Gamma Flip**: net GEX profile recomputed over a ±8 % spot grid (widened
+  to ±15 % then ±25 % if needed; IV and maturities frozen), zero crossing
+  nearest to spot interpolated. A band is shown for a smile that moves with
+  spot (sticky moneyness).
+- **Delta flow** (proxy) = Δvolume between pulls × δ × multiplier × spot.
+  Taker direction is not observable in this feed: delta-weighted pressure,
+  not true signed order flow.
+- **Expiries**: settled at 16:00 ET, or 9:30 ET for series settled on the
+  opening quotation (SPX/NDX/RUT monthlies, CME quarterlies); settled
+  contracts excluded; 5-minute floor on t.
+- **Charm**: per session, on a variance clock (U-shaped session, lighter
+  nights and weekends).
+- **Buckets**: 0DTE = nearest expiry; "Weighted" keeps every expiry with a
+  weight of exp(−sessions left / 5).
+- **Max pain**: shown as an expiry reference, a weak heuristic.
 
 ## Supporting the project
 
@@ -241,7 +258,6 @@ improvement helps just as much.
 - 15-min delayed data — structure-reading tool, not an execution tool.
 - The CBOE endpoint is not contractual: format may change (ingestion is
   isolated so another source, e.g. Tradier, can be plugged in).
-- **SPY and QQQ**: these ETFs pay dividends, while the computation assumes a
-  zero yield (q = 0). The approximation stays small on short maturities but
-  isn't zero — the SPX and NDX indices don't carry this bias. They also have
+- **SPY and QQQ**: their dividend is captured through the parity forward as
+  soon as the chain is quoted (without quotes, falls back to q = 0). They have
   no associated future, so the Index/Futures toggle is inactive for them.

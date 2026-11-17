@@ -121,3 +121,12 @@ def test_implied_vol_round_trip():
 def test_implied_vol_below_intrinsic_is_nan():
     iv = greeks.implied_vol(np.array([1.0]), 100.0, 80.0, 0.1, R, np.array([True]))
     assert np.isnan(iv[0])
+
+
+def test_gex_dollars_convention():
+    from gex.greeks import gex_dollars
+    # gamma 0.001 × OI 10 × mult 100 × spot² (5000²) × 0.01
+    assert gex_dollars(1.0, 0.001, 10, 100, 5000.0) == pytest.approx(0.001 * 10 * 100 * 5000.0**2 * 0.01)
+    assert gex_dollars(-1.0, 0.001, 10, 100, 5000.0) < 0
+    grid = np.array([4900.0, 5000.0])
+    assert gex_dollars(1.0, 0.001, 10, 100, grid).shape == (2,)

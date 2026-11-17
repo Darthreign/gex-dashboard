@@ -91,7 +91,7 @@ def test_metrics_utilise_le_taux_courant(monkeypatch):
     vu = []
     vraie_gamma = metrics.greeks.gamma
     monkeypatch.setattr(metrics.greeks, "gamma",
-                        lambda s, k, t, r, sig: vu.append(r) or vraie_gamma(s, k, t, r, sig))
+                        lambda s, k, t, r, sig, *a: vu.append(r) or vraie_gamma(s, k, t, r, sig, *a))
     monkeypatch.setattr(rates, "_rate", 0.0365)
     monkeypatch.setattr(rates, "_day", None)
 

@@ -10,3 +10,4 @@ dist/
 discord_bot/.env
 node_modules/
 tools/gridstack-vendor/
+Env.txt

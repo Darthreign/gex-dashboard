@@ -208,8 +208,13 @@ flux de la séance.
 
 Les concentrations de gamma les plus fortes, **contraintes directionnellement** :
 
-- **Call Wall** : le plus gros mur de calls **au-dessus** du prix — résistance.
-- **Put Support** : le plus gros mur de puts **en dessous** — support.
+- **Call Wall** : la plus forte concentration de gamma **des calls** **au-dessus** du prix — résistance.
+- **Put Support** : la plus forte concentration de gamma **des puts** **en dessous** — support.
+
+Depuis le 10/10/2026, ces deux niveaux se calculent sur les calls seuls et
+les puts seuls, et non plus sur le GEX net : un strike où beaucoup de gamma
+call est compensé par du gamma put restait invisible. Les murs GEX1-5, eux,
+restent classés sur le GEX net.
 
 Cette contrainte n'est pas cosmétique. Le plus gros mur de puts en valeur
 absolue peut très bien se situer au-dessus du prix, auquel cas l'appeler

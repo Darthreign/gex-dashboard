@@ -98,10 +98,10 @@ Cette bande de petites étiquettes liste les prix "importants" du jour, calculé
 |---|---|
 | **Gamma Flip** | Le prix où le GEX net change de signe (déjà vu dans les tuiles) |
 | **HVL** (*High Volume Level*) | Le même calcul que le Gamma Flip, mais pondéré par le **volume échangé aujourd'hui** plutôt que par les positions déjà installées la veille — utile pour voir si un nouveau niveau prend de l'importance en cours de séance. ⚠️ Avant l'ouverture, le volume affiché est encore celui de la **veille** (le compteur n'est remis à zéro qu'à la cloche) : le HVL d'avant-séance est donc celui d'hier, pas une prévision du jour |
-| **Call Wall** | Le strike (prix d'exercice) où le GEX des **calls** est le plus fort au-dessus du prix actuel — souvent une résistance, une zone où le marché a tendance à ralentir |
-| **Put Support** | Le strike où le GEX des **puts** est le plus fort en dessous du prix actuel — souvent un support |
+| **Call Wall** | Le strike (prix d'exercice) où le GEX des **calls seuls** est le plus fort au-dessus du prix actuel — souvent une résistance, une zone où le marché a tendance à ralentir. C'est une concentration de gamma call, pas le GEX net : un strike où beaucoup de calls sont compensés par des puts reste un Call Wall |
+| **Put Support** | Le strike où le GEX des **puts seuls** est le plus fort en dessous du prix actuel — souvent un support. Concentration de gamma put, pas le GEX net |
 | **1D Min / 1D Max** | Une estimation statistique de l'amplitude de mouvement attendue sur 1 jour, déduite de la volatilité implicite des options — pas une limite dure, juste un ordre de grandeur |
-| **GEX1 à GEX5** | Le classement des 5 strikes ayant le GEX le plus fort en valeur absolue (peu importe le signe), du plus fort (GEX1) au moins fort (GEX5) — chaque étiquette précise si c'est un mur call ou put, et son poids en milliards de dollars |
+| **GEX1 à GEX5** | Le classement des 5 strikes ayant le GEX **net** (calls + puts) le plus fort en valeur absolue (peu importe le signe), du plus fort (GEX1) au moins fort (GEX5) — chaque étiquette précise si c'est un mur call ou put, et son poids en milliards de dollars. Au survol : le détail calls / puts et le GEX brut (avant compensation) |
 
 ---
 

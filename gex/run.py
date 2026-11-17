@@ -9,14 +9,20 @@ http://127.0.0.1:8050. Utilisable de trois façons équivalentes :
 """
 from __future__ import annotations
 
-from gex import flowtape
+import logging
+
+from gex import app as app_mod
+from gex import flowtape, livestate
 from gex.app import create_app, start_scalp_indicator_scheduler
 from gex.capturebus import RemoteTape, remote_url
 from gex.flowtape import TAPE
 from gex.logsetup import setup_logging
-from gex.rtquote import PUBLIC_QUOTES, QUOTES
+from gex.rtquote import PUBLIC_QUOTES, QUOTES, _env
 from gex.scheduler import start_scheduler
 from gex.tickcapture import CAPTURE
+
+
+log = logging.getLogger(__name__)
 
 
 def main(host: str = "127.0.0.1", port: int = 8050) -> None:
@@ -26,7 +32,14 @@ def main(host: str = "127.0.0.1", port: int = 8050) -> None:
     # Mode SÉPARÉ (GEX_CAPTURE_URL défini) : ticks, order flow et bougies vivent
     # dans le process `gex.capture`, que redémarrer le dashboard ne coupe plus.
     # Le dashboard s'y abonne et lit un miroir (RemoteTape, même interface).
-    start_scheduler(embedded_capture=url is None)
+    # Mode MOTEUR (GEX_ENGINE=1 en plus) : ce même process récupère et calcule
+    # aussi les chaînes et les indicateurs ; le dashboard ne fait que lire
+    # l'état publié (gex/livestate.py) et servir les pages.
+    engine = livestate.enabled() and url is not None
+    if livestate.enabled() and url is None:
+        log.warning("GEX_ENGINE=1 sans GEX_CAPTURE_URL : mode moteur ignoré, "
+                    "le dashboard calcule lui-même")
+    start_scheduler(embedded_capture=url is None, ingest=not engine)
     # spot temps réel pour l'AFFICHAGE : sans identifiants courtier, sans effet
     QUOTES.start()
     # repli gratuit NQ/ES délayé : ne démarre que si QUOTES ne tourne pas
@@ -45,7 +58,12 @@ def main(host: str = "127.0.0.1", port: int = 8050) -> None:
     # séparé de start_scheduler() ci-dessus à dessein, PAS appelé depuis
     # create_app() : les tests construisent l'app en boucle sans jamais
     # vouloir de vrai travail de fond planifié.
-    start_scalp_indicator_scheduler()
+    if engine:
+        app_mod.INDICATORS_REMOTE = True
+        livestate.MIRROR.on_json("scalp-", app_mod.import_scalp_indicators)
+        livestate.MIRROR.start()
+    else:
+        start_scalp_indicator_scheduler()
     # `threaded=True` sur le serveur de dev Werkzeug a été essayé le
     # 2026-10-03 et retiré dans la minute (observé pire en direct). Diagnostic
     # confirmé le 2026-10-04 par un test isolé (app Flask jouet, hors
@@ -128,9 +146,32 @@ def main(host: str = "127.0.0.1", port: int = 8050) -> None:
     # écarté. connection_limit relevé en proportion (300->500). Stopgap
     # immédiat : la vraie solution reste la migration gevent (cf. passation),
     # pas encore assez éprouvée pour la production ce soir-là.
-    from waitress import serve
-    serve(create_app().server, host=host, port=port, threads=256,
-         channel_timeout=90, connection_limit=500)
+    #
+    # 2026-10-08 : serveur ASGI (uvicorn) par défaut, cf. gex/asgi.py — les
+    # flux SSE n'occupent plus de thread (boucle asyncio), Dash garde un pool
+    # borné via a2wsgi, et les canaux partagés (gex/broadcast.py) font qu'un
+    # onglet de plus ne coûte plus de calcul. Tout l'historique ci-dessus
+    # (threads 8 -> 256, connection_limit) ne concerne plus que le repli
+    # waitress, conservé : GEX_SERVER=waitress.
+    dash_app = create_app()
+    if (_env("GEX_SERVER") or "uvicorn").strip().lower() == "waitress":
+        from waitress import serve
+        serve(dash_app.server, host=host, port=port, threads=256,
+              channel_timeout=90, connection_limit=500)
+        return
+    import uvicorn
+
+    from gex.asgi import build
+    # timeout_keep_alive : connexions HTTP inactives entre deux requêtes. Une
+    # connexion SSE morte est détectée par l'échec d'écriture du keepalive
+    # (15 s, cf. broadcast.KEEPALIVE_S), plus besoin de channel_timeout.
+    # log_config=None : uvicorn n'installe pas sa propre configuration de
+    # logs (ses formateurs appellent sys.stdout.isatty(), qui plante sous
+    # pythonw.exe — tâche planifiée sans console) ; ses messages passent par
+    # celle du dashboard (logs/gex.log).
+    logging.getLogger("uvicorn").setLevel(logging.WARNING)
+    uvicorn.run(build(dash_app), host=host, port=port, log_level="warning",
+                log_config=None, timeout_keep_alive=30, access_log=False)
 
 
 if __name__ == "__main__":
