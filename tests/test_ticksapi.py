@@ -385,3 +385,58 @@ def test_stream_journalise_ouverture_refus_fermeture(monkeypatch, caplog):
     assert lignes[3] == "FLUX ouvert — clé perso:a@b.c, 1 ouvert(s)"
     assert lignes[4].startswith("FLUX refusé 401")
     assert "secret-invalide" not in " ".join(lignes)      # jamais la valeur d'un jeton
+
+
+def _rows(root, product, day, n):
+    d = root / product
+    d.mkdir(parents=True, exist_ok=True)
+    # ts identiques exprès : c'est ce qui rend un curseur par heure inutilisable
+    pd.DataFrame({"ts": [1.5] * n, "price": [25000.0 + i for i in range(n)],
+                  "volume": [1] * n, "side": ["BUY"] * n}).to_parquet(d / f"{day}.parquet", index=False)
+
+
+def _tail(client, offset, day="2026-10-30"):
+    import io
+    r = client.get(f"/api/v1/ticks/NQ/{day}.parquet?offset={offset}", headers=AUTH)
+    df = pd.read_parquet(io.BytesIO(r.data)) if r.status_code == 200 else None
+    return r, df
+
+
+def test_offset_ne_rend_que_les_nouvelles_lignes(env):
+    client, live, full = env
+    _rows(live, "NQ", "2026-10-30", 5)
+    r, df = _tail(client, 0)
+    assert r.headers["X-Ticks-Total"] == "5" and r.headers["X-Ticks-Source"] == "live"
+    assert r.headers["Cache-Control"] == "no-store" and "ETag" not in r.headers
+    assert list(df.price) == [25000.0 + i for i in range(5)]
+    assert list(df.columns) == ["ts", "price", "volume", "side"]
+
+    r, df = _tail(client, 5)                         # rien de neuf : parquet vide valide
+    assert r.status_code == 200 and len(df) == 0 and list(df.columns) == ["ts", "price", "volume", "side"]
+
+    _rows(live, "NQ", "2026-10-30", 8)               # la capture a ajouté 3 lignes
+    r, df = _tail(client, 5)
+    assert r.headers["X-Ticks-Total"] == "8" and list(df.price) == [25005.0, 25006.0, 25007.0]
+
+    assert _tail(client, 9)[0].status_code == 409    # curseur au-delà du fichier
+    assert _tail(client, -1)[0].status_code == 400
+    assert _tail(client, "abc")[0].status_code == 400
+    assert client.get("/api/v1/ticks/NQ/2026-10-30.parquet?offset=0").status_code == 401
+
+    # sans offset : comportement d'origine, fichier entier avec ETag
+    r = client.get("/api/v1/ticks/NQ/2026-10-30.parquet", headers=AUTH)
+    assert r.status_code == 200 and "ETag" in r.headers and "X-Ticks-Total" not in r.headers
+
+
+def test_offset_apres_l_export_de_fin_de_seance(env):
+    """L'export remplace le live et peut en différer : un curseur pris sur le live
+    n'y vaut plus rien, sauf s'il est déjà au bout (fichier définitif, rien de neuf)."""
+    client, live, full = env
+    _rows(live, "NQ", "2026-10-30", 8)
+    _rows(full, "NQ", "2026-10-30", 10)
+    r, _ = _tail(client, 8)
+    assert r.status_code == 409 and r.headers["X-Ticks-Total"] == "10"
+    r, df = _tail(client, 0)
+    assert r.headers["X-Ticks-Source"] == "full" and len(df) == 10
+    r, df = _tail(client, 10)
+    assert r.status_code == 200 and len(df) == 0     # pas de boucle de retéléchargement

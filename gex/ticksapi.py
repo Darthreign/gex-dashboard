@@ -5,6 +5,7 @@ dans l'application : https://<hôte>/api/v1
 
     GET {base}/ticks/{PRODUIT}/days
     GET {base}/ticks/{PRODUIT}/{AAAA-MM-JJ}.parquet
+    GET {base}/ticks/{PRODUIT}/{AAAA-MM-JJ}.parquet?offset=N   (lignes à partir de la N-ième)
     GET {base}/ticks/stream?products=NQ,ES      (niveaux et profil de /scalp, en SSE)
     GET {base}/ticks/stream?cash=QQQ,SPX        (bougie 1 min en cours, `bar:<SYMBOLE>`)
     GET {base}/ticks/stream?products=NQ&linked=1  (niveaux des sous-jacents liés, `levels:NQ:QQQ`)
@@ -27,6 +28,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import io
 import itertools
 import json
 import logging
@@ -332,6 +334,37 @@ def _read_for_response(path: Path) -> tuple[str, bytes | None]:
     return _retry_locked(read)
 
 
+def _tail_response(path: Path, raw: str) -> Response:
+    """Lignes du fichier à partir de la `offset`-ième, pour un client qui suit la
+    séance sans retélécharger la journée chaque minute (11,6 Mo sur MNQ à midi).
+
+    Curseur par NUMÉRO DE LIGNE et non par heure : une ligne sur deux porte le même
+    `ts` que la précédente et la vidange de la capture coupe n'importe où ; un filtre
+    `ts > t` perdrait des transactions. Le fichier live ne fait que s'allonger, le
+    numéro de ligne y est donc exact. `X-Ticks-Total` est le prochain `offset`.
+
+    409 : le curseur ne correspond plus au fichier (remplacé par l'export de fin de
+    séance, qui peut différer du live) ; le client reprend à `offset=0`."""
+    try:
+        offset = int(raw)
+    except ValueError:
+        return Response(status=400)
+    if offset < 0:
+        return Response(status=400)
+    # Lu en mémoire puis refermé avant le décodage (cf. _read_for_response).
+    pf = pq.ParquetFile(pa.BufferReader(_retry_locked(path.read_bytes)))
+    total = pf.metadata.num_rows
+    live = path.parent.parent == SETTINGS.data_dir / "ticks"
+    headers = {"X-Ticks-Total": str(total), "X-Ticks-Source": "live" if live else "full",
+               "Cache-Control": "no-store"}
+    if offset > total or (not live and 0 < offset < total):
+        return Response(status=409, headers=headers)
+    table = pf.schema_arrow.empty_table() if offset == total else pf.read().slice(offset)
+    out = io.BytesIO()
+    pq.write_table(table, out, compression="snappy")
+    return Response(out.getvalue(), mimetype="application/octet-stream", headers=headers)
+
+
 def _matches(etag: str) -> bool:
     sent = request.headers.get("If-None-Match", "")
     return sent.strip() == "*" or etag in [t.strip().removeprefix("W/") for t in sent.split(",")]
@@ -393,6 +426,8 @@ def register_ticks_api(server: Flask) -> None:
         path = _session_file(product, day)
         if path is None:
             return Response(status=404)
+        if "offset" in request.args:
+            return _tail_response(path, request.args["offset"])
         etag, data = _read_for_response(path)
         headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
         if data is None:
