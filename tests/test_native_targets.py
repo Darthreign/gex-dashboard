@@ -43,9 +43,21 @@ def test_pull_all_ignore_les_cibles_futopt(monkeypatch):
     monkeypatch.setattr(scheduler, "market_is_open", lambda *a, **k: True)
     monkeypatch.setattr(scheduler, "pull_symbol",
                         lambda key, **kw: called.append(key))
+    monkeypatch.setattr(scheduler, "pull_vix", lambda: None)
+    monkeypatch.setattr(scheduler.SETTINGS, "cboe_enabled", True)
     scheduler.pull_all(force=True)
     assert "NQ" not in called and "ES" not in called
     assert "SPX" in called and "NDX" in called
+
+
+def test_source_cboe_coupee_aucun_appel(monkeypatch):
+    """Depuis le 20/11/2026 l'adresse CBOE répond 403 : réglage coupé, plus
+    aucune tentative (ni chaînes, ni VIX), même en collecte forcée."""
+    monkeypatch.setattr(scheduler.SETTINGS, "cboe_enabled", False)
+    monkeypatch.setattr(scheduler, "pull_symbol", lambda key, **kw: 1 / 0)
+    monkeypatch.setattr(scheduler, "fetch_index_spot", lambda sym: 1 / 0)
+    scheduler.pull_all(force=True)
+    scheduler.pull_vix()
 
 
 def test_build_native_summary_colonnes_exploitables():

@@ -144,6 +144,8 @@ def pull_vix() -> None:
     sous-jacent analysé, juste un spot horodaté — cf. store.append_index_spot.
     Cadence alignée sur les constituants (~10 min), un signal de fond n'a pas
     besoin d'une résolution à la minute."""
+    if not SETTINGS.cboe_enabled:
+        return
     try:
         spot, ts = fetch_index_spot("_VIX")
         store.append_index_spot("vix", {"timestamp": ts, "vix": spot})
@@ -152,6 +154,8 @@ def pull_vix() -> None:
 
 
 def pull_all(force: bool = False) -> None:
+    if not SETTINGS.cboe_enabled:
+        return                      # source coupée, cf. config.Settings.cboe_enabled
     if SETTINGS.market_hours_only and not market_is_open() and not force:
         return
     persist = _CADENCE.tick()

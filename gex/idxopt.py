@@ -40,7 +40,7 @@ import pandas as pd
 import requests
 
 from . import ingest
-from .config import CONTRACT_MULTIPLIER, UNDERLYINGS
+from .config import CONTRACT_MULTIPLIER, SETTINGS, UNDERLYINGS
 from .futopt import DEFAULT_MAX_DAYS, DEFAULT_WINDOW, _collect, enrich_native, filter_chain
 from .metrics import AM_SETTLED_ROOTS
 from .rtquote import QUOTES, quote_token
@@ -110,8 +110,8 @@ def reference_spot(symbol: str) -> float | None:
     if live:
         return float(live)
     u = UNDERLYINGS.get(symbol)
-    if u is None:
-        return None
+    if u is None or not SETTINGS.cboe_enabled:
+        return None                 # pas de repli possible : source CBOE coupée
     try:
         spot, _ = ingest.fetch_index_spot(u.cboe_symbol)
         log.info("%s : spot temps réel indisponible, repli sur le spot CBOE", symbol)
