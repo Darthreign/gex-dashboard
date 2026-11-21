@@ -995,6 +995,24 @@ def compute_levels(chain: pd.DataFrame, structural_spot: float, live_spot: float
     }
 
 
+def notional_by_strike(df: pd.DataFrame, spot: float) -> pd.DataFrame:
+    """Notionnel de l'open interest par strike (index = strike), en dollars :
+    Σ open_interest × multiplicateur × spot, calls et puts séparés puis somme.
+
+    C'est une TAILLE (valeur du sous-jacent que portent les positions ouvertes,
+    au prix actuel), pas une exposition : ni delta ni signe, toujours ≥ 0."""
+    cols = ["notional_calls", "notional_puts", "notional"]
+    if df.empty or not spot:
+        return pd.DataFrame(columns=cols, dtype=float)
+    value = df["open_interest"].to_numpy(dtype=float) * multiplier(df) * float(spot)
+    is_call = (df["type"] == "C").to_numpy()
+    out = pd.DataFrame({"strike": df["strike"].to_numpy(),
+                        "notional_calls": np.where(is_call, value, 0.0),
+                        "notional_puts": np.where(is_call, 0.0, value)}).groupby("strike").sum()
+    out["notional"] = out["notional_calls"] + out["notional_puts"]
+    return out
+
+
 def put_call_ratios(df: pd.DataFrame) -> dict[str, float]:
     calls = df[df["type"] == "C"]
     puts = df[df["type"] == "P"]

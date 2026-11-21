@@ -322,6 +322,15 @@ def register_api(app) -> None:
         live = _side_spot(symbol, s.spot)
         res = metrics.compute_levels(df, structural, live, bucket=bucket)
         levels, keys = res["levels"], res["keys"]
+        # Notionnel de l'open interest RÉEL du périmètre : pour "Pondéré", les
+        # poids d'échéance servent aux expositions, pas à mesurer une taille.
+        perimetre = df if bucket == "Pondéré" else metrics.select_bucket(
+            df, bucket, datetime.now(ET).date())
+        notio = metrics.notional_by_strike(perimetre, s.spot)
+
+        def _notional(strike) -> dict:
+            row = notio.loc[strike] if strike in notio.index else None
+            return {c: float(row[c]) if row is not None else 0.0 for c in notio.columns}
         hvl = metrics.zero_gamma(df, s.spot, weight_col="volume")
         zg_info = metrics.zero_gamma_info(df, s.spot)
 
@@ -362,12 +371,17 @@ def register_api(app) -> None:
                 df, s.spot, sticky="moneyness")["level"]),
             "hvl": _t(hvl),
             "key_levels": {k: _t(v) for k, v in keys.items()},
+            # Notionnel de l'open interest du périmètre `bucket`, en $ (non
+            # transposé) : Σ OI × multiplicateur × spot. Une taille, sans signe.
+            "notional_total": float(notio["notional"].sum()),
+            "notional_calls_total": float(notio["notional_calls"].sum()),
+            "notional_puts_total": float(notio["notional_puts"].sum()),
             # GEX1-5 : classés par |GEX net| (`gex`, inchangé) ; décomposition en
             # $ par 1 % (non transposée) : calls (≥ 0), puts (≤ 0), brut
             "gex_walls": [
                 {"strike": _t(float(r.strike)), "gex": float(r.gex), "expiry": str(r.expiry),
                  "gex_calls": float(r.gex_calls), "gex_puts": float(r.gex_puts),
-                 "gex_gross": float(r.gex_gross)}
+                 "gex_gross": float(r.gex_gross), **_notional(r.strike)}
                 for r in levels.itertuples()
             ],
         })

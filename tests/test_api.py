@@ -324,3 +324,16 @@ def test_levels_transposition_croisee_signalee(monkeypatch):
     monkeypatch.setattr(app_mod, "_transform_for", lambda s, k: ((lambda v: v * 3.6), 3.6, "ratio"))
     body = _client().get("/api/v1/SPX/levels?scale=NDX").get_json()
     assert body["scale_warning"] and "dérive" in body["scale_warning"]
+
+
+def test_levels_expose_le_notionnel_de_l_open_interest():
+    """Σ OI × multiplicateur × spot : 100 calls et 200 puts au strike 100, spot 100."""
+    _seed("TSTN")
+    body = _client().get("/api/v1/TSTN/levels?bucket=Tout").get_json()
+    mur = body["gex_walls"][0]
+    assert mur["notional_calls"] == pytest.approx(100 * 100 * 100.0)
+    assert mur["notional_puts"] == pytest.approx(200 * 100 * 100.0)
+    assert mur["notional"] == pytest.approx(3_000_000.0)
+    assert body["notional_total"] == pytest.approx(3_000_000.0)
+    assert body["notional_calls_total"] + body["notional_puts_total"] == body["notional_total"]
+    assert "gex_gross" in mur                      # champs ajoutés, rien de retiré
