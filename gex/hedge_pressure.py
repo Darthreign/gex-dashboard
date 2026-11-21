@@ -41,8 +41,7 @@ import numpy as np
 import pandas as pd
 
 from . import greeks, rates
-from .config import CONTRACT_MULTIPLIER
-from .metrics import carry
+from .metrics import carry, multiplier
 
 
 def _signed(df: pd.DataFrame) -> np.ndarray:
@@ -66,7 +65,7 @@ def net_gamma_per_point(df: pd.DataFrame, spot: float,
     g = greeks.gamma(spot, d["strike"].to_numpy(), d["t_years"].to_numpy(),
                      rates.current_rate(), d["iv"].to_numpy(), carry(d))
     sign = _signed(d)
-    return float((sign * g * d[weight_col].to_numpy() * CONTRACT_MULTIPLIER * spot).sum())
+    return float((sign * g * d[weight_col].to_numpy() * multiplier(d) * spot).sum())
 
 
 def net_vanna_per_vol_point(df: pd.DataFrame, spot: float,
@@ -81,7 +80,7 @@ def net_vanna_per_vol_point(df: pd.DataFrame, spot: float,
     v = greeks.vanna(spot, d["strike"].to_numpy(), d["t_years"].to_numpy(),
                      rates.current_rate(), d["iv"].to_numpy(), carry(d))
     sign = _signed(d)
-    return float((sign * v * 0.01 * d[weight_col].to_numpy() * CONTRACT_MULTIPLIER * spot).sum())
+    return float((sign * v * 0.01 * d[weight_col].to_numpy() * multiplier(d) * spot).sum())
 
 
 def net_charm_per_day(df: pd.DataFrame, spot: float,
@@ -95,7 +94,7 @@ def net_charm_per_day(df: pd.DataFrame, spot: float,
                              rates.current_rate(), d["iv"].to_numpy(), carry(d),
                              (d["type"] == "C").to_numpy())
     sign = _signed(d)
-    return float((sign * c * d[weight_col].to_numpy() * CONTRACT_MULTIPLIER * spot).sum())
+    return float((sign * c * d[weight_col].to_numpy() * multiplier(d) * spot).sum())
 
 
 def atm_iv(df: pd.DataFrame, spot: float) -> float | None:

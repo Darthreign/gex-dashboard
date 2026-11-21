@@ -92,22 +92,28 @@ def vega(s, k, t, r, sigma, q=0.0):
     return _arr(s) * _dq(t, q) * _pdf(d1) * np.sqrt(_t(t))
 
 
-def call_theta(s, k, t, r, sigma):
-    """Theta annualisé (diviser par 365 pour le theta/jour)."""
-    d1, d2 = _d1_d2(s, k, t, r, sigma)
+def call_theta(s, k, t, r, sigma, q=0.0):
+    """Theta annualisé (diviser par 365 pour le theta/jour). Avec portage q :
+    le terme de diffusion est actualisé par e^(−qt), et le sous-jacent détenu
+    en couverture rapporte q, d'où le terme + q·S·e^(−qt)·N(d1)."""
+    d1, d2 = _d1_d2(s, k, t, r, sigma, q)
+    dq = _dq(t, q)
     t = _t(t)
     return (
-        -_arr(s) * _pdf(d1) * sigma / (2 * np.sqrt(t))
+        -_arr(s) * dq * _pdf(d1) * sigma / (2 * np.sqrt(t))
         - r * _arr(k) * np.exp(-r * t) * norm.cdf(d2)
+        + _arr(q) * _arr(s) * dq * norm.cdf(d1)
     )
 
 
-def put_theta(s, k, t, r, sigma):
-    d1, d2 = _d1_d2(s, k, t, r, sigma)
+def put_theta(s, k, t, r, sigma, q=0.0):
+    d1, d2 = _d1_d2(s, k, t, r, sigma, q)
+    dq = _dq(t, q)
     t = _t(t)
     return (
-        -_arr(s) * _pdf(d1) * sigma / (2 * np.sqrt(t))
+        -_arr(s) * dq * _pdf(d1) * sigma / (2 * np.sqrt(t))
         + r * _arr(k) * np.exp(-r * t) * norm.cdf(-d2)
+        - _arr(q) * _arr(s) * dq * norm.cdf(-d1)
     )
 
 
