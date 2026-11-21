@@ -2979,21 +2979,68 @@ def _scalp_as_of(symbol: str) -> str | None:
     return at.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# Notionnel de l'open interest joint aux flux de niveaux (tuile Options de
+# Squirrel X) : même définition que /api/v1/<symbole>/levels, cf.
+# metrics.notional_by_strike. Par sous-jacent, refait à l'arrivée d'une chaîne.
+NOTIONAL_KINDS = ("gex", "cw", "ps")          # les niveaux qui SONT des strikes
+_FEED_NOTIONAL: dict[str, tuple[tuple, dict]] = {}
+
+
+def _feed_notional(underlying: str) -> dict | None:
+    """{"": notionnel par strike toutes échéances, "_0dte": échéance la plus
+    proche}, dans la monnaie de `underlying`. None sans chaîne."""
+    st = chain_state(underlying)
+    with STATE.lock:
+        df, snap = getattr(st, "enriched", None), getattr(st, "snapshot", None)
+    if df is None or snap is None or df.empty:
+        return None
+    today = datetime.now(ET).date()
+    key = (snap.fetched_at, today)
+    hit = _FEED_NOTIONAL.get(underlying)
+    if hit and hit[0] == key:
+        return hit[1]
+    tables = {}
+    for suffix, bucket in (("", "Tout"), ("_0dte", "0DTE")):
+        try:
+            sub = metrics.select_bucket(df, bucket, today)
+        except Exception:  # noqa: BLE001 — pas de 0DTE (week-end, chaîne partielle)
+            sub = df.iloc[0:0]
+        tables[suffix] = metrics.notional_by_strike(sub, snap.spot)
+    _FEED_NOTIONAL[underlying] = (key, tables)
+    return tables
+
+
+def _notional_row(row: dict, kind: str, strike: float, table) -> dict:
+    """Ajoute le notionnel à un niveau qui est un strike ; rien pour un Gamma
+    Flip, un HVL ou une borne, ni pour un strike absent de la chaîne."""
+    if table is not None and kind in NOTIONAL_KINDS and strike in table.index:
+        row.update({c: float(v) for c, v in table.loc[strike].items()})
+    return row
+
+
+def _notional_totals(tables: dict | None) -> dict:
+    return {f"{c}_total{suffix}": float(t[c].sum())
+            for suffix, t in (tables or {}).items() for c in t.columns}
+
+
 def scalp_feed_levels(symbol: str) -> dict | None:
     """Niveaux du graphique /scalp pour un indicateur distant, sans le spot."""
     ctx = scalp_context(symbol)
     if ctx is None:
         return None
+    notio = _feed_notional(symbol)
 
-    def ladder(keys, walls):
+    def ladder(keys, walls, suffix):
         # `dist` et `near` dépendent du spot et ne sont pas envoyés.
-        return [{"name": r.name, "price": r.price, "color": rung_color(r),
-                 "kind": r.kind, "gex": r.gex}
+        table = notio[suffix] if notio else None
+        return [_notional_row({"name": r.name, "price": r.price, "color": rung_color(r),
+                               "kind": r.kind, "gex": r.gex}, r.kind, r.price, table)
                 for r in scalp.build_ladder(symbol, ctx["snap_spot"], ctx["zg"], ctx["hvl"],
                                             keys, walls)]
     return {"symbol": symbol, "as_of": _scalp_as_of(symbol),
-            "levels": ladder(ctx["keys"], ctx["walls"]),
-            "levels_0dte": ladder(ctx.get("keys_0dte") or {}, ctx.get("walls_0dte") or [])}
+            "levels": ladder(ctx["keys"], ctx["walls"], ""),
+            "levels_0dte": ladder(ctx.get("keys_0dte") or {}, ctx.get("walls_0dte") or [], "_0dte"),
+            **_notional_totals(notio)}
 
 
 def scalp_feed_profile(symbol: str) -> dict | None:
@@ -3102,16 +3149,22 @@ def scalp_feed_linked(symbol: str, underlying: str) -> dict | None:
         return None
     live = market_is_open()
 
-    def rows(rungs):
-        return [{"name": r.name, "strike": round(r.price, 4), "price": scalp.round_to_tick(symbol, xf(r.price)),
-                 "color": rung_color(r), "kind": r.kind, "gex": r.gex} for r in rungs]
+    notio = _feed_notional(underlying)      # monnaie du sous-jacent, non convertie
+
+    def rows(rungs, suffix):
+        table = notio[suffix] if notio else None
+        return [_notional_row({"name": r.name, "strike": round(r.price, 4),
+                               "price": scalp.round_to_tick(symbol, xf(r.price)),
+                               "color": rung_color(r), "kind": r.kind, "gex": r.gex},
+                              r.kind, r.price, table) for r in rungs]
     out = {"symbol": symbol, "underlying": underlying, "as_of": native["as_of"], "mode": mode,
            # heure de mesure de la conversion : maintenant si le cash cote, sinon
            # celle de la chaîne de l'indice dont vient le basis figé
            "basis_as_of": (datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ") if live
                            else _scalp_as_of(scales.scale_by_key(symbol).source)),
            "basis_live": live,
-           "levels": rows(native["levels"]), "levels_0dte": rows(native["levels_0dte"])}
+           "levels": rows(native["levels"], ""), "levels_0dte": rows(native["levels_0dte"], "_0dte"),
+           **_notional_totals(notio)}
     if mode == "basis":
         out["basis"] = round(xf(0.0), 2)
     else:

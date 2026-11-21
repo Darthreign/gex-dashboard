@@ -71,3 +71,37 @@ def test_rien_de_publie_si_le_contenu_ne_change_pas(monkeypatch):
     contenu["v"] = {"symbol": "ES", "levels": [1]}
     assert p() is not None
     broadcast._channels.pop(("scalp-feed", "levels", "ES"), None)
+
+
+def test_notionnel_joint_aux_niveaux_qui_sont_des_strikes(monkeypatch):
+    """Même définition que /levels : Σ OI × multiplicateur × spot, ≥ 0. Présent
+    sur les murs, le Call Wall et le Put Support ; absent du Gamma Flip."""
+    import pandas as pd
+    from datetime import date
+    proche, loin = date(2026, 11, 5), date(2026, 12, 18)
+    df = pd.DataFrame({
+        "strike": [20200.0, 20200.0, 20200.0, 19900.0, 20100.0],
+        "type": ["C", "P", "C", "P", "P"],
+        "expiry": [loin, loin, proche, loin, proche],
+        "open_interest": [10.0, 4.0, 1.0, 5.0, 2.0],
+        "multiplier": [20.0] * 5})
+    at = datetime(2026, 11, 5, 14, 30, tzinfo=UTC)
+    monkeypatch.setattr(app, "scalp_context", lambda s: CTX)
+    monkeypatch.setattr(app, "chain_state", lambda s: SimpleNamespace(
+        enriched=df, snapshot=SimpleNamespace(fetched_at=at, spot=20000.0)))
+    monkeypatch.setattr(app.metrics, "select_bucket",
+                        lambda d, bucket, today: d if bucket == "Tout" else d[d["expiry"] == proche])
+    app._FEED_NOTIONAL.clear()
+    d = app.scalp_feed_levels("NQ")
+    un = 20.0 * 20000.0                                       # un contrat NQ au spot
+    by_name = {r["name"]: r for r in d["levels"]}
+    assert by_name["GEX1"]["notional_calls"] == 11 * un and by_name["GEX1"]["notional_puts"] == 4 * un
+    assert by_name["GEX1"]["notional"] == 15 * un
+    assert by_name["Call Wall"]["notional"] == 15 * un        # même strike que GEX1
+    assert by_name["GEX2"]["notional"] == 5 * un and by_name["GEX2"]["notional_calls"] == 0.0
+    assert "notional" not in by_name["Gamma Flip"]            # pas un strike
+    assert "notional" not in by_name["Put Support"]           # 19800 : absent de la chaîne
+    assert d["levels_0dte"][0]["notional"] == 2 * un          # périmètre 0DTE seulement
+    assert d["notional_total"] == 22 * un and d["notional_puts_total"] == 11 * un
+    assert d["notional_total_0dte"] == 3 * un and d["notional_calls_total_0dte"] == 1 * un
+    app._FEED_NOTIONAL.clear()
