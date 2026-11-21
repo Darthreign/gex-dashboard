@@ -10,6 +10,9 @@ dans l'application : https://<hôte>/api/v1
     GET {base}/ticks/stream?cash=QQQ,SPX        (bougie 1 min en cours, `bar:<SYMBOLE>`)
     GET {base}/ticks/stream?products=NQ&linked=1  (niveaux des sous-jacents liés, `levels:NQ:QQQ`)
     GET {base}/ticks/stream?quotes=NQ,ES        (bid / ask / dernier prix en direct, `quote:<PRODUIT>`)
+    GET {base}/ticks/stream?flow=NQ,QQQ         (flux d'options de la séance, `flow:<SYMBOLE>`)
+    GET {base}/ticks/flow/{SYMBOLE}/days        (barres 1 min du flux d'options, cf. gex/flowfeed.py)
+    GET {base}/ticks/flow/{SYMBOLE}/{AAAA-MM-JJ}.parquet
     GET {base}/ticks/bars/{SYMBOLE}/days        (bougies 1 min cash, cf. gex/cashbars.py)
     GET {base}/ticks/bars/{SYMBOLE}/{AAAA-MM-JJ}.parquet
 
@@ -371,16 +374,17 @@ def _matches(etag: str) -> bool:
 
 
 def stream_channels(products: str | None, cash: str | None, linked: str | None = None,
-                    quotes: str | None = None) -> dict:
+                    quotes: str | None = None, flow: str | None = None) -> dict:
     """Canaux d'un flux : niveaux et profil des `products`, bougies des `cash`,
     meilleur bid / ask et dernière transaction des `quotes` (`quote:NQ`...).
     Sans `products`, NQ et ES par défaut, sauf si `cash` ou `quotes` est demandé seul.
     `linked=1` ajoute les niveaux des sous-jacents cash liés (`levels:NQ:QQQ`...),
     `linked=full` y ajoute la grille de tous leurs strikes (`strikes:NQ:QQQ`...)."""
-    from . import app, cashbars, livequote
-    alone = products is None and (cash is not None or quotes is not None)
+    from . import app, cashbars, flowfeed, livequote
+    alone = products is None and (cash is not None or quotes is not None or flow is not None)
     chs = {} if alone else app.scalp_feed_channels(products)
-    chs = {**chs, **cashbars.feed_channels(cash), **livequote.feed_channels(quotes)}
+    chs = {**chs, **cashbars.feed_channels(cash), **livequote.feed_channels(quotes),
+           **flowfeed.feed_channels(flow)}
     if linked in ("1", "full"):
         chs.update(app.scalp_linked_channels(products, cash, full=linked == "full"))
     return chs
@@ -399,7 +403,8 @@ def register_ticks_api(server: Flask) -> None:
         if slot is None:
             return Response(status=refusal[0], headers=refusal[1])
         chs = stream_channels(request.args.get("products"), request.args.get("cash"),
-                              request.args.get("linked"), request.args.get("quotes"))
+                              request.args.get("linked"), request.args.get("quotes"),
+                              request.args.get("flow"))
         if not chs:
             slot.release()
             return Response(status=404)
@@ -434,6 +439,23 @@ def register_ticks_api(server: Flask) -> None:
             return Response(status=304, headers=headers)
         return Response(data, mimetype="application/octet-stream", headers=headers)
 
+
+    @_route(server, "/api/v1/ticks/flow/<symbol>/days")
+    def _flow_days(symbol):
+        from . import flowfeed
+        days = flowfeed.available_days(symbol)
+        return jsonify({"days": days}) if days else Response(status=404)
+
+    @_route(server, "/api/v1/ticks/flow/<symbol>/<day>.parquet")
+    def _flow_file(symbol, day):
+        from . import flowfeed
+        data = (flowfeed.session_parquet(symbol, day)
+                if symbol in flowfeed.SYMBOLS and DAY_RE.match(day) else None)
+        if data is None:
+            return Response(status=404)
+        # La journée en cours change à chaque minute : jamais de cache ni d'ETag.
+        return Response(data, mimetype="application/octet-stream",
+                        headers={"Cache-Control": "no-store"})
 
     # Sous /ticks/ : seul chemin qui passe le Bypass Cloudflare Access.
     @_route(server, "/api/v1/ticks/bars/<symbol>/days")

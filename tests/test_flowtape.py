@@ -629,3 +629,24 @@ def test_provenance_dans_les_barres(cache_vide):
     t3.ingest_print(_print(".XYZ261009C100", "BUY", 1), now=60.0)
     row = t3.bars["XYZ"].as_row("XYZ", None)
     assert row["mult"] is None and row["mult_source"] is None
+
+
+def test_notionnel_brut_compte_tout_sans_signe():
+    """Taille x multiplicateur x spot, calls et puts separes : achats, ventes,
+    jambes de combo et agresseur inconnu comptent tous, sans signe."""
+    t = _tape()
+    t._spot["SPX"] = 7400.0
+    un = 100 * 7400.0
+    t.ingest_print(_print(".SPXW260729C7400", "BUY", 3), now=60.0)
+    t.ingest_print(_print(".SPXW260729C7400", "SELL", 2), now=61.0)
+    t.ingest_print(_print(".SPXW260729C7400", "BUY", 5, spread=True), now=62.0)
+    t.ingest_print(_print(".SPXW260729P7400", None, 4), now=63.0)
+    bar = t.bars["SPX"]
+    assert bar.notional_calls == pytest.approx(10 * un)
+    assert bar.notional_puts == pytest.approx(4 * un)
+    row = bar.as_row("SPX", None)
+    assert row["notional_calls"] == bar.notional_calls and row["notional_puts"] == bar.notional_puts
+
+    sans_spot = _tape()
+    sans_spot.ingest_print(_print(".SPXW260729C7400", "BUY", 3), now=60.0)
+    assert sans_spot.bars["SPX"].notional_calls == 0.0        # pas de spot : rien d'invente

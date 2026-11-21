@@ -150,6 +150,11 @@ class FlowBar:
     hedge_call_sell: float = 0.0    # preneur VEND des calls    (dealer achète des calls)
     hedge_put_buy: float = 0.0      # preneur ACHÈTE des puts   (dealer vend des puts)
     hedge_put_sell: float = 0.0     # preneur VEND des puts     (dealer achète des puts)
+    # Notionnel BRUT traité, en $ de sous-jacent, sans signe : taille ×
+    # multiplicateur × spot de CHAQUE print (combos et agresseur inconnu compris).
+    # Une taille d'activité, pas une direction ; rien n'est compté sans spot.
+    notional_calls: float = 0.0
+    notional_puts: float = 0.0
     buy_contracts: float = 0.0      # bruts, pour retrouver le volume total
     sell_contracts: float = 0.0
     prints: int = 0
@@ -175,6 +180,7 @@ class FlowBar:
             "hedge_call_sell": self.hedge_call_sell,
             "hedge_put_buy": self.hedge_put_buy,
             "hedge_put_sell": self.hedge_put_sell,
+            "notional_calls": self.notional_calls, "notional_puts": self.notional_puts,
             "delta_prints": float(self.delta_prints),
             "no_delta_prints": float(self.no_delta_prints),
             "buy_contracts": self.buy_contracts, "sell_contracts": self.sell_contracts,
@@ -431,6 +437,15 @@ class FlowTape:
             # d'agrégation — combos et côté indéterminé compris, marqués pour
             # que le lecteur les voie plutôt qu'ils disparaissent en silence.
             self._record_print(symbol, stream, item, price, size, now)
+
+            # Notionnel brut : avant les filtres ci-dessous, il compte tout.
+            gross_mult, gross_spot = multiplier_of(symbol), self._spot.get(symbol)
+            if gross_mult is not None and gross_spot:
+                gross_typ = option_type_of(stream or "")
+                if gross_typ == "C":
+                    bar.notional_calls += size * gross_mult * gross_spot
+                elif gross_typ == "P":
+                    bar.notional_puts += size * gross_mult * gross_spot
 
             # Jambe de combo : comptée à part. La classer en directionnel
             # fausserait le flux net (cf. docstring du module).
