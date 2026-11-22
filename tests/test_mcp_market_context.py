@@ -65,6 +65,12 @@ def test_pas_de_probabilite_ni_de_recommandation_dans_les_cles(tmp_path, monkeyp
     assert forbidden.isdisjoint(out.keys())
 
 
+def _vix_bar(ts, value):
+    """Une bougie 1 min du VIX, comme les écrit la capture dxFeed (data/prices/VIX)."""
+    store.append_prices("VIX", [{"timestamp": ts, "open": value, "high": value, "low": value,
+                                 "close": value, "ticks": 1, "source": "dxfeed"}], ts)
+
+
 def test_vix_absent_reste_none(tmp_path, monkeypatch):
     _seed_history(tmp_path, monkeypatch)
     out = json.loads(mcp_server.get_market_context("SPX"))
@@ -77,11 +83,11 @@ def test_vix_variation_du_jour(tmp_path, monkeypatch):
     # sur la veille quand le test tourne peu après minuit, et la variation du
     # jour devient alors indéterminable
     jour = datetime.now().date()
-    store.append_index_spot("vix", {"timestamp": datetime.combine(jour, dtime(10, 0)), "vix": 15.0})
-    store.append_index_spot("vix", {"timestamp": datetime.combine(jour, dtime(12, 0)), "vix": 17.8})
+    _vix_bar(datetime.combine(jour, dtime(10, 0)), 15.0)
+    _vix_bar(datetime.combine(jour, dtime(12, 0)), 17.8)
     out = json.loads(mcp_server.get_market_context("SPX"))
     assert out["vix"]["dernier"] == 17.8
-    assert out["vix"]["source"] == "cboe_delaye"
+    assert out["vix"]["source"] == "dxfeed_bougies"
     assert abs(out["vix"]["variation_du_jour"] - 2.8) < 1e-9
 
 
@@ -94,8 +100,8 @@ def test_vix_live_prioritaire_si_compte_courtier(tmp_path, monkeypatch):
     # sur la veille quand le test tourne peu après minuit, et la variation du
     # jour devient alors indéterminable
     jour = datetime.now().date()
-    store.append_index_spot("vix", {"timestamp": datetime.combine(jour, dtime(10, 0)), "vix": 15.0})
-    store.append_index_spot("vix", {"timestamp": datetime.combine(jour, dtime(12, 0)), "vix": 17.8})
+    _vix_bar(datetime.combine(jour, dtime(10, 0)), 15.0)
+    _vix_bar(datetime.combine(jour, dtime(12, 0)), 17.8)
     monkeypatch.setattr(mcp_server, "credentials_present", lambda: True)
     monkeypatch.setattr(mcp_server.QUOTES, "price", lambda key: 19.5 if key == "VIX" else None)
     out = json.loads(mcp_server.get_market_context("SPX"))
@@ -108,9 +114,23 @@ def test_vix_repli_delaye_si_pas_de_tick_live(tmp_path, monkeypatch):
     """Identifiants présents mais VIX pas dans l'abonnement (price() = None,
     entitlement manquant) : repli sur le délayé, pas de trou silencieux."""
     _seed_history(tmp_path, monkeypatch)
-    store.append_index_spot("vix", {"timestamp": datetime.combine(datetime.now().date(), dtime(11, 0)), "vix": 16.4})
+    _vix_bar(datetime.combine(datetime.now().date(), dtime(11, 0)), 16.4)
     monkeypatch.setattr(mcp_server, "credentials_present", lambda: True)
     monkeypatch.setattr(mcp_server.QUOTES, "price", lambda key: None)
     out = json.loads(mcp_server.get_market_context("SPX"))
     assert out["vix"]["dernier"] == 16.4
-    assert out["vix"]["source"] == "cboe_delaye"
+    assert out["vix"]["source"] == "dxfeed_bougies"
+
+
+def test_vix_du_digest_replie_sur_les_bougies_dxfeed(tmp_path, monkeypatch):
+    """Sans cotation en direct (au demarrage), le VIX vient de la derniere bougie
+    dxFeed, plus de l'historique CBOE qui n'est plus alimente."""
+    from gex import digest
+    _seed_history(tmp_path, monkeypatch)
+    monkeypatch.setattr(digest, "store", store, raising=False)
+    from gex import rtquote
+    monkeypatch.setattr(rtquote, "credentials_present", lambda: False)
+    store.append_index_spot("vix", {"timestamp": datetime(2026, 11, 19, 16, 9), "vix": 27.85})
+    assert digest._current_vix() == 27.85            # dernier recours : rien d'autre
+    _vix_bar(datetime(2026, 11, 20, 15, 59), 35.89)
+    assert digest._current_vix() == 35.89

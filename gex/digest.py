@@ -490,6 +490,12 @@ def _current_vix() -> float | None:
     live = QUOTES.price("VIX") if credentials_present() else None
     if live:
         return float(live)
+    # Repli : la dernière bougie dxFeed enregistrée (data/prices/VIX). L'ancien
+    # historique CBOE (history/vix.parquet) n'est plus alimenté depuis le
+    # 19/11/2026 et ne sert qu'en dernier recours, faute de toute bougie.
+    bars = store.last_price_day("VIX")
+    if not bars.empty:
+        return float(bars["close"].iloc[-1])
     hist = store.load_index_spot("vix")
     if not hist.empty:
         return float(hist.sort_values("timestamp")["vix"].iloc[-1])

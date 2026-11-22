@@ -288,6 +288,15 @@ def price_days(symbol: str) -> list[str]:
     return sorted(p.stem for p in root.glob("*.parquet"))
 
 
+def last_price_day(symbol: str) -> pd.DataFrame:
+    """Bougies 1 min de la dernière journée qui en a (vide si aucune)."""
+    for day in reversed(price_days(symbol)):
+        bars = load_prices(symbol, day)
+        if not bars.empty:
+            return bars.sort_values("timestamp")
+    return pd.DataFrame()
+
+
 def load_prices(symbol: str, day: str) -> pd.DataFrame:
     path = SETTINGS.data_dir / "prices" / symbol / f"{day}.parquet"
     return _read_parquet_retry(path) if path.exists() else pd.DataFrame()

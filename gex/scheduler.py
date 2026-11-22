@@ -135,8 +135,7 @@ _CADENCE = _Cadence()
 # Les constituants suivent leur propre horloge : leurs murs reposent sur l'open
 # interest, publié une fois par jour, donc les puller au rythme des cibles
 # n'apporterait rien et quadruplerait la charge.
-_CONSTITUENT_CADENCE = _Cadence(SETTINGS.constituent_interval_s)
-_CONSTITUENT_SNAPSHOT = _Cadence(SETTINGS.constituent_snapshot_interval_s)
+_VIX_CADENCE = _Cadence(SETTINGS.constituent_interval_s)
 
 
 def pull_vix() -> None:
@@ -159,8 +158,7 @@ def pull_all(force: bool = False) -> None:
     if SETTINGS.market_hours_only and not market_is_open() and not force:
         return
     persist = _CADENCE.tick()
-    due = _CONSTITUENT_CADENCE.tick()
-    persist_constituent = _CONSTITUENT_SNAPSHOT.tick()
+    due = _VIX_CADENCE.tick()
     if due or force:
         pull_vix()
     for key, u in UNDERLYINGS.items():
@@ -174,12 +172,13 @@ def pull_all(force: bool = False) -> None:
             # collecte native séparée (pull_native_options) : une chaîne
             # coûte ~90 s, incompatible avec cette boucle à 60 s
             continue
-        is_constituent = u.role == "constituent"
-        if is_constituent and not (due or force):
+        if u.role == "constituent":
+            # Chaînes des constituants : plus collectées (22/11/2026). Aucun
+            # calcul ne les lisait ; seuls leurs PRIX servent (participation du
+            # brief), et ils viennent du flux dxFeed, pas d'ici.
             continue
         try:
-            pull_symbol(key, persist_snapshot=(persist_constituent if is_constituent
-                                               else persist))
+            pull_symbol(key, persist_snapshot=persist)
         except Exception as e:  # noqa: BLE001 — la boucle doit survivre
             log.exception("Échec pull %s", key)
             with STATE.lock:
