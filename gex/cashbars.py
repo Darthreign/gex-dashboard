@@ -52,6 +52,19 @@ def _root(symbol: str) -> Path:
     return SETTINGS.data_dir / "prices" / DIRS.get(symbol, symbol)
 
 
+# Dossiers dont seules les bougies du calcul continu sont servies : le VXN ne
+# sort qu'en vraies bougies 1 min, jamais les points de secours à 15 min.
+LIVE_ONLY = {"VXN_CALC": "live_dxfeed"}
+
+
+def _read(path: Path) -> pd.DataFrame:
+    df = store._read_parquet_retry(path)
+    src = LIVE_ONLY.get(path.parent.name)
+    if src is None:
+        return df
+    return df[df["source"] == src] if "source" in df.columns else df.iloc[0:0]
+
+
 def _weekday(day: str) -> bool:
     try:
         return datetime.strptime(day, "%Y-%m-%d").weekday() < 5
@@ -83,7 +96,7 @@ def _day_has_session(path: Path) -> bool:
     if hit and hit[:2] == sig:
         return hit[2]
     try:
-        ok = not _session(store._read_parquet_retry(path)).empty
+        ok = not _session(_read(path)).empty
     except Exception:  # noqa: BLE001 — fichier illisible : séance absente, pas une erreur 500
         ok = False
     _has_session[path] = (*sig, ok)
@@ -115,7 +128,7 @@ def session_parquet(path: Path, matches) -> tuple[str, bytes | None]:
     if hit and hit[0] == etag:
         return hit
     buf = io.BytesIO()
-    _session(store._read_parquet_retry(path)).to_parquet(buf, index=False)
+    _session(_read(path)).to_parquet(buf, index=False)
     if len(_built) >= BUILT_MAX:
         _built.pop(next(iter(_built)))
     _built[path] = (etag, buf.getvalue())
@@ -142,7 +155,7 @@ def _file_bar(symbol: str, minute: int):
         _, sig = _etag(path)
         hit = _file_bars.get(path)
         if not hit or hit[0] != sig:
-            df = _session(store._read_parquet_retry(path))
+            df = _session(_read(path))
             hit = _file_bars[path] = (sig, {int(r.ts): r for r in df.itertuples(index=False)})
     except Exception:  # noqa: BLE001 — fichier absent ou en cours de remplacement : on réessaiera
         return None

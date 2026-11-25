@@ -107,3 +107,20 @@ def test_vxn_servi_par_les_routes_cash(tmp_path, monkeypatch):
     assert cashbars.available_days("VXN") == ["2026-11-27"]
     assert cashbars.available_days("VXN_CALC") == []
     assert set(cashbars.feed_channels("VXN,VIX")) == {"bar:VXN", "bar:VIX"}
+
+
+def test_vxn_servi_seulement_en_bougies_du_calcul_continu(tmp_path, monkeypatch):
+    monkeypatch.setattr(SETTINGS, "data_dir", tmp_path)
+    cashbars._has_session.clear()
+    cashbars._built.clear()
+    d = tmp_path / "prices" / "VXN_CALC"
+    d.mkdir(parents=True)
+    row = lambda h, m, src: {"timestamp": datetime(2026, 11, 27, h, m), "open": 30.0,  # noqa: E731
+                             "high": 30.0, "low": 30.0, "close": 30.0, "source": src}
+    pd.DataFrame([row(10, 0, "calc_dxfeed")]).to_parquet(d / "2026-11-26.parquet", index=False)
+    pd.DataFrame([row(10, 0, "live_dxfeed"), row(10, 15, "calc_dxfeed")]
+                 ).to_parquet(d / "2026-11-27.parquet", index=False)
+    assert cashbars.available_days("VXN") == ["2026-11-27"]      # jour à 15 min seulement : absent
+    _, data = cashbars.session_parquet(d / "2026-11-27.parquet", lambda e: False)
+    import io
+    assert len(pd.read_parquet(io.BytesIO(data))) == 1          # le point de secours n'est pas servi
