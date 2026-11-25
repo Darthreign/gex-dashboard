@@ -109,11 +109,10 @@ def get_gex_by_strike(symbol: str = "SPX", top_n: int = 15) -> str:
 def _vix_context() -> dict | None:
     """VIX en direct via dxFeed si un compte courtier est configuré ET que
     l'abonnement inclut ce ticker (`QUOTES.price` renvoie None sinon, repli
-    silencieux) — sinon le pull délayé CBOE (scheduler.pull_vix, ~15 min,
-    cadence 10 min). La variation du jour reste calculée depuis l'historique
-    délayé (seule série qui date un "premier point du jour") même quand le
-    dernier niveau vient du direct : approximation assumée, pas une vraie
-    variation intraday tick à tick.
+    silencieux) — sinon la dernière bougie dxFeed enregistrée. La variation du
+    jour part de la première bougie de la dernière journée enregistrée
+    (data/prices/VIX), plus de l'historique CBOE : cette source est coupée
+    depuis le 20/11/2026 (cf. config.Settings.cboe_enabled).
 
     Le flux public/démo (celui du repli NQ/ES, cf. PublicDelayedQuotes) n'a
     volontairement PAS été étendu à VIX : testé hors séance, son dernier
@@ -121,18 +120,13 @@ def _vix_context() -> dict | None:
     pas un flux en retard. Sa latence réelle EN séance reste à vérifier avant
     de l'utiliser comme repli gratuit ici ; ne pas réinterpréter cette note
     comme "flux non fiable" sans nouveau test pendant les heures de marché."""
-    vix_hist = store.load_index_spot("vix")
+    bars = store.last_price_day("VIX")
     day_open = None
     delayed_last = None
-    delayed_nb_points = 0
-    if not vix_hist.empty:
-        vix_hist = vix_hist.sort_values("timestamp")
-        today = str(pd.to_datetime(vix_hist["timestamp"].iloc[-1]).date())
-        today_rows = vix_hist[pd.to_datetime(vix_hist["timestamp"]).dt.strftime("%Y-%m-%d") == today]
-        if not today_rows.empty:
-            day_open = float(today_rows["vix"].iloc[0])
-            delayed_last = float(today_rows["vix"].iloc[-1])
-            delayed_nb_points = len(today_rows)
+    delayed_nb_points = len(bars)
+    if not bars.empty:
+        day_open = float(bars["open"].iloc[0])
+        delayed_last = float(bars["close"].iloc[-1])
 
     vix_live = QUOTES.price("VIX") if credentials_present() else None
     if vix_live is not None:
@@ -144,7 +138,7 @@ def _vix_context() -> dict | None:
     if delayed_last is not None:
         return {
             "dernier": delayed_last,
-            "source": "cboe_delaye",
+            "source": "dxfeed_bougies",
             "variation_du_jour": (delayed_last - day_open) if delayed_nb_points > 1 else None,
         }
     return None

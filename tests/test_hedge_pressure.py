@@ -14,7 +14,9 @@ def make_chain(spot: float, rows: list[dict]) -> ChainSnapshot:
     pas de tests/__init__.py dans ce repo, un import inter-fichiers de tests
     serait fragile (dépendrait de la résolution de `tests` comme package)."""
     defaults = {
-        "bid": 1.0, "ask": 1.2, "iv": 0.20, "open_interest": 100.0,
+        # pas de cotation par défaut : l'IV vient alors du champ "iv" (repli
+        # de calibrate_chain) ; un test qui veut des prix les fixe lui-même
+        "bid": 0.0, "ask": 0.0, "iv": 0.20, "open_interest": 100.0,
         "volume": 0.0, "delta_cboe": 0.0, "gamma_cboe": 0.0,
         "last_trade_price": 0.0,
     }
@@ -130,3 +132,15 @@ def test_atm_iv_none_sans_chaine_exploitable():
 
 def test_net_gamma_per_point_vide_sans_chaine():
     assert hp.net_gamma_per_point(_empty_enriched(), 100.0) == 0.0
+
+
+def test_multiplicateur_relu_sur_la_chaine():
+    """Option sur future : 20 $/point sur NQ, pas 100. Le 100 en dur gonflait
+    les trois flux ×5 (NQ) ou ×2 (ES)."""
+    snap = make_chain(100.0, [{"strike": 100.0, "type": "C", "expiry": far_expiry()},
+                              {"strike": 95.0, "type": "P", "expiry": far_expiry()}])
+    df = metrics.enrich(snap)
+    nq = df.assign(multiplier=20.0)
+    for fn in (hp.net_gamma_per_point, hp.net_vanna_per_vol_point, hp.net_charm_per_day):
+        assert fn(df, 100.0) != 0.0
+        assert fn(nq, 100.0) == pytest.approx(fn(df, 100.0) / 5)

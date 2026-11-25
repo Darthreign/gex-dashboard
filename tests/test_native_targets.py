@@ -43,9 +43,21 @@ def test_pull_all_ignore_les_cibles_futopt(monkeypatch):
     monkeypatch.setattr(scheduler, "market_is_open", lambda *a, **k: True)
     monkeypatch.setattr(scheduler, "pull_symbol",
                         lambda key, **kw: called.append(key))
+    monkeypatch.setattr(scheduler, "pull_vix", lambda: None)
+    monkeypatch.setattr(scheduler.SETTINGS, "cboe_enabled", True)
     scheduler.pull_all(force=True)
     assert "NQ" not in called and "ES" not in called
     assert "SPX" in called and "NDX" in called
+
+
+def test_source_cboe_coupee_aucun_appel(monkeypatch):
+    """Depuis le 20/11/2026 l'adresse CBOE répond 403 : réglage coupé, plus
+    aucune tentative (ni chaînes, ni VIX), même en collecte forcée."""
+    monkeypatch.setattr(scheduler.SETTINGS, "cboe_enabled", False)
+    monkeypatch.setattr(scheduler, "pull_symbol", lambda key, **kw: 1 / 0)
+    monkeypatch.setattr(scheduler, "fetch_index_spot", lambda sym: 1 / 0)
+    scheduler.pull_all(force=True)
+    scheduler.pull_vix()
 
 
 def test_build_native_summary_colonnes_exploitables():
@@ -134,3 +146,16 @@ def test_pull_native_options_cache_perime_relance_la_collecte(tmp_path, monkeypa
     scheduler.pull_native_options()
 
     assert called == ["NQ", "ES"]
+
+
+def test_les_constituants_ne_sont_plus_collectes(monkeypatch):
+    """Aucun calcul ne lisait leurs chaines : seuls leurs prix servent, et ils
+    viennent du flux temps reel. Meme source CBOE retablie, on ne les pulle plus."""
+    called = []
+    monkeypatch.setattr(scheduler, "market_is_open", lambda *a, **k: True)
+    monkeypatch.setattr(scheduler, "pull_symbol", lambda key, **kw: called.append(key))
+    monkeypatch.setattr(scheduler, "pull_vix", lambda: None)
+    monkeypatch.setattr(scheduler.SETTINGS, "cboe_enabled", True)
+    scheduler.pull_all(force=True)
+    constituants = {k for k, u in scheduler.UNDERLYINGS.items() if u.role == "constituent"}
+    assert constituants and not constituants & set(called)

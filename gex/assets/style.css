@@ -780,8 +780,40 @@ body.scalp-page .levels-row, body.scalp-page .tabbar, body.scalp-page .toolbar,
 body.scalp-page #unit { display: none; }
 body.scalp-page #symbol label:has(input[value="SPX"]), body.scalp-page #symbol label:has(input[value="NDX"]),
 body.scalp-page #symbol label:has(input[value="SPY"]), body.scalp-page #symbol label:has(input[value="QQQ"]) { display: none; }
-body:not(.scalp-page) .full-link, body.scalp-page .scalp-link { display: none; }
-a.scalp-link, a.full-link { text-decoration: none; }
+body:not(.scalp-page):not(.moc-page) .full-link, body.scalp-page .scalp-link { display: none; }
+a.scalp-link, a.full-link, a.moc-link { text-decoration: none; }
+
+/* Page /moc (cf. gex/mocpage.py) : même principe que /scalp — le reste du
+   dashboard masqué, NQ et ES seulement. */
+#pane-moc { display: none; }
+body.moc-page #pane-moc { display: block; }
+body.moc-page #pane-main, body.moc-page #pane-profile, body.moc-page #pane-greeks2,
+body.moc-page #pane-heat, body.moc-page #pane-pos, body.moc-page #pane-tape,
+body.moc-page #pane-scalp { display: none !important; }
+body.moc-page #cards, body.moc-page #pc-gauge, body.moc-page #regime-banner,
+body.moc-page .levels-row, body.moc-page .tabbar, body.moc-page .toolbar,
+body.moc-page #unit, body.moc-page .moc-link { display: none; }
+body.moc-page #symbol label:has(input[value="SPX"]), body.moc-page #symbol label:has(input[value="NDX"]),
+body.moc-page #symbol label:has(input[value="SPY"]), body.moc-page #symbol label:has(input[value="QQQ"]) { display: none; }
+.moc-bannerbox { margin-bottom: 12px; }
+.moc-bannerbox .sc-banner-title { font-size: 22px; }
+.moc-clock { flex-direction: column; align-items: flex-end; }
+.moc-countdown { font-size: 34px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; }
+.moc-phase { color: var(--ink2); }
+.moc-cards { margin-bottom: 12px; }
+.moc-row { display: grid; grid-template-columns: 3fr 2fr; gap: 12px; }
+.moc-col { min-width: 0; }
+.moc-history { margin-top: 12px; }
+.moc-hist-title { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.moc-hist { border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.moc-hist th, .moc-hist td { padding: 3px 10px; border-bottom: 1px solid var(--line); text-align: right; }
+.moc-hist th:first-child, .moc-hist td:first-child { text-align: left; }
+.moc-ok { color: var(--ok); } .moc-ko { color: var(--neg); }
+.moc-note { margin-top: 10px; max-width: 980px; }
+@media (max-width: 900px) {
+  .moc-row { grid-template-columns: 1fr; }
+  .moc-countdown { font-size: 26px; }
+}
 
 /* Graphique /scalp v2 (Lightweight Charts) : /scalpv1 garde scalp-price
    (Plotly) inchangée, seule /scalp EXACT bascule sur la nouvelle carte —
@@ -821,17 +853,6 @@ body.scalp-v2-page #scalp-lw-card { display: flex; flex-direction: column; }
 .sc-ind-toolbar { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 6px; }
 .sc-ind-btn { width: auto; padding: 0 10px; }
 
-/* Couverture des dealers : repassée sur Plotly (scalp-hedge) PARTOUT,
-   y compris /scalp v2, depuis le 2026-10-05 — la version Lightweight
-   Charts (scalp-lw-hedge-card) clignotait en mode Live (thread principal
-   du navigateur saturé), deux correctifs tentés ont chacun régressé
-   (intervalle dédié -> page figée ; flux SSE -> graphique vide),
-   abandonnés cette nuit-là. Plotly n'a jamais eu ce problème sur
-   /scalpv1 : plus simple de le réutiliser partout que de persister sur
-   la version qui ne marche pas encore. #scalp-lw-hedge-card reste donc
-   masquée inconditionnellement (plus de bascule par body.scalp-v2-page
-   ici) — à réactiver seulement si ce chantier est repris et corrigé. */
-#scalp-lw-hedge-card { display: none; }
 
 
 /* Bandeau d'amplification : en tête de la page Scalp — position/largeur
@@ -853,6 +874,25 @@ body.scalp-v2-page #scalp-lw-card { display: flex; flex-direction: column; }
 .sc-tone-ok .sc-banner-title { color: #199e70; }
 .sc-tone-neutral { border-color: var(--line); }
 .sc-tone-neutral .sc-banner-title { color: var(--ink2); font-weight: 600; }
+
+/* Lecture normalisée /scalp v2 (cf. gex/edge.py) : excès en mouvement
+   attendu, zone de régime, confirmations. Le statut à droite dit si les
+   seuils sont validés hors échantillon (scripts/edge_report.py). */
+.sc-edge {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px;
+  margin-top: 8px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line);
+  font-size: 13px; font-variant-numeric: tabular-nums;
+}
+.sc-edge-text { font-weight: 600; color: var(--ink); }
+.sc-edge-status { font-size: 11px; color: var(--warn); }
+.sc-edge-status.sc-edge-ok { color: var(--ok); }
+.sc-edge-fade { border-color: var(--ok); background: rgba(25,158,112,.10); }
+.sc-edge-fade .sc-edge-text { color: var(--ok); }
+.sc-edge-avoid { border-color: var(--neg); background: rgba(230,103,103,.10); }
+.sc-edge-avoid .sc-edge-text { color: var(--neg); }
+.sc-edge-watch .sc-edge-text { color: var(--warn); }
+.sc-edge-none .sc-edge-text, .sc-edge-na .sc-edge-text { color: var(--muted); font-weight: 500; }
+body.sc-keywords-only .sc-edge-status { display: none; }
 
 /* Zone d'absorption (candidats iceberg, page /scalp) — TOUJOURS visible : les
    derniers niveaux détectés (cf. TickCapture.absorption_recent), la plus
@@ -880,3 +920,60 @@ body.scalp-v2-page #scalp-lw-card { display: flex; flex-direction: column; }
 @media (prefers-reduced-motion: reduce) {
   .sc-absorb-active { animation: none; }
 }
+
+/* ------------------------------------- graphiques Lightweight Charts (SSE)
+   Cartes créées par gex/assets/gex-lw.js : heatmap, flux, gamma flow, tape,
+   historique GEX, spot vs zero gamma, couverture des dealers, prix /scalpv1. */
+.lw-card {
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 8px 10px 6px;
+  position: relative;
+  min-width: 0;
+}
+.lw-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-height: 22px; }
+.lw-title { font-size: 13px; color: var(--ink); font-weight: 600; flex: 1 1 auto; min-width: 0; }
+.lw-legend { display: flex; gap: 10px; flex-wrap: wrap; font-size: 11px; color: var(--ink-2); }
+.lw-leg { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.lw-leg i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; }
+.lw-tools { display: flex; gap: 4px; }
+.lw-btn {
+  background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--line);
+  border-radius: 4px; font-size: 11px; padding: 1px 7px; cursor: pointer;
+}
+.lw-btn:hover { color: var(--ink); border-color: var(--accent); }
+.lw-box { width: 100%; margin-top: 4px; }
+.lw-msg {
+  display: none; position: absolute; inset: 30px 10px 6px; align-items: center;
+  justify-content: center; text-align: center; color: var(--muted); font-size: 13px;
+}
+
+/* bandeau /scalp : couverture des dealers à contre-sens du mouvement */
+.sc-edge-brake { color: var(--ink); background: rgba(25, 158, 112, 0.35); padding: 0 5px;
+                 border-radius: 3px; letter-spacing: 0.02em; }
+
+/* bandeau /scalp : second test d'un excès (cf. gex/secondtest.py) */
+.sc-second { margin-top: 4px; font-size: 13px; padding: 2px 6px; border-radius: 3px;
+             border-left: 3px solid var(--muted); }
+.sc-second.sc-risk-eleve { border-left-color: #d64545; background: rgba(214, 69, 69, 0.14); }
+.sc-second.sc-risk-moyen { border-left-color: #e0a030; background: rgba(224, 160, 48, 0.14); }
+.sc-second.sc-risk-faible { border-left-color: #199e70; background: rgba(25, 158, 112, 0.14); }
+.sc-second .sc-st-risk { font-weight: 600; }
+
+/* replay de la heatmap (gex-replay.js) */
+.heat-replay { align-items: center; gap: 8px; }
+.heat-replay-speed { background: transparent; color: var(--ink); border: 1px solid #383835;
+                     border-radius: 4px; font-size: 12px; padding: 1px 4px; }
+.heat-replay-speed option { background: #1c1c1a; }
+.heat-replay-pos { width: 280px; max-width: 45vw; }
+
+/* réglages fins du graphique /scalp (panneau ⚙) */
+.sc-settings { flex-wrap: wrap; align-items: center; gap: 12px; padding: 6px 8px;
+               font-size: 12px; border-bottom: 1px solid #2c2c2a; }
+.sc-settings label { display: inline-flex; align-items: center; gap: 4px; }
+.sc-set-num { width: 70px; background: transparent; color: var(--ink);
+              border: 1px solid #383835; border-radius: 4px; padding: 1px 4px; }
+.sc-set-lbl { color: var(--muted); }
+
+/* cadre de l'open US + mouvement attendu (gex-openframe.js) : ligne de chiffres */
+.sc-em-info { font-size: 12px; color: var(--muted); padding: 2px 4px 4px; }

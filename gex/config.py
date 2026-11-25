@@ -187,10 +187,18 @@ class Settings:
     # Grille de recherche du zero gamma autour du spot (fraction, pas).
     zg_range: float = 0.08
     zg_steps: int = 161
+    # Horizon (en séances) du bucket "Pondéré" : poids exp(-séances / τ).
+    weighted_tau_sessions: float = 5.0
+    # Source CBOE (chaînes différées de 15 min, VIX, constituants). COUPÉE le
+    # 21/11/2026 : depuis le 20/11 l'adresse cdn-api.cboe.com répond par une page
+    # de blocage Cloudflare (403) pour tous les symboles, et le site public a été
+    # refondu (cboe.com/data/quotes/...). Inutile d'insister toutes les minutes sur
+    # une quarantaine de symboles. Repasser à True seulement si l'adresse resert.
+    cboe_enabled: bool = False
     # Ne puller que pendant les heures de marché US (ET).
     market_hours_only: bool = True
     # Commit+push automatique du repo git data/ (historique+flux) après la
-    # clôture (16:20 ET). Sans effet si data/ n'est pas un repo git avec remote.
+    # clôture (17:20 ET, après la clôture des futures). Sans effet si data/ n'est pas un repo git avec remote.
     auto_push_data: bool = True
     data_dir: Path = field(default_factory=lambda: DATA_DIR)
 

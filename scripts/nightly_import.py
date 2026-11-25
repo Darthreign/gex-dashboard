@@ -13,16 +13,19 @@ l'import du jour. Journalisé dans logs/nightly_import.log.
 from __future__ import annotations
 
 import datetime as dt
+import sys
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-ROOT = Path(r"D:/Gex")
-TICKS = ROOT / "data" / "ticks" / "NQ"
-IMPORT = ROOT / "data" / "import" / "ticks_full" / "NQ"
-RAW = ROOT / "data" / "import" / "databento_raw"
-LOG = ROOT / "logs" / "nightly_import.log"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from gex.config import DATA_DIR  # noqa: E402
+
+TICKS = DATA_DIR / "ticks" / "NQ"
+IMPORT = DATA_DIR / "import" / "ticks_full" / "NQ"
+RAW = DATA_DIR / "import" / "databento_raw"
+LOG = DATA_DIR.parent / "logs" / "nightly_import.log"
 PARIS = ZoneInfo("Europe/Paris")   # affichage/log seulement
 ET = ZoneInfo("America/New_York")   # référence des séances CME
 
@@ -30,6 +33,7 @@ ET = ZoneInfo("America/New_York")   # référence des séances CME
 def log(msg: str) -> None:
     line = f"{dt.datetime.now(PARIS):%Y-%m-%d %H:%M:%S} | {msg}"
     print(line)
+    LOG.parent.mkdir(parents=True, exist_ok=True)
     with open(LOG, "a", encoding="utf-8") as f:
         f.write(line + "\n")
 
@@ -183,7 +187,8 @@ def _databento_session(day: str) -> pd.DataFrame:
     ts = pd.to_datetime(d["ts_event"], utc=True)
     side_map = {"B": "BUY", "A": "SELL", "N": None}
     out = pd.DataFrame({
-        "ts": ts.astype("int64") / 1e9,
+        # résolution réelle de la série (ns, ou µs selon la version de pandas)
+        "ts": ts.astype("int64") / {"s": 1, "ms": 1e3, "us": 1e6, "ns": 1e9}[ts.dt.unit],
         "price": d["price"].astype(float),
         "volume": d["size"].astype("int64"),
         "side": d["side"].map(side_map),
@@ -199,7 +204,8 @@ def _write_if_new(df: pd.DataFrame, day: str, origin: str) -> None:
         log(f"{day} : déjà présent dans import — NON réécrit.")
         return
     base = [c for c in ["ts", "price", "volume", "side", "source"] if c in df.columns]
-    extra = [c for c in ["bid", "ask", "ts_recv"] if c in df.columns]
+    # bid_size/ask_size : requis par le DOM de Squirrel X en replay (absents avant le 01/09/2026)
+    extra = [c for c in ["bid", "ask", "ts_recv", "bid_size", "ask_size"] if c in df.columns]
     df = df[base + extra].sort_values("ts", kind="stable").reset_index(drop=True)
     df.to_parquet(out, index=False)
     log(f"{day} : ÉCRIT ({origin}) — {len(df):,} lignes, colonnes {list(df.columns)}")

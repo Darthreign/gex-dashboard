@@ -106,7 +106,8 @@ def _cmdline(pid: int) -> str:
             ["powershell", "-NoProfile", "-Command",
              f"(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\")"
              ".CommandLine"],
-            capture_output=True, text=True, timeout=15)
+            capture_output=True, text=True, timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))   # pas de console visible
         return (r.stdout or "").strip() or "?"
     except Exception:  # noqa: BLE001
         return "?"

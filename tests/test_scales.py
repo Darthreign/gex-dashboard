@@ -92,6 +92,35 @@ def test_basis_mesure_en_seance(monkeypatch):
         assert xf(live[index]) == pytest.approx(live[future])
 
 
+def test_etf_au_prix_temps_reel_en_seance(monkeypatch):
+    """QQQ n'a pas de future : en séance son spot doit être le prix temps réel,
+    pas celui de sa chaîne différée, sinon le ratio marie un future actuel à un
+    QQQ en retard (HVL 82 points trop bas sur NQ le 16/11/2026)."""
+    from types import SimpleNamespace
+
+    from gex import app as A
+    from gex.rtquote import QUOTES
+
+    chaine = {"QQQ": 666.75, "NDX": 27990.0}
+    monkeypatch.setattr(A.STATE, "get", lambda k: SimpleNamespace(
+        summary=SimpleNamespace(spot=chaine[k], basis=None) if k in chaine else None))
+    live = {"QQQ": 664.655, "NDX": 27390.0, "NQ": 27405.25}
+    monkeypatch.setattr(QUOTES, "price", lambda k: live.get(k))
+    monkeypatch.setattr(A, "market_is_open", lambda *a, **k: True)
+    xf, ratio, mode = A._transform_for("QQQ", "NQ")
+    assert mode == "ratio" and ratio == pytest.approx(27405.25 / 664.655)
+    assert xf(664.655) == pytest.approx(27405.25)
+
+    del live["QQQ"]                                  # sans cotation : repli sur la chaîne
+    assert A._transform_for("QQQ", "NQ")[1] == pytest.approx(27405.25 / 666.75)
+
+    monkeypatch.setattr(A, "market_is_open", lambda *a, **k: False)
+    live["QQQ"] = 664.655                            # hors séance : rien ne change
+    monkeypatch.setattr(A.STATE, "get", lambda k: SimpleNamespace(
+        summary=SimpleNamespace(spot=chaine[k], basis=180.0) if k in chaine else None))
+    assert A._transform_for("QQQ", "NQ")[1] == pytest.approx((27990.0 + 180.0) / 666.75)
+
+
 def test_basis_fige_hors_seance(monkeypatch):
     """Hors séance l'indice ne cote plus : son écart au future absorbe tout le
     mouvement overnight. L'utiliser ferait dériver TOUS les niveaux transposés

@@ -60,6 +60,7 @@ from .metrics import ET
 from .rtquote import (
     BACKOFF_MAX,
     BACKOFF_START,
+    _env,
     credentials_present,
     quote_token,
 )
@@ -88,9 +89,26 @@ def _session_day(ts: float) -> str:
 
 ABSORPTION_FRESH_S = 20.0
 
+# Enregistrement de CHAQUE changement de cotation (meilleur bid / ask et tailles)
+# du contrat actif, pour rejouer le premier niveau du carnet entre deux
+# transactions (replay Squirrel X). Désactivé par défaut : GEX_QUOTE_RECORD=1.
+QUOTE_COLUMNS = ("ts", "ts_exch", "bid", "bid_size", "ask", "ask_size")
+# Plafond du tampon entre deux vidanges (60 s) : au-delà, les cotations sont
+# abandonnées et comptées plutôt que de laisser gonfler la mémoire de la capture.
+QUOTE_BUFFER_MAX = 2_000_000
+
+
+def quote_recording_enabled() -> bool:
+    return (_env("GEX_QUOTE_RECORD") or "").strip() == "1"
+
 # Les deux futures suivis : le libellé sert de dossier de stockage
 # (data/ticks/NQ) et de code produit pour résoudre les contrats (cf. gex/roll).
 TRACKED_FUTURES: tuple[str, ...] = ("NQ", "ES")
+# Ticks seuls : écrits dans data/ticks/<produit>, mêmes colonnes que NQ/ES, et
+# servis par gex/ticksapi, sans aucune analyse (absorption, profil, bougies). GC
+# et CL ont déjà leurs bougies via rtquote : celles de la capture les écriraient
+# en double.
+TICK_ONLY_FUTURES: tuple[str, ...] = ("MNQ", "MES", "MGC", "GC", "CL", "MCL")
 
 # La session se recycle (reconnexion + reconstruction d'univers) à ce rythme :
 # suffisant pour rattraper un roll de contrat le jour dit et repartir sur une
@@ -123,8 +141,10 @@ class TickCapture:
     buffer sur disque toutes les ~30 s (cf. flush_ticks). Sans identifiants,
     `start()` est sans effet."""
 
-    def __init__(self, symbols: tuple[str, ...] = TRACKED_FUTURES) -> None:
+    def __init__(self, symbols: tuple[str, ...] = TRACKED_FUTURES + TICK_ONLY_FUTURES) -> None:
         self.symbols = tuple(symbols)
+        # dernier résultat de roll.resolve_pair : repli si l'API refuse un appel
+        self._pairs: dict[str, list[tuple[str, str]]] = {}
         self._buf: dict[str, dict[str, list[dict]]] = {}
         # ordre OFFICIEL des contrats par sous-jacent : [actif, suivant], tel que
         # le courtier les déclare. Sert de repli au choix de roll quand aucun
@@ -142,6 +162,20 @@ class TickCapture:
         # contrairement à rtquote.QUOTES qui est CONFLATÉ côté dxFeed). Exposé au
         # dashboard via capturebus pour le ticker de prix de la page /scalp.
         self._last: dict[str, float] = {}
+        # Dernière transaction du contrat ACTIF de chaque produit suivi, y compris
+        # ceux sans /scalp (MNQ, CL...) : (prix, taille, heure d'échange). Sert au
+        # canal `quote:<PRODUIT>` de Squirrel X (cf. live_quote, gex/livequote.py).
+        self._trade: dict[str, tuple[float, int, float]] = {}
+        # Enregistrement des cotations (cf. QUOTE_COLUMNS) : tampon par produit,
+        # contrat actif seulement ; `_active` = streamer du contrat actif -> produit.
+        self._record_quotes = quote_recording_enabled()
+        self._active: dict[str, str] = {}
+        self._qbuf: dict[str, list[tuple]] = {}
+        self._qcount = 0
+        self._qdropped = 0
+        # second test d'un excès, détecté en direct (cf. gex/secondtest.py) —
+        # NQ seulement, comme l'étude ; remis à zéro au changement de séance
+        self._second: dict[str, tuple[str, object]] = {}
         # Fenêtre glissante par sous-jacent (ICEBERG_WINDOW_S), pour la détection
         # d'absorption en direct — mêmes colonnes que les lignes écrites sur
         # disque (cf. record), directement consommables par gex.iceberg.
@@ -167,6 +201,25 @@ class TickCapture:
         with self._lock:
             return self._last.get(symbol)
 
+    def live_quote(self, symbol: str) -> dict | None:
+        """Meilleur bid / ask (avec tailles) et dernière transaction du contrat
+        ACTIF de `symbol`, tels que reçus de dxFeed sans regroupement. None tant
+        que ni cotation ni transaction ne sont arrivées."""
+        with self._lock:
+            pair = self._pairs.get(symbol)
+            if not pair:
+                return None
+            streamer, code = pair[0]
+            q, t = self._quotes.get(streamer), self._trade.get(symbol)
+            if not q and not t:
+                return None
+            out: dict = {"contract": code}
+            if q:
+                out.update(bid=q["bid"], ask=q["ask"], bid_size=q["bid_size"], ask_size=q["ask_size"])
+            if t:
+                out.update(last=t[0], last_size=t[1], last_t=t[2])
+            return out
+
     def recent_rows(self, symbol: str) -> list[dict]:
         """Copie des lignes des `ICEBERG_WINDOW_S` dernières secondes pour
         `symbol` — public : c'est le point testable de la détection d'absorption
@@ -191,8 +244,9 @@ class TickCapture:
             import pandas as pd
 
             from . import iceberg as ib
-            sw = ib.build_sweeps(pd.DataFrame(rows))
-            flags = sorted(ib.flag_absorption(sw, symbol), key=lambda f: f.end_ts)
+            # vectorisé (gex.iceberg.detect_absorptions) : quelques ms sur la
+            # fenêtre, au lieu d'une boucle Python par tick toutes les 2 s
+            flags = list(ib.detect_absorptions(pd.DataFrame(rows), symbol).itertuples())
         with self._lock:
             self._absorb_cache[symbol] = (now, flags)
         return flags
@@ -217,6 +271,13 @@ class TickCapture:
             return None
         return self._sweep_dict(max(fraiches, key=lambda s: s.ratio or 0.0), symbol)
 
+    def second_test(self, symbol: str, now: float | None = None) -> dict | None:
+        """Dernier second test d'excès de la séance, s'il est frais (cf.
+        gex/secondtest.py), ou None."""
+        with self._lock:
+            st = self._second.get(symbol)
+            return st[1].current(now if now is not None else time.time()) if st else None
+
     def absorption_recent(self, symbol: str, limit: int = 3,
                           now: float | None = None) -> list[dict]:
         """Les `limit` dernières salves détectées sur la fenêtre (`ICEBERG_WINDOW_S`),
@@ -226,7 +287,7 @@ class TickCapture:
         flags = self._absorption_flags(symbol, now)
         return [self._sweep_dict(f, symbol) for f in flags[-limit:][::-1]]
 
-    def quote(self, item: dict) -> None:
+    def quote(self, item: dict, now: float | None = None) -> None:
         """Retient l'état de la cotation d'un contrat (bid/ask, tailles).
 
         On garde AUSSI l'état précédent des tailles : une transaction et la mise
@@ -250,6 +311,29 @@ class TickCapture:
             else:
                 cur.update(prev_bid_size=old["bid_size"], prev_ask_size=old["ask_size"])
             self._quotes[sym] = cur
+            if self._record_quotes:
+                symbol = self._active.get(sym)
+                if symbol is None:
+                    return
+                if self._qcount >= QUOTE_BUFFER_MAX:
+                    self._qdropped += 1
+                    return
+                exch = max((v for k in ("time", "bidTime", "askTime")
+                            if isinstance(v := item.get(k), (int, float)) and v == v and v > 0),
+                           default=None)
+                self._qbuf.setdefault(symbol, []).append((
+                    time.time() if now is None else float(now),
+                    None if exch is None else exch / 1000.0,
+                    cur["bid"], cur["bid_size"], cur["ask"], cur["ask_size"]))
+                self._qcount += 1
+
+    def drain_quotes(self) -> tuple[dict[str, list[tuple]], int]:
+        """Récupère et vide le tampon des cotations : ({produit: lignes dans l'ordre
+        de `QUOTE_COLUMNS`}, nombre de cotations abandonnées faute de place)."""
+        with self._lock:
+            out, self._qbuf = self._qbuf, {}
+            dropped, self._qdropped, self._qcount = self._qdropped, 0, 0
+        return out, dropped
 
     def contract_order(self, symbol: str) -> list[str]:
         """[contrat actif, contrat suivant] pour `symbol`, ordre du courtier."""
@@ -328,6 +412,11 @@ class TickCapture:
             # TOUJOURS bufferisé, même le contrat SUIVANT : c'est la comparaison
             # de volume des deux qui décide du dominant (cf. gex/roll), après coup.
             self._buf.setdefault(symbol, {}).setdefault(contract, []).append(row)
+            active = self._order.get(symbol)
+            if (not active or contract == active[0]) and row["side"] in ("BUY", "SELL"):
+                self._trade[symbol] = (row["price"], row["volume"], row["ts"])
+            if symbol in TICK_ONLY_FUTURES:
+                return
             # ⚠️ Tout ce qui suit (spot affiché, absorption, volume profile,
             # bougie) est un agrégat PAR SOUS-JACENT, pas par contrat — il ne
             # doit voir que le contrat ACTIF déclaré par le courtier
@@ -368,6 +457,13 @@ class TickCapture:
             if row["side"] not in ("BUY", "SELL"):
                 return
             self._last[symbol] = float(price)
+            if symbol == "NQ":
+                from .secondtest import SecondTestTracker
+                st = self._second.get(symbol)
+                if st is None or st[0] != session:
+                    st = (session, SecondTestTracker())
+                    self._second[symbol] = st
+                st[1].feed(row["ts"], float(price))
             # bougie 1 min depuis les vraies transactions (cf. PriceBar)
             minute = int(row["ts"] // 60) * 60
             cur = self._price_bar.get(symbol)
@@ -431,9 +527,15 @@ class TickCapture:
         for label in self.symbols:
             try:
                 pair = roll.resolve_pair(label, access)
+                if pair:
+                    self._pairs[label] = pair
             except Exception:  # noqa: BLE001 — un référentiel muet n'en condamne pas deux
-                log.exception("Capture tick : contrats %s non résolus — exclu", label)
-                continue
+                pair = self._pairs.get(label)
+                if pair:
+                    log.warning("Capture tick : contrats %s non résolus — derniers connus", label)
+                else:
+                    log.exception("Capture tick : contrats %s non résolus — exclu", label)
+                    continue
             if not pair:
                 log.warning("Capture tick : aucun contrat %s — exclu", label)
                 continue
@@ -441,6 +543,8 @@ class TickCapture:
                 out[streamer] = (label, code)
             with self._lock:
                 self._order[label] = [code for _, code in pair]
+                self._active = {s: l for s, l in self._active.items() if l != label}
+                self._active[pair[0][0]] = label
         return out
 
     def _run(self) -> None:
@@ -534,7 +638,7 @@ class TickCapture:
                         if et == "TimeAndSale":
                             self.record(universe, item, now)
                         elif et == "Quote":
-                            self.quote(item)
+                            self.quote(item, now)
 
                 # Recyclage périodique : reconnexion + univers reconstruit (roll).
                 if time.monotonic() > deadline:

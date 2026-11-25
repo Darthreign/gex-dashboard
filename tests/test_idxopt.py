@@ -77,7 +77,12 @@ def test_spot_replie_sur_cboe_si_flux_muet(monkeypatch):
     monkeypatch.setattr(idxopt.QUOTES, "price", lambda k: None)
     monkeypatch.setattr(idxopt.ingest, "fetch_index_spot",
                         lambda sym, **k: (7400.0, pd.Timestamp("2026-07-29 09:30")))
+    monkeypatch.setattr(idxopt.SETTINGS, "cboe_enabled", True)
     assert idxopt.reference_spot("SPX") == pytest.approx(7400.0)
+    # source CBOE coupée (21/11/2026) : aucun appel, pas de spot plutôt qu'un 403
+    monkeypatch.setattr(idxopt.SETTINGS, "cboe_enabled", False)
+    monkeypatch.setattr(idxopt.ingest, "fetch_index_spot", lambda sym, **k: 1 / 0)
+    assert idxopt.reference_spot("SPX") is None
 
 
 def test_spot_none_sur_symbole_inconnu(monkeypatch):

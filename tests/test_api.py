@@ -287,17 +287,53 @@ def test_stream_route_refuse_les_symboles_hors_nq_es():
 
 
 def test_stream_route_emet_un_evenement_sse_par_changement(monkeypatch):
-    """Le flux SSE n'émet qu'au changement de prix, jamais à un rythme fixe :
-    trois valeurs successives dont un doublon -> deux événements seulement."""
-    from gex import api, capturebus
+    """Le flux SSE ne publie qu'au changement de prix, jamais à un rythme fixe :
+    trois valeurs successives dont un doublon -> deux publications seulement,
+    faites par UN producteur partagé (cf. gex/broadcast.py). Un abonné reçoit
+    le dernier prix publié."""
+    import time as _t
+    from gex import api, broadcast, capturebus
+    broadcast._channels.pop(("price", "NQ"), None)
     monkeypatch.setattr(capturebus, "remote_url", lambda: None)
     valeurs = iter([30500.0, 30500.0, 30500.25])
     monkeypatch.setattr(api, "_futures_last_price", lambda s: next(valeurs, 30500.25))
-    monkeypatch.setattr(api.time, "sleep", lambda s: None)   # la boucle ne doit pas dormir en test
 
     resp = _client().get("/api/v1/NQ/stream")
     assert resp.mimetype == "text/event-stream"
     gen = resp.response
-    first = next(gen)
-    second = next(gen)
-    assert first == b"data: 30500.0\n\n" and second == b"data: 30500.25\n\n"
+    assert next(gen) in (b"data: 30500.0\n\n", b"data: 30500.25\n\n")
+    _t.sleep(0.5)
+    ch = broadcast._channels[("price", "NQ")]
+    assert ch._version == 2 and ch._payload == "data: 30500.25\n\n"
+    gen.close()
+
+
+def test_levels_expose_statut_du_flip_et_book():
+    _seed("TST9")
+    c = _client()
+    body = c.get("/api/v1/TST9/levels").get_json()
+    assert body["zero_gamma_status"] in ("ok", "no_flip", "no_data")
+    assert "zero_gamma_moneyness" in body and body["scale_warning"] is None
+    book = c.get("/api/v1/TST9/book").get_json()
+    assert book["net_gex_book"] == pytest.approx(book["net_gex_naive"])  # aucun print
+
+
+def test_levels_transposition_croisee_signalee(monkeypatch):
+    from gex import app as app_mod
+    _seed("SPX")
+    monkeypatch.setattr(app_mod, "_transform_for", lambda s, k: ((lambda v: v * 3.6), 3.6, "ratio"))
+    body = _client().get("/api/v1/SPX/levels?scale=NDX").get_json()
+    assert body["scale_warning"] and "dérive" in body["scale_warning"]
+
+
+def test_levels_expose_le_notionnel_de_l_open_interest():
+    """Σ OI × multiplicateur × spot : 100 calls et 200 puts au strike 100, spot 100."""
+    _seed("TSTN")
+    body = _client().get("/api/v1/TSTN/levels?bucket=Tout").get_json()
+    mur = body["gex_walls"][0]
+    assert mur["notional_calls"] == pytest.approx(100 * 100 * 100.0)
+    assert mur["notional_puts"] == pytest.approx(200 * 100 * 100.0)
+    assert mur["notional"] == pytest.approx(3_000_000.0)
+    assert body["notional_total"] == pytest.approx(3_000_000.0)
+    assert body["notional_calls_total"] + body["notional_puts_total"] == body["notional_total"]
+    assert "gex_gross" in mur                      # champs ajoutés, rien de retiré

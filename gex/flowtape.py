@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 import requests
 
 from .config import CONTRACT_MULTIPLIER
+from .greeks import gex_dollars
 from .rtquote import (
     BACKOFF_MAX,
     BACKOFF_START,
@@ -149,12 +150,22 @@ class FlowBar:
     hedge_call_sell: float = 0.0    # preneur VEND des calls    (dealer achète des calls)
     hedge_put_buy: float = 0.0      # preneur ACHÈTE des puts   (dealer vend des puts)
     hedge_put_sell: float = 0.0     # preneur VEND des puts     (dealer achète des puts)
+    # Notionnel BRUT traité, en $ de sous-jacent, sans signe : taille ×
+    # multiplicateur × spot de CHAQUE print (combos et agresseur inconnu compris).
+    # Une taille d'activité, pas une direction ; rien n'est compté sans spot.
+    notional_calls: float = 0.0
+    notional_puts: float = 0.0
     buy_contracts: float = 0.0      # bruts, pour retrouver le volume total
     sell_contracts: float = 0.0
     prints: int = 0
     spread_contracts: float = 0.0   # jambes de combos, isolées volontairement
     spread_prints: int = 0
     undefined_prints: int = 0       # agresseur non renseigné : ni compté, ni caché
+    # multiplicateur utilisé pour les montants en dollars de la barre et sa
+    # provenance (contrat / courtier / specification, cf. multiplier_info) ;
+    # vide si aucun print n'a pu être valorisé
+    mult: float | None = None
+    mult_source: str | None = None
 
     def as_row(self, symbol: str, timestamp) -> dict:
         return {
@@ -169,6 +180,7 @@ class FlowBar:
             "hedge_call_sell": self.hedge_call_sell,
             "hedge_put_buy": self.hedge_put_buy,
             "hedge_put_sell": self.hedge_put_sell,
+            "notional_calls": self.notional_calls, "notional_puts": self.notional_puts,
             "delta_prints": float(self.delta_prints),
             "no_delta_prints": float(self.no_delta_prints),
             "buy_contracts": self.buy_contracts, "sell_contracts": self.sell_contracts,
@@ -176,6 +188,7 @@ class FlowBar:
             "spread_contracts": self.spread_contracts,
             "spread_prints": float(self.spread_prints),
             "undefined_prints": float(self.undefined_prints),
+            "mult": self.mult, "mult_source": self.mult_source,
             "source": "dxfeed",
         }
 
@@ -217,15 +230,74 @@ def strike_of(streamer_symbol: str) -> float | None:
     return None
 
 
-def multiplier_of(symbol: str) -> float:
-    """Multiplicateur $/point du contrat d'option.
+# Valeur du point des futures suivis, spécification CME : E-mini Nasdaq-100
+# 20 $ × l'indice, E-mini S&P 500 50 $ × l'indice. Une option sur ces futures
+# porte sur UN contrat : même valeur du point. Mêmes valeurs que
+# moc.FAMILIES["fut_mult"]. Référence tant que l'API courtier n'a pas répondu.
+FUTURE_POINT_VALUE: dict[str, float] = {"NQ": 20.0, "ES": 50.0}
 
-    100 pour les indices et ETF ; le notionnel du future pour NQ/ES, où un
-    point ne vaut pas la même chose (20 $ sur NQ, 50 sur ES). Sans cette
-    distinction, les primes ne seraient pas comparables d'un marché à l'autre.
+
+def multiplier_info(symbol: str) -> tuple[float | None, str | None]:
+    """(multiplicateur $/point, provenance) — provenance : « contrat » (indices
+    et ETF, 100), « courtier » (valeur du point lue chez le courtier),
+    « specification » (repli sur la spécification CME), None si inconnu."""
+    kind = TRACKED.get(symbol)
+    if kind == "index":
+        return float(CONTRACT_MULTIPLIER), "contrat"
+    if kind == "future":
+        from .futopt import _multiplier_cache
+        live = _multiplier_cache.get(symbol)
+        if live:
+            return float(live), "courtier"
+        ref = FUTURE_POINT_VALUE.get(symbol)
+        if ref:
+            return float(ref), "specification"
+    return None, None
+
+
+def multiplier_of(symbol: str) -> float | None:
+    """Multiplicateur $/point du contrat d'option, ou None s'il est inconnu.
+
+    100 pour les indices et ETF ; la valeur du point du future pour NQ/ES (20 $
+    sur NQ, 50 sur ES), sans quoi primes et expositions ne seraient pas
+    comparables d'un marché à l'autre. Pour un future : celle lue chez le
+    courtier (`futopt.get_multiplier`, mise en cache) si elle est connue,
+    sinon la spécification du contrat (`FUTURE_POINT_VALUE`).
+
+    ⚠️ Jamais de 100 par défaut pour un future : jusqu'au 10/10/2026, un cache
+    vide (démarrage de la capture, ou capture séparée sans moteur, qui ne
+    collecte aucune chaîne) faisait retomber NQ sur 100 au lieu de 20 (×5) et
+    ES sur 100 au lieu de 50 (×2). Un produit inconnu renvoie None : l'appelant
+    n'en calcule aucune exposition en dollars (cf. `ingest_print`).
     """
-    from .futopt import _multiplier_cache
-    return float(_multiplier_cache.get(symbol, CONTRACT_MULTIPLIER))
+    return multiplier_info(symbol)[0]
+
+
+def resolve_future_multiplier(symbol: str, access_token: str) -> float | None:
+    """Lit chez le courtier la valeur du point du future (mise en cache pour
+    `multiplier_of`) dès la construction de l'univers, avant le premier print.
+    En cas d'échec réseau, la spécification du contrat sert de repli ; un écart
+    entre les deux est journalisé (il signalerait un mauvais contrat)."""
+    from . import futopt
+    try:
+        live = futopt.get_multiplier(symbol, access_token)
+    except Exception as exc:  # noqa: BLE001 — le repli sur la spécification suffit
+        live = None
+        log.warning("%s : valeur du point introuvable chez le courtier (%s) — "
+                    "spécification du contrat utilisée", symbol, exc)
+    else:
+        if not live:
+            log.warning("%s : le courtier n'a renvoyé aucune valeur du point — "
+                        "spécification du contrat utilisée", symbol)
+    ref = FUTURE_POINT_VALUE.get(symbol)
+    if live and ref and abs(live - ref) > 1e-9:
+        log.warning("%s : valeur du point courtier %.2f ≠ spécification %.2f — "
+                    "valeur courtier retenue", symbol, live, ref)
+    mult, source = multiplier_info(symbol)
+    # ligne à chercher dans capture.log pour vérifier le démarrage
+    log.info("%s : valeur du point des options %s $ (%s)", symbol,
+             f"{mult:g}" if mult else "inconnue", source or "aucune source")
+    return mult
 
 
 def build_index_universe(symbol: str, spot: float, access_token: str,
@@ -302,6 +374,15 @@ class FlowTape:
     # figé au spot de construction, `_center` l'est délibérément — c'est le
     # point de référence de la fenêtre, pas une estimation du prix courant.
     _center: dict[str, float] = field(default_factory=dict)
+    # Contrats échangés par contrat (streamer) depuis le début de la séance
+    # CME en cours (bascule à 18h00 ET), tous prints confondus : complète le
+    # volume des salves de chaîne entre deux collectes (cf. futopt.reprice_native).
+    _vol: dict[str, float] = field(default_factory=dict)
+    _vol_day: str = ""
+    _vol_seq: int = 0
+    _vol_changed: dict[str, int] = field(default_factory=dict)
+    # prints dont le multiplicateur est inconnu (cf. multiplier_of)
+    _unpriced: dict[str, int] = field(default_factory=dict)
     _started: bool = False
     _state: str = "off"
 
@@ -337,6 +418,7 @@ class FlowTape:
 
         minute = int(now // 60) * 60
         with self.lock:
+            self._count_volume(stream, float(size), now)
             bar = self.bars.get(symbol)
             if bar is None:
                 self.bars[symbol] = bar = FlowBar(minute)
@@ -355,6 +437,15 @@ class FlowTape:
             # d'agrégation — combos et côté indéterminé compris, marqués pour
             # que le lecteur les voie plutôt qu'ils disparaissent en silence.
             self._record_print(symbol, stream, item, price, size, now)
+
+            # Notionnel brut : avant les filtres ci-dessous, il compte tout.
+            gross_mult, gross_spot = multiplier_of(symbol), self._spot.get(symbol)
+            if gross_mult is not None and gross_spot:
+                gross_typ = option_type_of(stream or "")
+                if gross_typ == "C":
+                    bar.notional_calls += size * gross_mult * gross_spot
+                elif gross_typ == "P":
+                    bar.notional_puts += size * gross_mult * gross_spot
 
             # Jambe de combo : comptée à part. La classer en directionnel
             # fausserait le flux net (cf. docstring du module).
@@ -402,7 +493,14 @@ class FlowTape:
             else:
                 bar.sell_contracts += size
 
-            mult = multiplier_of(symbol)
+            mult, mult_src = multiplier_info(symbol)
+            if mult is None:
+                # Multiplicateur introuvable : le print reste compté en
+                # contrats (ci-dessus), mais aucune exposition en dollars n'est
+                # calculée — mieux vaut un trou signalé qu'un montant faux.
+                self._unpriced_print(symbol)
+                return
+            bar.mult, bar.mult_source = mult, mult_src
             # Prime encaissée par le dealer : + quand le preneur ACHÈTE (le
             # dealer vend et encaisse), − quand le preneur vend. En valeur
             # c'est la prime que paie le preneur, vue de l'autre côté.
@@ -445,12 +543,43 @@ class FlowTape:
             # lieu de les empiler tous du même côté.
             gamma = self._gamma.get(stream)
             if gamma is not None and spot and type_sign:
-                g = sign * type_sign * size * gamma * mult * spot ** 2 * 0.01
+                g = gex_dollars(sign * type_sign, gamma, size, mult, spot)
                 bar.net_gamma += g
                 if typ == "C":
                     bar.net_gamma_calls += g
                 elif typ == "P":
                     bar.net_gamma_puts += g
+
+    def _unpriced_print(self, symbol: str) -> None:
+        """Print sans multiplicateur connu (appelé sous `self.lock`) : compté,
+        et signalé une fois par sous-jacent dans le journal."""
+        n = self._unpriced.get(symbol, 0) + 1
+        self._unpriced[symbol] = n
+        if n == 1:
+            log.warning("%s : multiplicateur du contrat inconnu — prints comptés en "
+                        "contrats, sans exposition en dollars", symbol)
+
+    def unpriced_prints(self) -> dict[str, int]:
+        """Prints ignorés pour le calcul en dollars, par sous-jacent (diagnostic)."""
+        with self.lock:
+            return dict(self._unpriced)
+
+    def _count_volume(self, stream: str, size: float, now: float) -> None:
+        """Cumul de séance par contrat (appelé sous `self.lock`)."""
+        from .tickcapture import _session_day
+        day = _session_day(now)
+        if day != self._vol_day:
+            self._vol_day = day
+            self._vol = {}
+            self._vol_changed = {}
+        self._vol[stream] = self._vol.get(stream, 0.0) + size
+        self._vol_seq += 1
+        self._vol_changed[stream] = self._vol_seq
+
+    def contract_volumes(self) -> dict[str, float]:
+        """streamer -> contrats échangés depuis le début de la séance."""
+        with self.lock:
+            return dict(self._vol)
 
     def _record_print(self, symbol: str, stream: str, item: dict,
                       price, size: float, now: float) -> None:
@@ -462,7 +591,8 @@ class FlowTape:
         """
         side = item.get("aggressorSide")
         px = float(price) if isinstance(price, (int, float)) and price == price else None
-        notional = (px * size * multiplier_of(symbol)) if px is not None else None
+        mult = multiplier_of(symbol)
+        notional = (px * size * mult) if px is not None and mult is not None else None
         buf = self._prints.get(symbol)
         if buf is None:
             buf = self._prints[symbol] = deque(maxlen=PRINT_BUFFER)
@@ -649,14 +779,19 @@ class FlowTape:
                      else min(len(q), self._seq_pts.get(s, 0) - mt.get(s, 0)))
                 if m > 0:
                     pts[s] = [list(q[i]) for i in range(len(q) - m, len(q))]
-            new_marks = {"prints": dict(self._seq_prints), "pts": dict(self._seq_pts)}
+            mv = -1 if snap else marks.get("vol", -1)
+            vol = {k: v for k, v in self._vol.items()
+                   if snap or self._vol_changed.get(k, 0) > mv}
+            vol_day = self._vol_day
+            new_marks = {"prints": dict(self._seq_prints), "pts": dict(self._seq_pts),
+                         "vol": self._vol_seq}
         rows = {}
         for s in symbols:
             rows[s] = [{**r, "timestamp": r["timestamp"].isoformat()}
                        for r in self.live_rows(s)]
         state, n = self.status()
         return ({"snapshot": snap, "prints": prints, "pts": pts, "rows": rows,
-                 "status": [state, n]}, new_marks)
+                 "status": [state, n], "vol": vol, "vol_day": vol_day}, new_marks)
 
     def live_rows(self, symbol: str) -> list[dict]:
         """Barres de `symbol` pas encore écrites sur disque : les achevées en
@@ -707,6 +842,7 @@ class FlowTape:
         for symbol, kind in TRACKED.items():
             try:
                 if kind == "future":
+                    resolve_future_multiplier(symbol, access)
                     spot = futopt._reference_spot(symbol, access)
                     syms = (build_future_universe(symbol, spot, access)
                             if spot else [])

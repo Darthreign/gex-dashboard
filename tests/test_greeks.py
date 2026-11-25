@@ -121,3 +121,24 @@ def test_implied_vol_round_trip():
 def test_implied_vol_below_intrinsic_is_nan():
     iv = greeks.implied_vol(np.array([1.0]), 100.0, 80.0, 0.1, R, np.array([True]))
     assert np.isnan(iv[0])
+
+
+def test_gex_dollars_convention():
+    from gex.greeks import gex_dollars
+    # gamma 0.001 × OI 10 × mult 100 × spot² (5000²) × 0.01
+    assert gex_dollars(1.0, 0.001, 10, 100, 5000.0) == pytest.approx(0.001 * 10 * 100 * 5000.0**2 * 0.01)
+    assert gex_dollars(-1.0, 0.001, 10, 100, 5000.0) < 0
+    grid = np.array([4900.0, 5000.0])
+    assert gex_dollars(1.0, 0.001, 10, 100, grid).shape == (2,)
+
+
+def test_theta_avec_portage():
+    """Sans le terme de portage, le thêta est faux dès que q ≠ 0. Contrôle par
+    différence finie du prix dans le temps, et parité call − put."""
+    import numpy as np
+    q, h = 0.03, 1e-5
+    for theta, price in ((greeks.call_theta, greeks.call_price), (greeks.put_theta, greeks.put_price)):
+        num = (price(S, K, T - h, R, SIG, q) - price(S, K, T + h, R, SIG, q)) / (2 * h)
+        assert theta(S, K, T, R, SIG, q) == pytest.approx(num, rel=1e-5)
+    parite = q * S * np.exp(-q * T) - R * K * np.exp(-R * T)
+    assert greeks.call_theta(S, K, T, R, SIG, q) - greeks.put_theta(S, K, T, R, SIG, q) == pytest.approx(parite)

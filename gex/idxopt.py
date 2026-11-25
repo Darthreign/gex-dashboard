@@ -40,8 +40,9 @@ import pandas as pd
 import requests
 
 from . import ingest
-from .config import CONTRACT_MULTIPLIER, UNDERLYINGS
+from .config import CONTRACT_MULTIPLIER, SETTINGS, UNDERLYINGS
 from .futopt import DEFAULT_MAX_DAYS, DEFAULT_WINDOW, _collect, enrich_native, filter_chain
+from .metrics import AM_SETTLED_ROOTS
 from .rtquote import QUOTES, quote_token
 
 log = logging.getLogger(__name__)
@@ -81,6 +82,8 @@ def fetch_chain_instruments(symbol: str, access_token: str) -> pd.DataFrame:
         root = item.get("root-symbol")
         for exp in item.get("expirations", []):
             expiry = pd.Timestamp(exp["expiration-date"]).date()
+            st = str(exp.get("settlement-type") or "").upper()
+            settle_am = st == "AM" if st in ("AM", "PM") else root in AM_SETTLED_ROOTS
             for st in exp.get("strikes", []):
                 strike = float(st["strike-price"])
                 for cp, key in (("C", "call-streamer-symbol"),
@@ -89,7 +92,8 @@ def fetch_chain_instruments(symbol: str, access_token: str) -> pd.DataFrame:
                     if stream:
                         rows.append({"strike": strike, "type": cp, "expiry": expiry,
                                      "streamer_symbol": stream,
-                                     "underlying_symbol": root})
+                                     "underlying_symbol": root,
+                                     "settle_am": settle_am})
     return pd.DataFrame(rows)
 
 
@@ -106,8 +110,8 @@ def reference_spot(symbol: str) -> float | None:
     if live:
         return float(live)
     u = UNDERLYINGS.get(symbol)
-    if u is None:
-        return None
+    if u is None or not SETTINGS.cboe_enabled:
+        return None                 # pas de repli possible : source CBOE coupée
     try:
         spot, _ = ingest.fetch_index_spot(u.cboe_symbol)
         log.info("%s : spot temps réel indisponible, repli sur le spot CBOE", symbol)
