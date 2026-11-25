@@ -28,7 +28,10 @@ from .rtquote import QUOTES, Bar
 
 # VIX (25/11/2026) : servi sur la même fenêtre 09:30-16:00 que les autres, bien
 # qu'il cote de 03:15 à 16:15 ; l'appli ignore les bougies hors de cette fenêtre.
-SYMBOLS = ("QQQ", "NDX", "SPX", "SPY", "VIX")
+SYMBOLS = ("QQQ", "NDX", "SPX", "SPY", "VIX", "VXN")
+# VXN (26/11/2026) : VXN RECALCULE (gex/vxnlive.py), pas l'indice officiel CBOE.
+# Bougies 1 min sur disque sous VXN_CALC ; avant le 26/11, un point par 15 min.
+DIRS = {"VXN": "VXN_CALC"}
 NY = ZoneInfo("America/New_York")
 OPEN_MIN, CLOSE_MIN = 9 * 60 + 30, 16 * 60
 COLUMNS = ["ts", "open", "high", "low", "close"]
@@ -46,7 +49,7 @@ _file_bars: dict[Path, tuple[tuple[int, int], dict]] = {}
 
 
 def _root(symbol: str) -> Path:
-    return SETTINGS.data_dir / "prices" / symbol
+    return SETTINGS.data_dir / "prices" / DIRS.get(symbol, symbol)
 
 
 def _weekday(day: str) -> bool:
@@ -190,5 +193,10 @@ def bar_producer(symbol: str, quotes=QUOTES, clock=time.time, file_bar=_file_bar
 
 def feed_channels(cash: str | None) -> dict[str, broadcast.Channel]:
     """Canaux `bar:<SYMBOLE>` demandés par `cash=QQQ,SPX` ; un symbole inconnu est ignoré."""
-    return {f"bar:{s}": broadcast.channel(("cash-bar", s), lambda s=s: bar_producer(s), FEED_INTERVAL_S)
+    from .vxnlive import LIVE_BARS
+
+    def make(s):
+        # VXN : bougie en cours publiée par la capture (seul process qui le calcule)
+        return bar_producer(s, quotes=LIVE_BARS) if s == "VXN" else bar_producer(s)
+    return {f"bar:{s}": broadcast.channel(("cash-bar", s), lambda s=s: make(s), FEED_INTERVAL_S)
             for s in (cash or "").split(",") if s in SYMBOLS}

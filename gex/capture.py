@@ -76,6 +76,8 @@ def main(host=None, port: int = DEFAULT_PORT) -> None:
     CAPTURE.start()         # les ticks ne dépendent pas du spot : on ne les fait pas attendre
     attendre_spot()         # le tape, lui, a besoin du premier prix pour son univers
     TAPE.start()
+    from .vxnlive import LIVE as VXN_LIVE
+    VXN_LIVE.start()        # VXN recalculé en continu, séance cash seulement
     if engine:
         scheduler.start_initial_pulls()
         from . import app as app_mod

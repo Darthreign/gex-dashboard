@@ -425,6 +425,9 @@ def pull_vxn_live() -> None:
     options NDX ne cotent pas en dehors."""
     if not credentials_present() or not market_is_open():
         return
+    from .vxnlive import LIVE
+    if LIVE.fresh():
+        return                  # le calcul continu (gex/vxnlive.py) tourne : repli inutile
     try:
         vxn.update_live()
     except Exception:  # noqa: BLE001 — un échec ne doit rien casser d'autre
