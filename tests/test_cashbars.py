@@ -171,6 +171,18 @@ def test_canaux_du_flux(monkeypatch):
     assert set(ticksapi.stream_channels(None, "QQQ,SPX,NQ,x")) == {"bar:QQQ", "bar:SPX"}
     assert set(ticksapi.stream_channels("NQ", "QQQ")) == {"levels:NQ", "bar:QQQ"}
     assert ticksapi.stream_channels("CL", "AAPL") == {}
+    assert set(ticksapi.stream_channels(None, "VIX")) == {"bar:VIX"}
+
+
+def test_vix_servi_sur_la_fenetre_cash(env):
+    client, root = env
+    _write(root, "VIX", "2026-11-23", ["03:15", "09:30", "15:59", "16:10"])   # séance étendue CBOE
+    r = client.get("/api/v1/ticks/bars/VIX/days", headers=AUTH)
+    assert r.status_code == 200 and r.get_json() == {"days": ["2026-11-23"]}
+    df = pd.read_parquet(io.BytesIO(
+        client.get("/api/v1/ticks/bars/VIX/2026-11-23.parquet", headers=AUTH).data))
+    assert df["ts"].tolist() == [int(pd.Timestamp("2026-11-23 14:30", tz="UTC").timestamp()),
+                                 int(pd.Timestamp("2026-11-23 20:59", tz="UTC").timestamp())]
 
 
 def test_regroupement_du_flux_spot(monkeypatch):

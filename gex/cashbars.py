@@ -1,4 +1,4 @@
-"""Bougies 1 minute des sous-jacents cash (QQQ, NDX, SPX, SPY) pour Squirrel X.
+"""Bougies 1 minute des sous-jacents cash (QQQ, NDX, SPX, SPY) et du VIX pour Squirrel X.
 
 Affichage seulement : ni transactions ni volume. Deux lectures, toutes deux
 bornées à la séance cash (09:30–16:00 New York, jours ouvrés) :
@@ -26,7 +26,9 @@ from . import broadcast, store
 from .config import SETTINGS
 from .rtquote import QUOTES, Bar
 
-SYMBOLS = ("QQQ", "NDX", "SPX", "SPY")
+# VIX (25/11/2026) : servi sur la même fenêtre 09:30-16:00 que les autres, bien
+# qu'il cote de 03:15 à 16:15 ; l'appli ignore les bougies hors de cette fenêtre.
+SYMBOLS = ("QQQ", "NDX", "SPX", "SPY", "VIX")
 NY = ZoneInfo("America/New_York")
 OPEN_MIN, CLOSE_MIN = 9 * 60 + 30, 16 * 60
 COLUMNS = ["ts", "open", "high", "low", "close"]
